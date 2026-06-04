@@ -14,7 +14,7 @@ mock / pcap replay / live NIC -> 5s aggregation -> Redis / ClickHouse -> Go API 
 - ClickHouse writes through HTTP.
 - Redis realtime TopN writes through RESP.
 - Go API for summary, timeseries, TopN, service recognition dimensions, VLAN/QoS dimensions, profiles, assets, alerts, health, and `/metrics`.
-- Vue 3 console with live monitoring, traffic analysis, service recognition, service exposure, asset inventory, alerts, search, history, and collector controls.
+- Vue 3 console with live monitoring, traffic analysis, service recognition, service exposure, QoS insights, asset inventory, alerts, search, history, and collector controls.
 - Collector online/offline health is inferred from the latest 5 second window.
 
 ## Local Development

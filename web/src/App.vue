@@ -596,6 +596,15 @@ const refresh = async () => {
         bytes: 24000000,
         packets: 9000,
         score: 6
+      },
+      {
+        kind: 'qos_mark',
+        severity: 'info',
+        subject: 'dscp:AF31',
+        summary: '发现非默认 DSCP/QoS 标记流量',
+        bytes: 12000000,
+        packets: 4200,
+        score: 45
       }
     ];
     trafficAnalysis.value = {
@@ -894,7 +903,10 @@ const insightKindText = (kind: string) => {
   const labels: Record<string, string> = {
     heavy_flow: '重流量会话',
     fanout: '主机扇出',
-    sensitive_port: '敏感端口'
+    sensitive_port: '敏感端口',
+    service_risk: '高风险服务',
+    qos_mark: 'QoS 标记',
+    ecn_mark: 'ECN 标记'
   };
   return labels[kind] ?? kind;
 };

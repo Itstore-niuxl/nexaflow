@@ -887,8 +887,10 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	flows, flowErr := s.TopN(ctx, "flow", "src", limit, minutes)
 	fanouts, fanoutErr := s.fanoutInsights(ctx, minutes, limit)
 	ports, portErr := s.sensitivePortInsights(ctx, minutes, limit)
+	serviceRisks, serviceRiskErr := s.serviceRiskInsights(ctx, minutes, limit)
+	qosMarks, qosErr := s.qosInsights(ctx, minutes, limit)
 
-	items := make([]map[string]any, 0, len(flows)+len(fanouts)+len(ports))
+	items := make([]map[string]any, 0, len(flows)+len(fanouts)+len(ports)+len(serviceRisks)+len(qosMarks))
 	for _, flow := range flows {
 		if len(items) >= limit {
 			break
@@ -916,6 +918,8 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	}
 	items = append(items, fanouts...)
 	items = append(items, ports...)
+	items = append(items, serviceRisks...)
+	items = append(items, qosMarks...)
 	sort.Slice(items, func(i, j int) bool {
 		if insightWeight(stringValue(items[i]["severity"])) != insightWeight(stringValue(items[j]["severity"])) {
 			return insightWeight(stringValue(items[i]["severity"])) > insightWeight(stringValue(items[j]["severity"]))
@@ -925,10 +929,10 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	if len(items) == 0 && (totalErr != nil || flowErr != nil || fanoutErr != nil || portErr != nil) {
-		return demoSecurityInsights(), firstErr(totalErr, flowErr, fanoutErr, portErr)
+	if len(items) == 0 && (totalErr != nil || flowErr != nil || fanoutErr != nil || portErr != nil || serviceRiskErr != nil || qosErr != nil) {
+		return demoSecurityInsights(), firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr)
 	}
-	return items, firstErr(totalErr, flowErr, fanoutErr, portErr)
+	return items, firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr)
 }
 
 func (s *Store) ipStats(ctx context.Context, ip string, minutes int) (map[string]model.TopItem, error) {
@@ -1194,6 +1198,104 @@ FORMAT JSON`, s.database, minutes, limit)
 			"bytes":    row["bytes"],
 			"packets":  row["packets"],
 			"score":    70,
+		})
+	}
+	return items, nil
+}
+
+func (s *Store) serviceRiskInsights(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT dim_key AS risk, sum(bytes) AS bytes, sum(packets) AS packets
+FROM %s.dimension_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+    AND dimension = 'service_risk'
+    AND dim_key IN ('critical','high')
+GROUP BY risk
+ORDER BY bytes DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0, len(parsed.Data))
+	for _, row := range parsed.Data {
+		risk := stringValue(row["risk"])
+		severity := "warning"
+		score := 75
+		if risk == "critical" {
+			severity = "critical"
+			score = 90
+		}
+		items = append(items, map[string]any{
+			"kind":     "service_risk",
+			"severity": severity,
+			"subject":  "service_risk:" + risk,
+			"summary":  "发现高风险服务类型流量",
+			"bytes":    row["bytes"],
+			"packets":  row["packets"],
+			"score":    score,
+		})
+	}
+	return items, nil
+}
+
+func (s *Store) qosInsights(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	ecnItems, ecnErr := s.qosDimensionInsights(ctx, "ecn", []string{"CE", "ECT(0)", "ECT(1)"}, "ecn_mark", "发现 ECN 拥塞/可拥塞传输标记", minutes, limit)
+	dscpItems, dscpErr := s.qosDimensionInsights(ctx, "dscp", []string{"EF", "AF11", "AF12", "AF13", "AF21", "AF22", "AF23", "AF31", "AF32", "AF33", "AF41", "AF42", "AF43", "CS5", "CS6", "CS7"}, "qos_mark", "发现非默认 DSCP/QoS 标记流量", minutes, limit)
+	items := append(ecnItems, dscpItems...)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, firstErr(ecnErr, dscpErr)
+}
+
+func (s *Store) qosDimensionInsights(ctx context.Context, dimension string, keys []string, kind, summary string, minutes, limit int) ([]map[string]any, error) {
+	quoted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		quoted = append(quoted, "'"+escape(key)+"'")
+	}
+	q := fmt.Sprintf(`SELECT dim_key AS mark, sum(bytes) AS bytes, sum(packets) AS packets
+FROM %s.dimension_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+    AND dimension = '%s'
+    AND dim_key IN (%s)
+GROUP BY mark
+ORDER BY bytes DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, escape(dimension), strings.Join(quoted, ","), limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0, len(parsed.Data))
+	for _, row := range parsed.Data {
+		mark := stringValue(row["mark"])
+		severity := "info"
+		score := 45
+		if mark == "CE" || mark == "EF" || mark == "CS6" || mark == "CS7" {
+			severity = "warning"
+			score = 65
+		}
+		items = append(items, map[string]any{
+			"kind":     kind,
+			"severity": severity,
+			"subject":  dimension + ":" + mark,
+			"summary":  summary,
+			"bytes":    row["bytes"],
+			"packets":  row["packets"],
+			"score":    score,
 		})
 	}
 	return items, nil
