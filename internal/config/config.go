@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nexaflow/internal/model"
 )
 
 type Config struct {
@@ -39,11 +41,12 @@ type CaptureRuntime struct {
 }
 
 type Alerts struct {
-	FlowBytes        uint64   `json:"flow_bytes"`
-	FlowShare        float64  `json:"flow_share"`
-	SourcePackets    uint64   `json:"source_packets"`
-	LinkUtilization  float64  `json:"link_utilization"`
-	SilencedSubjects []string `json:"silenced_subjects"`
+	FlowBytes        uint64                `json:"flow_bytes"`
+	FlowShare        float64               `json:"flow_share"`
+	SourcePackets    uint64                `json:"source_packets"`
+	LinkUtilization  float64               `json:"link_utilization"`
+	SilencedSubjects []string              `json:"silenced_subjects"`
+	DetectionRules   []model.DetectionRule `json:"detection_rules"`
 }
 
 func Load() Config {
@@ -158,6 +161,44 @@ func defaultAlerts() Alerts {
 		FlowShare:       0.30,
 		SourcePackets:   50,
 		LinkUtilization: 0.80,
+		DetectionRules: []model.DetectionRule{
+			{
+				ID:                "rule-src-heavy-bytes",
+				Name:              "源 IP 大流量",
+				Category:          "流量阈值",
+				Metric:            "src_ip_bytes",
+				Operator:          "gte",
+				Threshold:         100 * 1024 * 1024,
+				Severity:          "warning",
+				Enabled:           true,
+				Description:       "识别观察窗口内单个源 IP 的大流量行为",
+				RecommendedAction: "确认源主机业务用途，检查是否存在备份、同步或异常外传行为",
+			},
+			{
+				ID:                "rule-external-session-burst",
+				Name:              "公网会话突增",
+				Category:          "公网访问",
+				Metric:            "external_sessions",
+				Operator:          "gte",
+				Threshold:         30,
+				Severity:          "critical",
+				Enabled:           true,
+				Description:       "识别公网对端和内部资产之间的高会话数访问",
+				RecommendedAction: "核对公网来源、服务端口和防火墙策略，必要时收敛来源或加入白名单",
+			},
+			{
+				ID:                "rule-peak-throughput",
+				Name:              "峰值吞吐过高",
+				Category:          "链路健康",
+				Metric:            "link_peak_mbps",
+				Operator:          "gte",
+				Threshold:         80,
+				Severity:          "warning",
+				Enabled:           true,
+				Description:       "识别观察窗口内链路峰值吞吐过高的情况",
+				RecommendedAction: "结合历史回放和 TopN 对象定位峰值来源，确认是否需要扩容或限速",
+			},
+		},
 	}
 }
 
@@ -176,7 +217,48 @@ func normalizeAlerts(alerts Alerts) Alerts {
 		alerts.LinkUtilization = defaults.LinkUtilization
 	}
 	alerts.SilencedSubjects = normalizeSilencedSubjects(alerts.SilencedSubjects)
+	alerts.DetectionRules = normalizeDetectionRules(alerts.DetectionRules, defaults.DetectionRules)
 	return alerts
+}
+
+func normalizeDetectionRules(rules, fallback []model.DetectionRule) []model.DetectionRule {
+	if len(rules) == 0 {
+		rules = fallback
+	}
+	seen := map[string]bool{}
+	result := []model.DetectionRule{}
+	for _, rule := range rules {
+		rule.ID = strings.TrimSpace(rule.ID)
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.Category = strings.TrimSpace(rule.Category)
+		rule.Metric = strings.TrimSpace(rule.Metric)
+		rule.Match = strings.TrimSpace(rule.Match)
+		rule.Operator = strings.TrimSpace(rule.Operator)
+		rule.Severity = strings.TrimSpace(rule.Severity)
+		rule.Description = strings.TrimSpace(rule.Description)
+		rule.RecommendedAction = strings.TrimSpace(rule.RecommendedAction)
+		if rule.ID == "" {
+			rule.ID = "rule-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		}
+		if seen[rule.ID] || rule.Name == "" || rule.Metric == "" || rule.Threshold <= 0 {
+			continue
+		}
+		if rule.Operator == "" {
+			rule.Operator = "gte"
+		}
+		if rule.Severity == "" {
+			rule.Severity = "warning"
+		}
+		if rule.Category == "" {
+			rule.Category = "自定义检测"
+		}
+		if rule.RecommendedAction == "" {
+			rule.RecommendedAction = "确认命中对象的业务用途、访问来源和近期变更背景"
+		}
+		seen[rule.ID] = true
+		result = append(result, rule)
+	}
+	return result
 }
 
 func normalizeSilencedSubjects(subjects []string) []string {

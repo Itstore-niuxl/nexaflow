@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/incident-status", s.securityIncidentStatus)
 	mux.HandleFunc("/api/v1/security/incident-timeline", s.securityIncidentTimeline)
 	mux.HandleFunc("/api/v1/security/incident-notes", s.securityIncidentNotes)
+	mux.HandleFunc("/api/v1/security/rules", s.detectionRules)
+	mux.HandleFunc("/api/v1/security/rule-findings", s.detectionRuleFindings)
 	mux.HandleFunc("/api/v1/reports/overview", s.reportOverview)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
@@ -297,16 +300,29 @@ func (s *Server) assetRiskPosture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {
-	data, err := s.store.SecurityInsights(r.Context(), queryMinutes(r), queryLimit(r, 50, 200))
+	minutes := queryMinutes(r)
+	limit := queryLimit(r, 50, 200)
+	data, err := s.store.SecurityInsights(r.Context(), minutes, limit)
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	ruleRows, ruleErr := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, minutes, limit)
+	data = append(data, ruleRows...)
 	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
-	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+	sortSecurityRows(data)
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil || ruleErr != nil})
 }
 
 func (s *Server) securityIncidents(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r, 80, 300)
-	data, err := s.store.SecurityIncidents(r.Context(), queryMinutes(r), limit)
+	minutes := queryMinutes(r)
+	data, err := s.store.SecurityIncidents(r.Context(), minutes, limit)
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	ruleRows, ruleErr := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, minutes, limit)
+	for _, row := range ruleRows {
+		data = append(data, ruleFindingIncident(row))
+	}
 	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
 	statusData, _ := s.store.Status(r.Context())
 	if alert := collectorHealthAlert(s.config.CollectorID, statusData); alert.ID != "" && !isSilencedSubject(alert.Subject, runtime.Alerts.SilencedSubjects) {
@@ -321,7 +337,11 @@ func (s *Server) securityIncidents(w http.ResponseWriter, r *http.Request) {
 			data = data[:limit]
 		}
 	}
-	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+	sortIncidentRows(data)
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil || ruleErr != nil})
 }
 
 func (s *Server) securityIncidentContext(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +418,65 @@ func (s *Server) securityIncidentNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"data": data})
+}
+
+func (s *Server) detectionRules(w http.ResponseWriter, r *http.Request) {
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"data": runtime.Alerts.DetectionRules})
+	case http.MethodPost:
+		var body model.DetectionRule
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(body.ID) == "" {
+			body.ID = "rule-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		}
+		if strings.TrimSpace(body.Name) == "" || strings.TrimSpace(body.Metric) == "" || body.Threshold <= 0 {
+			http.Error(w, "name, metric and threshold are required", http.StatusBadRequest)
+			return
+		}
+		body.UpdatedAt = time.Now().Unix()
+		runtime.Alerts.DetectionRules = upsertDetectionRule(runtime.Alerts.DetectionRules, body)
+		if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.DetectionRules})
+	case http.MethodDelete:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			var body struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			id = strings.TrimSpace(body.ID)
+		}
+		if id == "" {
+			http.Error(w, "id is required", http.StatusBadRequest)
+			return
+		}
+		runtime.Alerts.DetectionRules = removeDetectionRule(runtime.Alerts.DetectionRules, id)
+		if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.DetectionRules})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) detectionRuleFindings(w http.ResponseWriter, r *http.Request) {
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	data, err := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, queryMinutes(r), queryLimit(r, 50, 200))
+	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
 func (s *Server) reportOverview(w http.ResponseWriter, r *http.Request) {
@@ -688,6 +767,109 @@ func removeString(items []string, target string) []string {
 	return result
 }
 
+func upsertDetectionRule(rules []model.DetectionRule, rule model.DetectionRule) []model.DetectionRule {
+	next := make([]model.DetectionRule, 0, len(rules)+1)
+	replaced := false
+	for _, item := range rules {
+		if item.ID == rule.ID {
+			next = append(next, rule)
+			replaced = true
+			continue
+		}
+		next = append(next, item)
+	}
+	if !replaced {
+		next = append(next, rule)
+	}
+	return next
+}
+
+func removeDetectionRule(rules []model.DetectionRule, id string) []model.DetectionRule {
+	next := []model.DetectionRule{}
+	for _, rule := range rules {
+		if rule.ID != id {
+			next = append(next, rule)
+		}
+	}
+	return next
+}
+
+func ruleFindingIncident(row map[string]any) map[string]any {
+	now := time.Now().Unix()
+	if matchedAt := int64Value(row["matched_at"]); matchedAt > 0 {
+		now = matchedAt
+	}
+	return map[string]any{
+		"id":                 stringValue(row["id"]),
+		"source":             "检测规则",
+		"category":           stringValue(row["category"]),
+		"kind":               "custom_rule",
+		"severity":           stringValue(row["severity"]),
+		"status":             "open",
+		"subject":            stringValue(row["subject"]),
+		"summary":            stringValue(row["summary"]),
+		"bytes":              uint64Value(row["bytes"]),
+		"packets":            uint64Value(row["packets"]),
+		"score":              int64Value(row["score"]),
+		"first_seen":         now,
+		"last_seen":          now,
+		"recommended_action": stringValue(row["recommended_action"]),
+	}
+}
+
+func sortSecurityRows(rows []map[string]any) {
+	sort.Slice(rows, func(i, j int) bool {
+		if severityWeight(stringValue(rows[i]["severity"])) != severityWeight(stringValue(rows[j]["severity"])) {
+			return severityWeight(stringValue(rows[i]["severity"])) > severityWeight(stringValue(rows[j]["severity"]))
+		}
+		if int64Value(rows[i]["score"]) != int64Value(rows[j]["score"]) {
+			return int64Value(rows[i]["score"]) > int64Value(rows[j]["score"])
+		}
+		return uint64Value(rows[i]["bytes"]) > uint64Value(rows[j]["bytes"])
+	})
+}
+
+func sortIncidentRows(rows []map[string]any) {
+	sort.Slice(rows, func(i, j int) bool {
+		if incidentStatusWeight(stringValue(rows[i]["status"])) != incidentStatusWeight(stringValue(rows[j]["status"])) {
+			return incidentStatusWeight(stringValue(rows[i]["status"])) > incidentStatusWeight(stringValue(rows[j]["status"]))
+		}
+		if severityWeight(stringValue(rows[i]["severity"])) != severityWeight(stringValue(rows[j]["severity"])) {
+			return severityWeight(stringValue(rows[i]["severity"])) > severityWeight(stringValue(rows[j]["severity"]))
+		}
+		if int64Value(rows[i]["score"]) != int64Value(rows[j]["score"]) {
+			return int64Value(rows[i]["score"]) > int64Value(rows[j]["score"])
+		}
+		return int64Value(rows[i]["last_seen"]) > int64Value(rows[j]["last_seen"])
+	})
+}
+
+func severityWeight(severity string) int {
+	switch severity {
+	case "critical":
+		return 3
+	case "warning", "high":
+		return 2
+	case "info", "medium", "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func incidentStatusWeight(status string) int {
+	switch status {
+	case "open":
+		return 3
+	case "ack":
+		return 2
+	case "resolved":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func stringValue(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -705,6 +887,29 @@ func int64Value(v any) int64 {
 		return int64(value)
 	case float64:
 		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func uint64Value(v any) uint64 {
+	switch value := v.(type) {
+	case uint64:
+		return value
+	case uint:
+		return uint64(value)
+	case int:
+		return uint64(value)
+	case int64:
+		if value < 0 {
+			return 0
+		}
+		return uint64(value)
+	case float64:
+		if value < 0 {
+			return 0
+		}
+		return uint64(value)
 	default:
 		return 0
 	}

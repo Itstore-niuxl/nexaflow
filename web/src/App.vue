@@ -43,6 +43,7 @@ import {
   type Collector,
   type CollectorConfig,
   type DimensionPoint,
+  type DetectionRule,
   type ExternalAccess,
   type IPProfile,
   type MatrixRow,
@@ -53,6 +54,7 @@ import {
   type PortPoint,
   type ProtocolPoint,
   type ReportOverview,
+  type RuleFinding,
   type SearchResult,
   type SecurityInsight,
   type SecurityIncident,
@@ -184,6 +186,9 @@ const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
 const incidentNoteText = ref('');
 const savingIncidentNote = ref(false);
 const reportOverview = ref<ReportOverview>(emptyReportOverview());
+const detectionRules = ref<DetectionRule[]>([]);
+const ruleFindings = ref<RuleFinding[]>([]);
+const ruleEditor = ref<DetectionRule | null>(null);
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnomalies = ref<TrafficAnomaly[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
@@ -212,6 +217,7 @@ const loading = ref(false);
 const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
+const savingRule = ref(false);
 const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
 const currentView = ref('dashboard');
@@ -264,6 +270,7 @@ const navGroups = [
       { id: 'asset-risk', label: '资产风险', icon: Shield },
       { id: 'security', label: '风险线索', icon: Shield },
       { id: 'incidents', label: '事件中心', icon: Shield },
+      { id: 'rules', label: '规则中心', icon: Settings2 },
       { id: 'alerts', label: '告警中心', icon: AlertTriangle }
     ]
   },
@@ -291,6 +298,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   'asset-risk': { title: '资产风险', subtitle: '按资产聚合暴露面、异常、事件和公网访问，给出处置优先级' },
   security: { title: '风险线索', subtitle: '从重流量会话、敏感端口和主机扇出中提取排查线索' },
   incidents: { title: '事件中心', subtitle: '汇总阈值告警、风险线索和异常波动，形成统一处置事件流' },
+  rules: { title: '规则中心', subtitle: '配置自定义检测规则，查看实时命中对象并沉淀处置动作' },
   profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
   port: { title: '端口画像', subtitle: '围绕目的端口查看流量规模和关联会话' },
   topn: { title: 'TopN 分析', subtitle: '按 IP、端口、协议和会话维度定位主要流量对象' },
@@ -359,7 +367,8 @@ const refresh = async () => {
       trafficAnalysisRes,
       trafficChangesRes,
       trafficAnomaliesRes,
-      reportRes
+      reportRes,
+      ruleFindingRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -397,7 +406,8 @@ const refresh = async () => {
       api.trafficAnalysis(minutes),
       api.trafficChanges(minutes, 30),
       api.trafficAnomalies(minutes, 40),
-      api.reportOverview(minutes, 12)
+      api.reportOverview(minutes, 12),
+      api.ruleFindings(minutes, 100)
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -420,6 +430,7 @@ const refresh = async () => {
     systemStatus.value = statusRes.data;
     historyWindows.value = windowsRes.data;
     alertConfig.value = alertConfigRes.data;
+    detectionRules.value = alertConfigRes.data.detection_rules ?? [];
     matrixRows.value = matrixRes.data;
     serviceMap.value = serviceMapRes.data;
     serviceExposure.value = serviceExposureRes.data;
@@ -436,6 +447,7 @@ const refresh = async () => {
     trafficChanges.value = trafficChangesRes.data;
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
+    ruleFindings.value = ruleFindingRes.data;
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -465,7 +477,8 @@ const refresh = async () => {
       trafficAnalysisRes.degraded ||
       trafficChangesRes.degraded ||
       trafficAnomaliesRes.degraded ||
-      reportRes.degraded;
+      reportRes.degraded ||
+      ruleFindingRes.degraded;
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -573,6 +586,36 @@ const refresh = async () => {
     interfaces.value = [{ name: 'eth0', state: 'up', type: 'interface' }];
     systemStatus.value = { database: 'degraded', latest_window_ts: now, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 };
     alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
+    detectionRules.value = [
+      {
+        id: 'rule-src-heavy-bytes',
+        name: '源 IP 大流量',
+        category: '流量阈值',
+        metric: 'src_ip_bytes',
+        match: '',
+        operator: 'gte',
+        threshold: 100 * 1024 * 1024,
+        severity: 'warning',
+        enabled: true,
+        description: '识别观察窗口内单个源 IP 的大流量行为',
+        recommended_action: '确认源主机业务用途，检查是否存在备份、同步或异常外传行为',
+        updated_at: now
+      },
+      {
+        id: 'rule-external-session-burst',
+        name: '公网会话突增',
+        category: '公网访问',
+        metric: 'external_sessions',
+        match: '',
+        operator: 'gte',
+        threshold: 30,
+        severity: 'critical',
+        enabled: true,
+        description: '识别公网对端和内部资产之间的高会话数访问',
+        recommended_action: '核对公网来源、服务端口和防火墙策略，必要时收敛来源或加入白名单',
+        updated_at: now
+      }
+    ];
     ipProfile.value = {
       ip: profileIP.value,
       minutes: selectedMinutes.value,
@@ -899,6 +942,27 @@ const refresh = async () => {
         score: 80
       }
     ];
+    ruleFindings.value = [
+      {
+        id: 'rule:rule-external-session-burst:211.93.22.130 -> 10.2.0.12:8081',
+        rule_id: 'rule-external-session-burst',
+        rule_name: '公网会话突增',
+        category: '公网访问',
+        kind: 'custom_rule',
+        metric: 'external_sessions',
+        severity: 'critical',
+        subject: '211.93.22.130 -> 10.2.0.12:8081',
+        summary: '211.93.22.130 -> 10.2.0.12:8081 命中规则：公网会话突增，当前值 40 sessions，阈值 30 sessions',
+        value: 40,
+        threshold: 30,
+        unit: 'sessions',
+        bytes: 7000000,
+        packets: 6800,
+        score: 100,
+        recommended_action: '核对公网来源、服务端口和防火墙策略，必要时收敛来源或加入白名单',
+        matched_at: now
+      }
+    ];
     securityIncidents.value = [
       {
         id: 'insight:external_session_burst:211.93.22.130 -> 10.2.0.12',
@@ -1167,6 +1231,29 @@ const trendDimensionOptions = [
   { value: 'ecn', label: 'ECN' },
   { value: 'ip', label: 'IP 地址' }
 ];
+const ruleMetricOptions = [
+  { value: 'src_ip_bytes', label: '源 IP 流量' },
+  { value: 'dst_ip_bytes', label: '目的 IP 流量' },
+  { value: 'dst_port_bytes', label: '目的端口流量' },
+  { value: 'service_bytes', label: '应用服务流量' },
+  { value: 'flow_bytes', label: '会话流量' },
+  { value: 'external_sessions', label: '公网会话数' },
+  { value: 'exposed_clients', label: '暴露服务客户端数' },
+  { value: 'link_peak_mbps', label: '链路峰值 Mbps' },
+  { value: 'link_utilization', label: '链路利用率' }
+];
+const ruleOperatorOptions = [
+  { value: 'gte', label: '大于等于' },
+  { value: 'gt', label: '大于' },
+  { value: 'lte', label: '小于等于' },
+  { value: 'lt', label: '小于' },
+  { value: 'eq', label: '等于' }
+];
+const ruleSeverityOptions = [
+  { value: 'critical', label: '严重' },
+  { value: 'warning', label: '警告' },
+  { value: 'info', label: '提示' }
+];
 const trendDimensionLabel = computed(() => trendDimensionOptions.find((item) => item.value === trendDimension.value)?.label ?? trendDimension.value);
 const trendTitle = computed(() => {
   const suffix = trendKey.value.trim() || 'Top 对象';
@@ -1286,6 +1373,11 @@ const assetRiskExposureItems = computed(() => aggregateTopItems(assetRisks.value
 const insightKindItems = computed(() => aggregateTopItems(securityInsights.value, (row) => insightKindText(row.kind), (row) => row.bytes, (row) => row.packets));
 const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
 const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
+const enabledRuleCount = computed(() => detectionRules.value.filter((row) => row.enabled).length);
+const criticalRuleFindingCount = computed(() => ruleFindings.value.filter((row) => row.severity === 'critical').length);
+const ruleFindingRuleItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => row.rule_name, () => 1, () => 0));
+const ruleFindingSeverityItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => severityText(row.severity), () => 1, () => 0));
+const ruleFindingMetricItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => ruleMetricText(row.metric), (row) => row.bytes || row.value, (row) => row.packets));
 const incidentSeverityItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => severityText(row.severity), () => 1, () => 0));
 const incidentSourceItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => row.source, () => 1, () => 0));
 const incidentCategoryItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => row.category, (row) => row.bytes, (row) => row.packets));
@@ -1489,6 +1581,8 @@ const incidentKindText = (kind: string) => {
   };
   return labels[kind] ?? insightKindText(kind);
 };
+
+const ruleMetricText = (metric: string) => ruleMetricOptions.find((item) => item.value === metric)?.label ?? metric;
 
 const alertStatusText = (status: string) => {
   const labels: Record<string, string> = {
@@ -1727,6 +1821,70 @@ const loadDimensionTrend = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const newRule = () => {
+  ruleEditor.value = {
+    id: '',
+    name: '',
+    category: '自定义检测',
+    metric: 'src_ip_bytes',
+    match: '',
+    operator: 'gte',
+    threshold: 100 * 1024 * 1024,
+    severity: 'warning',
+    enabled: true,
+    description: '',
+    recommended_action: '确认命中对象的业务用途、访问来源和近期变更背景',
+    updated_at: 0
+  };
+};
+
+const editRule = (rule: DetectionRule) => {
+  ruleEditor.value = { ...rule };
+};
+
+const saveRule = async () => {
+  if (!ruleEditor.value || !ruleEditor.value.name.trim() || !ruleEditor.value.metric || ruleEditor.value.threshold <= 0) return;
+  savingRule.value = true;
+  try {
+    const result = await api.saveDetectionRule({ ...ruleEditor.value, name: ruleEditor.value.name.trim(), match: ruleEditor.value.match.trim() });
+    detectionRules.value = result.data;
+    alertConfig.value.detection_rules = result.data;
+    ruleEditor.value = null;
+    const findingRes = await api.ruleFindings(selectedMinutes.value, 100);
+    ruleFindings.value = findingRes.data;
+    degraded.value = findingRes.degraded;
+  } finally {
+    savingRule.value = false;
+  }
+};
+
+const deleteRule = async (rule: DetectionRule) => {
+  savingRule.value = true;
+  try {
+    const result = await api.deleteDetectionRule(rule.id);
+    detectionRules.value = result.data;
+    alertConfig.value.detection_rules = result.data;
+    if (ruleEditor.value?.id === rule.id) {
+      ruleEditor.value = null;
+    }
+    const findingRes = await api.ruleFindings(selectedMinutes.value, 100);
+    ruleFindings.value = findingRes.data;
+    degraded.value = findingRes.degraded;
+  } finally {
+    savingRule.value = false;
+  }
+};
+
+const toggleRule = async (rule: DetectionRule) => {
+  const next = { ...rule, enabled: !rule.enabled };
+  const result = await api.saveDetectionRule(next);
+  detectionRules.value = result.data;
+  alertConfig.value.detection_rules = result.data;
+  const findingRes = await api.ruleFindings(selectedMinutes.value, 100);
+  ruleFindings.value = findingRes.data;
+  degraded.value = findingRes.degraded;
 };
 
 const saveAlertConfig = async () => {
@@ -2010,6 +2168,26 @@ const exportReportOverview = () => {
     ])
   ];
   exportCSV(`nexaflow-overview-report-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportRuleFindings = () => {
+  const rows = [
+    ['规则', '对象', '级别', '指标', '当前值', '阈值', '流量字节', '包数', '摘要', '建议', '命中时间'],
+    ...ruleFindings.value.map((row) => [
+      row.rule_name,
+      row.subject,
+      severityText(row.severity),
+      ruleMetricText(row.metric),
+      String(row.value),
+      String(row.threshold),
+      String(row.bytes),
+      String(row.packets),
+      row.summary,
+      row.recommended_action,
+      formatTime(row.matched_at)
+    ])
+  ];
+  exportCSV(`nexaflow-rule-findings-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportCSV = (filename: string, rows: string[][]) => {
@@ -3503,6 +3681,196 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TopNTable title="关联风险线索" :items="relationInsightItems" />
         </section>
         <TopNTable :title="selectedTopNTitle" :items="selectedTopN" />
+      </template>
+
+      <template v-else-if="currentView === 'rules'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="newRule">新增规则</button>
+          <button type="button" @click="exportRuleFindings">导出命中</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / {{ detectionRules.length.toLocaleString() }} 条规则 / {{ ruleFindings.length.toLocaleString() }} 条命中
+          </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Settings2 :size="22" />
+            <div>
+              <span>检测规则</span>
+              <strong>{{ detectionRules.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>启用规则</span>
+              <strong>{{ enabledRuleCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重命中</span>
+              <strong>{{ criticalRuleFindingCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>命中对象</span>
+              <strong>{{ ruleFindings.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="规则命中分布" eyebrow="Rule Hits" :items="ruleFindingRuleItems" unit="count" />
+          <HorizontalBarChart title="命中级别分布" eyebrow="Severity" :items="ruleFindingSeverityItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="命中指标流量" eyebrow="Metric Traffic" :items="ruleFindingMetricItems" />
+          <HorizontalBarChart title="规则关联服务" eyebrow="Service Context" :items="topServices" />
+        </section>
+        <section v-if="ruleEditor" class="table-panel rule-editor-panel">
+          <div class="panel-heading">
+            <h2>{{ ruleEditor.id ? '编辑检测规则' : '新增检测规则' }}</h2>
+            <span>{{ ruleEditor.id || '新规则' }}</span>
+          </div>
+          <div class="asset-editor-grid rule-editor-grid">
+            <label>
+              <span>规则名称</span>
+              <input v-model="ruleEditor.name" placeholder="例如 公网会话突增" />
+            </label>
+            <label>
+              <span>分类</span>
+              <input v-model="ruleEditor.category" placeholder="例如 公网访问 / 链路健康" />
+            </label>
+            <label>
+              <span>指标</span>
+              <select v-model="ruleEditor.metric">
+                <option v-for="option in ruleMetricOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>匹配对象</span>
+              <input v-model="ruleEditor.match" placeholder="可选：IP、端口、服务名或关键字" />
+            </label>
+            <label>
+              <span>条件</span>
+              <select v-model="ruleEditor.operator">
+                <option v-for="option in ruleOperatorOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>阈值</span>
+              <input v-model.number="ruleEditor.threshold" type="number" min="1" />
+            </label>
+            <label>
+              <span>级别</span>
+              <select v-model="ruleEditor.severity">
+                <option v-for="option in ruleSeverityOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>启用状态</span>
+              <select v-model="ruleEditor.enabled">
+                <option :value="true">启用</option>
+                <option :value="false">停用</option>
+              </select>
+            </label>
+            <label class="asset-note-field">
+              <span>规则说明</span>
+              <input v-model="ruleEditor.description" placeholder="说明规则目的、适用场景或排查依据" />
+            </label>
+            <label class="asset-note-field">
+              <span>建议动作</span>
+              <input v-model="ruleEditor.recommended_action" placeholder="命中后建议执行的核查或处置动作" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="button" :disabled="savingRule || !ruleEditor.name.trim() || ruleEditor.threshold <= 0" @click="saveRule">
+              {{ savingRule ? '保存中...' : '保存规则' }}
+            </button>
+            <button type="button" :disabled="savingRule" @click="ruleEditor = null">取消</button>
+          </div>
+        </section>
+        <section class="table-panel wide-key-table rules-table">
+          <div class="panel-heading">
+            <h2>检测规则</h2>
+            <span>{{ enabledRuleCount.toLocaleString() }} 条启用</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>规则</th>
+                <th>分类</th>
+                <th>指标</th>
+                <th>匹配</th>
+                <th>阈值</th>
+                <th>级别</th>
+                <th>状态</th>
+                <th>建议动作</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="rule in detectionRules" :key="rule.id">
+                <td>
+                  <strong>{{ rule.name }}</strong>
+                  <span class="cell-subtle">{{ rule.description || rule.id }}</span>
+                </td>
+                <td>{{ rule.category }}</td>
+                <td>{{ ruleMetricText(rule.metric) }}</td>
+                <td>{{ rule.match || '全部对象' }}</td>
+                <td>{{ ruleOperatorOptions.find((item) => item.value === rule.operator)?.label ?? rule.operator }} {{ rule.threshold.toLocaleString() }}</td>
+                <td><span class="severity-pill" :class="rule.severity">{{ severityText(rule.severity) }}</span></td>
+                <td>{{ rule.enabled ? '启用' : '停用' }}</td>
+                <td>{{ rule.recommended_action }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="editRule(rule)">编辑</button>
+                  <button class="inline-button" type="button" @click="toggleRule(rule)">{{ rule.enabled ? '停用' : '启用' }}</button>
+                  <button class="inline-button" type="button" :disabled="savingRule" @click="deleteRule(rule)">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="detectionRules.length === 0" class="empty-state">暂无检测规则</div>
+        </section>
+        <section class="table-panel wide-key-table rule-finding-table">
+          <div class="panel-heading">
+            <h2>规则命中</h2>
+            <span>{{ ruleFindings.length.toLocaleString() }} 条 / {{ rangeLabel }}</span>
+          </div>
+          <div v-if="ruleFindings.length === 0" class="empty-state">暂无规则命中</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>规则</th>
+                <th>级别</th>
+                <th>指标</th>
+                <th>当前值</th>
+                <th>阈值</th>
+                <th>流量</th>
+                <th>摘要</th>
+                <th>建议动作</th>
+                <th>命中时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in ruleFindings" :key="row.id">
+                <td>{{ row.subject }}</td>
+                <td>{{ row.rule_name }}</td>
+                <td><span class="severity-pill" :class="row.severity">{{ severityText(row.severity) }}</span></td>
+                <td>{{ ruleMetricText(row.metric) }}</td>
+                <td>{{ row.value.toLocaleString() }} {{ row.unit }}</td>
+                <td>{{ row.threshold.toLocaleString() }} {{ row.unit }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.summary }}</td>
+                <td>{{ row.recommended_action }}</td>
+                <td>{{ formatTime(row.matched_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
       </template>
 
       <template v-else-if="currentView === 'alerts'">

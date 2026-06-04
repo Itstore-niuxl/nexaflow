@@ -98,6 +98,42 @@ export interface AlertConfig {
   source_packets: number;
   link_utilization: number;
   silenced_subjects?: string[];
+  detection_rules?: DetectionRule[];
+}
+
+export interface DetectionRule {
+  id: string;
+  name: string;
+  category: string;
+  metric: string;
+  match: string;
+  operator: string;
+  threshold: number;
+  severity: string;
+  enabled: boolean;
+  description: string;
+  recommended_action: string;
+  updated_at: number;
+}
+
+export interface RuleFinding {
+  id: string;
+  rule_id: string;
+  rule_name: string;
+  category: string;
+  kind: string;
+  metric: string;
+  severity: string;
+  subject: string;
+  summary: string;
+  value: number;
+  threshold: number;
+  unit: string;
+  bytes: number;
+  packets: number;
+  score: number;
+  recommended_action: string;
+  matched_at: number;
 }
 
 export interface MatrixRow {
@@ -596,6 +632,30 @@ export const api = {
   },
   async reportOverview(minutes = 15, limit = 10) {
     return json<{ data: ReportOverview; degraded: boolean }>(`/api/v1/reports/overview?minutes=${minutes}&limit=${limit}`);
+  },
+  async detectionRules() {
+    return json<{ data: DetectionRule[] }>('/api/v1/security/rules');
+  },
+  async saveDetectionRule(rule: DetectionRule) {
+    const response = await fetch('/api/v1/security/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: DetectionRule[] }>;
+  },
+  async deleteDetectionRule(id: string) {
+    const response = await fetch(`/api/v1/security/rules?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: DetectionRule[] }>;
+  },
+  async ruleFindings(minutes = 15, limit = 80) {
+    return json<{ data: RuleFinding[]; degraded: boolean }>(`/api/v1/security/rule-findings?minutes=${minutes}&limit=${limit}`);
   },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);

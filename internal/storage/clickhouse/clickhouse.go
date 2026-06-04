@@ -1548,6 +1548,35 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	return items, firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr, scanErr)
 }
 
+func (s *Store) DetectionRuleFindings(ctx context.Context, rules []model.DetectionRule, minutes, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	items := []map[string]any{}
+	var err error
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		rows, ruleErr := s.detectionRuleRows(ctx, rule, minutes, limit)
+		err = firstErr(err, ruleErr)
+		items = append(items, rows...)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if insightWeight(stringValue(items[i]["severity"])) != insightWeight(stringValue(items[j]["severity"])) {
+			return insightWeight(stringValue(items[i]["severity"])) > insightWeight(stringValue(items[j]["severity"]))
+		}
+		if int64Value(items[i]["score"]) != int64Value(items[j]["score"]) {
+			return int64Value(items[i]["score"]) > int64Value(items[j]["score"])
+		}
+		return floatValue(items[i]["value"]) > floatValue(items[j]["value"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, err
+}
+
 func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
 	alerts, alertErr := s.Alerts(ctx, max(limit, 50), minutes)
 	insights, insightErr := s.SecurityInsights(ctx, minutes, max(limit, 50))
@@ -3164,6 +3193,169 @@ func reportRecommendations(metrics map[string]any, assetRisks, incidents, anomal
 		items = append(items, map[string]string{"level": "info", "title": "完善数据采集", "detail": "当前报表风险数据较少，可扩大观察窗口或确认采集接口覆盖范围"})
 	}
 	return items
+}
+
+func (s *Store) detectionRuleRows(ctx context.Context, rule model.DetectionRule, minutes, limit int) ([]map[string]any, error) {
+	switch rule.Metric {
+	case "src_ip_bytes":
+		return s.detectionRuleTopNRows(ctx, rule, "ip", "src", minutes, limit)
+	case "dst_ip_bytes":
+		return s.detectionRuleTopNRows(ctx, rule, "ip", "dst", minutes, limit)
+	case "dst_port_bytes":
+		return s.detectionRuleTopNRows(ctx, rule, "dst_port", "src", minutes, limit)
+	case "service_bytes":
+		return s.detectionRuleTopNRows(ctx, rule, "service", "src", minutes, limit)
+	case "flow_bytes":
+		return s.detectionRuleTopNRows(ctx, rule, "flow", "src", minutes, limit)
+	case "link_peak_mbps":
+		analysis, err := s.TrafficAnalysis(ctx, minutes)
+		row := map[string]any{
+			"subject": "链路峰值吞吐",
+			"value":   floatValue(mapValue(analysis, "baseline", "peak_mbps")),
+			"bytes":   uint64(0),
+			"packets": uint64(0),
+		}
+		return detectionRuleScalarRows(rule, minutes, row, "Mbps"), err
+	case "link_utilization":
+		summary, err := s.Summary(ctx, minutes)
+		row := map[string]any{
+			"subject": "链路利用率",
+			"value":   floatValue(summary["utilization"]),
+			"bytes":   uintValue(summary["bytes"]),
+			"packets": uintValue(summary["packets"]),
+		}
+		return detectionRuleScalarRows(rule, minutes, row, "ratio"), err
+	case "external_sessions":
+		rows, err := s.ExternalAccess(ctx, minutes, max(limit*4, 80))
+		return detectionRuleMapRows(rule, minutes, rows, "session_count", "公网访问", func(row map[string]any) string {
+			return stringValue(row["public_ip"]) + " -> " + stringValue(row["internal_ip"]) + ":" + stringValue(row["port"])
+		}, "sessions"), err
+	case "exposed_clients":
+		rows, err := s.ServiceExposure(ctx, minutes, max(limit*4, 80))
+		return detectionRuleMapRows(rule, minutes, rows, "client_count", "服务暴露", func(row map[string]any) string {
+			return stringValue(row["ip"]) + ":" + stringValue(row["port"]) + " / " + stringValue(row["service"])
+		}, "clients"), err
+	default:
+		return []map[string]any{}, nil
+	}
+}
+
+func (s *Store) detectionRuleTopNRows(ctx context.Context, rule model.DetectionRule, dimension, direction string, minutes, limit int) ([]map[string]any, error) {
+	rows, err := s.TopN(ctx, dimension, direction, max(limit*4, 80), minutes)
+	result := []map[string]any{}
+	for _, row := range rows {
+		item := map[string]any{
+			"subject": row.Key,
+			"value":   float64(row.Bytes),
+			"bytes":   row.Bytes,
+			"packets": row.Packets,
+		}
+		if finding, ok := detectionRuleFinding(rule, minutes, item, "bytes"); ok {
+			result = append(result, finding)
+		}
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result, err
+}
+
+func detectionRuleScalarRows(rule model.DetectionRule, minutes int, row map[string]any, unit string) []map[string]any {
+	if finding, ok := detectionRuleFinding(rule, minutes, row, unit); ok {
+		return []map[string]any{finding}
+	}
+	return []map[string]any{}
+}
+
+func detectionRuleMapRows(rule model.DetectionRule, minutes int, rows []map[string]any, valueKey, category string, subjectOf func(map[string]any) string, unit string) []map[string]any {
+	result := []map[string]any{}
+	for _, row := range rows {
+		item := map[string]any{
+			"subject":  subjectOf(row),
+			"value":    float64(int64Value(row[valueKey])),
+			"bytes":    uintValue(row["bytes"]),
+			"packets":  uintValue(row["packets"]),
+			"category": category,
+			"text":     strings.Join(mapStringValues(row), " "),
+		}
+		if finding, ok := detectionRuleFinding(rule, minutes, item, unit); ok {
+			result = append(result, finding)
+		}
+	}
+	return result
+}
+
+func detectionRuleFinding(rule model.DetectionRule, minutes int, item map[string]any, unit string) (map[string]any, bool) {
+	subject := stringValue(item["subject"])
+	if rule.Match != "" {
+		text := strings.ToLower(subject + " " + stringValue(item["text"]))
+		if !strings.Contains(text, strings.ToLower(rule.Match)) {
+			return nil, false
+		}
+	}
+	value := floatValue(item["value"])
+	if !compareRuleValue(value, rule.Operator, rule.Threshold) {
+		return nil, false
+	}
+	score := int(math.Min(100, math.Max(1, (value/rule.Threshold)*100)))
+	summary := fmt.Sprintf("%s 命中规则：%s，当前值 %s，阈值 %s", subject, rule.Name, formatRuleValue(value, unit), formatRuleValue(rule.Threshold, unit))
+	return map[string]any{
+		"id":                 "rule:" + rule.ID + ":" + subject,
+		"rule_id":            rule.ID,
+		"rule_name":          rule.Name,
+		"category":           rule.Category,
+		"kind":               "custom_rule",
+		"metric":             rule.Metric,
+		"severity":           rule.Severity,
+		"subject":            subject,
+		"summary":            summary,
+		"value":              value,
+		"threshold":          rule.Threshold,
+		"unit":               unit,
+		"bytes":              uintValue(item["bytes"]),
+		"packets":            uintValue(item["packets"]),
+		"score":              score,
+		"recommended_action": rule.RecommendedAction,
+		"matched_at":         time.Now().Unix(),
+	}, true
+}
+
+func compareRuleValue(value float64, operator string, threshold float64) bool {
+	switch operator {
+	case "gt":
+		return value > threshold
+	case "lte":
+		return value <= threshold
+	case "lt":
+		return value < threshold
+	case "eq":
+		return value == threshold
+	default:
+		return value >= threshold
+	}
+}
+
+func formatRuleValue(value float64, unit string) string {
+	switch unit {
+	case "bytes":
+		return formatBytesText(uint64(value))
+	case "ratio":
+		return fmt.Sprintf("%.2f%%", value*100)
+	case "Mbps":
+		return fmt.Sprintf("%.2f Mbps", value)
+	default:
+		return fmt.Sprintf("%.0f %s", value, unit)
+	}
+}
+
+func mapStringValues(row map[string]any) []string {
+	values := []string{}
+	for _, value := range row {
+		if text := stringValue(value); text != "" {
+			values = append(values, text)
+		}
+	}
+	return values
 }
 
 func incidentContextSelector(subject, kind string) map[string]string {

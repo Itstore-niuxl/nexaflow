@@ -897,6 +897,8 @@ td {
 .incident-table table,
 .report-asset-table table,
 .report-incident-table table,
+.rules-table table,
+.rule-finding-table table,
 .change-table table {
   table-layout: fixed;
 }
@@ -912,6 +914,14 @@ td {
 .report-asset-table table,
 .report-incident-table table {
   min-width: 1320px;
+}
+
+.rules-table table {
+  min-width: 1280px;
+}
+
+.rule-finding-table table {
+  min-width: 1480px;
 }
 
 .anomaly-table table {
@@ -1035,6 +1045,38 @@ td {
 .report-asset-table th:nth-child(9),
 .report-asset-table td:nth-child(9) {
   width: 130px;
+}
+
+.rules-table th:first-child,
+.rules-table td:first-child,
+.rule-finding-table th:first-child,
+.rule-finding-table td:first-child {
+  width: 18%;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.rules-table th:nth-child(8),
+.rules-table td:nth-child(8),
+.rule-finding-table th:nth-child(8),
+.rule-finding-table td:nth-child(8),
+.rule-finding-table th:nth-child(9),
+.rule-finding-table td:nth-child(9) {
+  width: 22%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+.rules-table th:nth-child(9),
+.rules-table td:nth-child(9) {
+  width: 170px;
+}
+
+.rule-editor-panel {
+  display: grid;
+  gap: 14px;
 }
 
 .asset-risk-table th:first-child,

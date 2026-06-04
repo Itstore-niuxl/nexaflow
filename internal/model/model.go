@@ -61,3 +61,18 @@ type AlertEvent struct {
 	FirstSeen int64  `json:"first_seen"`
 	LastSeen  int64  `json:"last_seen"`
 }
+
+type DetectionRule struct {
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	Category          string  `json:"category"`
+	Metric            string  `json:"metric"`
+	Match             string  `json:"match"`
+	Operator          string  `json:"operator"`
+	Threshold         float64 `json:"threshold"`
+	Severity          string  `json:"severity"`
+	Enabled           bool    `json:"enabled"`
+	Description       string  `json:"description"`
+	RecommendedAction string  `json:"recommended_action"`
+	UpdatedAt         int64   `json:"updated_at"`
+}
