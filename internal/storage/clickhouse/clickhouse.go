@@ -1030,6 +1030,64 @@ func (s *Store) ServiceExposure(ctx context.Context, minutes, limit int) ([]map[
 	return rows, nil
 }
 
+func (s *Store) ExternalAccess(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	sessions, err := s.Sessions(ctx, "", minutes, limit*8)
+	if err != nil {
+		return demoExternalAccess(), err
+	}
+	grouped := map[string]map[string]any{}
+	for _, session := range sessions {
+		row, ok := externalAccessRow(session)
+		if !ok {
+			continue
+		}
+		key := strings.Join([]string{
+			stringValue(row["public_ip"]),
+			stringValue(row["internal_ip"]),
+			stringValue(row["port"]),
+			stringValue(row["protocol"]),
+			stringValue(row["direction"]),
+		}, "|")
+		current := grouped[key]
+		if current == nil {
+			current = row
+			current["bytes"] = uint64(0)
+			current["packets"] = uint64(0)
+			current["session_count"] = uint64(0)
+			current["first_seen"] = int64Value(session["first_seen"])
+			current["last_seen"] = int64Value(session["last_seen"])
+		}
+		current["bytes"] = uintValue(current["bytes"]) + uintValue(session["bytes"])
+		current["packets"] = uintValue(current["packets"]) + uintValue(session["packets"])
+		current["session_count"] = uintValue(current["session_count"]) + 1
+		if first := int64Value(session["first_seen"]); first > 0 && (int64Value(current["first_seen"]) == 0 || first < int64Value(current["first_seen"])) {
+			current["first_seen"] = first
+		}
+		if last := int64Value(session["last_seen"]); last > int64Value(current["last_seen"]) {
+			current["last_seen"] = last
+			current["sample_flow"] = stringValue(session["key"])
+		}
+		grouped[key] = current
+	}
+	rows := make([]map[string]any, 0, len(grouped))
+	for _, row := range grouped {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if riskWeight(stringValue(rows[i]["risk"])) != riskWeight(stringValue(rows[j]["risk"])) {
+			return riskWeight(stringValue(rows[i]["risk"])) > riskWeight(stringValue(rows[j]["risk"]))
+		}
+		if uintValue(rows[i]["session_count"]) != uintValue(rows[j]["session_count"]) {
+			return uintValue(rows[i]["session_count"]) > uintValue(rows[j]["session_count"])
+		}
+		return uintValue(rows[i]["bytes"]) > uintValue(rows[j]["bytes"])
+	})
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
+}
+
 func (s *Store) Assets(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
 	q := fmt.Sprintf(`SELECT
     ip,
@@ -1915,6 +1973,44 @@ func demoAssets() []map[string]any {
 	}
 }
 
+func demoExternalAccess() []map[string]any {
+	now := time.Now().Unix()
+	return []map[string]any{
+		{
+			"public_ip":     "211.93.22.130",
+			"internal_ip":   "10.2.0.12",
+			"direction":     "入站响应",
+			"port":          "8081",
+			"protocol":      "tcp",
+			"service":       "HTTP Alternate",
+			"category":      "Web",
+			"risk":          "medium",
+			"bytes":         uint64(32000000),
+			"packets":       uint64(24000),
+			"session_count": uint64(8),
+			"sample_flow":   "10.2.0.12:8081 -> 211.93.22.130:4300 / tcp",
+			"first_seen":    now - 600,
+			"last_seen":     now,
+		},
+		{
+			"public_ip":     "203.0.113.24",
+			"internal_ip":   "10.2.0.12",
+			"direction":     "出站",
+			"port":          "443",
+			"protocol":      "tcp",
+			"service":       "HTTPS",
+			"category":      "Web",
+			"risk":          "low",
+			"bytes":         uint64(12000000),
+			"packets":       uint64(7800),
+			"session_count": uint64(4),
+			"sample_flow":   "10.2.0.12:53210 -> 203.0.113.24:443 / tcp",
+			"first_seen":    now - 420,
+			"last_seen":     now - 20,
+		},
+	}
+}
+
 func demoSecurityInsights() []map[string]any {
 	return []map[string]any{
 		{
@@ -2167,6 +2263,66 @@ func flowDirection(flow parsedFlow) string {
 	default:
 		return "未知"
 	}
+}
+
+func externalAccessRow(session map[string]any) (map[string]any, bool) {
+	srcIP := stringValue(session["src_ip"])
+	dstIP := stringValue(session["dst_ip"])
+	serverIP := stringValue(session["server_ip"])
+	serverPort := stringValue(session["server_port"])
+	clientIP := stringValue(session["client_ip"])
+	proto := stringValue(session["protocol"])
+	direction := stringValue(session["direction"])
+	publicIP := ""
+	internalIP := ""
+	port := serverPort
+	switch {
+	case serverIP != "" && clientIP != "" && isManagedAssetIP(serverIP) && !isManagedAssetIP(clientIP):
+		publicIP = clientIP
+		internalIP = serverIP
+	case serverIP != "" && clientIP != "" && !isManagedAssetIP(serverIP) && isManagedAssetIP(clientIP):
+		publicIP = serverIP
+		internalIP = clientIP
+		if direction == "" || direction == "未知" {
+			direction = "出站"
+		}
+	case isManagedAssetIP(srcIP) && !isManagedAssetIP(dstIP):
+		publicIP = dstIP
+		internalIP = srcIP
+		port = stringValue(session["dst_port"])
+		direction = "出站"
+	case !isManagedAssetIP(srcIP) && isManagedAssetIP(dstIP):
+		publicIP = srcIP
+		internalIP = dstIP
+		port = stringValue(session["dst_port"])
+		direction = "入站"
+	default:
+		return nil, false
+	}
+	if publicIP == "" || internalIP == "" {
+		return nil, false
+	}
+	service := identifyService(port, proto)
+	risk := service.Risk
+	if stringValue(session["risk"]) != "" && port == stringValue(session["server_port"]) {
+		risk = stringValue(session["risk"])
+	}
+	return map[string]any{
+		"public_ip":     publicIP,
+		"internal_ip":   internalIP,
+		"direction":     direction,
+		"port":          port,
+		"protocol":      proto,
+		"service":       service.Name,
+		"category":      service.Category,
+		"risk":          risk,
+		"sample_flow":   stringValue(session["key"]),
+		"bytes":         uint64(0),
+		"packets":       uint64(0),
+		"session_count": uint64(0),
+		"first_seen":    int64(0),
+		"last_seen":     int64(0),
+	}, true
 }
 
 func stringValue(v any) string {

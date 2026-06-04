@@ -38,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/matrix", s.matrix)
 	mux.HandleFunc("/api/v1/traffic/service-map", s.serviceMap)
 	mux.HandleFunc("/api/v1/traffic/service-exposure", s.serviceExposure)
+	mux.HandleFunc("/api/v1/traffic/external-access", s.externalAccess)
 	mux.HandleFunc("/api/v1/traffic/protocol-timeseries", s.protocolTimeseries)
 	mux.HandleFunc("/api/v1/traffic/port-timeseries", s.portTimeseries)
 	mux.HandleFunc("/api/v1/traffic/direction-timeseries", s.directionTimeseries)
@@ -174,6 +175,11 @@ func (s *Server) serviceMap(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serviceExposure(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.ServiceExposure(r.Context(), queryMinutes(r), queryLimit(r, 50, 500))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) externalAccess(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.ExternalAccess(r.Context(), queryMinutes(r), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 

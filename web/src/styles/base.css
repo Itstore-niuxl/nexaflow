@@ -891,8 +891,13 @@ td {
 .risk-table table,
 .exposure-table table,
 .session-table table,
+.external-table table,
 .change-table table {
   table-layout: fixed;
+}
+
+.external-table table {
+  min-width: 1320px;
 }
 
 .session-table table {

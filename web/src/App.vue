@@ -41,6 +41,7 @@ import {
   type Collector,
   type CollectorConfig,
   type DimensionPoint,
+  type ExternalAccess,
   type IPProfile,
   type MatrixRow,
   type NetworkInterface,
@@ -99,6 +100,7 @@ const historyWindows = ref<WindowRow[]>([]);
 const matrixRows = ref<MatrixRow[]>([]);
 const serviceMap = ref<ServiceMap>({ nodes: [], links: [] });
 const serviceExposure = ref<ServiceExposure[]>([]);
+const externalAccess = ref<ExternalAccess[]>([]);
 const protocolSeries = ref<ProtocolPoint[]>([]);
 const portSeries = ref<PortPoint[]>([]);
 const directionSeries = ref<DirectionPoint[]>([]);
@@ -195,6 +197,7 @@ const navGroups = [
     title: '治理',
     items: [
       { id: 'exposure', label: '服务暴露', icon: ServerCog },
+      { id: 'external', label: '公网访问', icon: RadioTower },
       { id: 'assets', label: '资产发现', icon: HardDrive },
       { id: 'security', label: '风险线索', icon: Shield },
       { id: 'alerts', label: '告警中心', icon: AlertTriangle }
@@ -217,6 +220,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   topology: { title: '服务拓扑', subtitle: '基于主机对流量构建节点和链路视图' },
   exposure: { title: '服务暴露', subtitle: '识别目的 IP 上的服务端口、协议、服务类型和风险级别' },
+  external: { title: '公网访问', subtitle: '聚合公网对端、内部资产、访问方向、服务端口和风险' },
   assets: { title: '资产发现', subtitle: '按活跃 IP 聚合收发流量、角色和最近出现时间' },
   security: { title: '风险线索', subtitle: '从重流量会话、敏感端口和主机扇出中提取排查线索' },
   profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
@@ -274,6 +278,7 @@ const refresh = async () => {
       matrixRes,
       serviceMapRes,
       serviceExposureRes,
+      externalAccessRes,
       protocolSeriesRes,
       portSeriesRes,
       directionSeriesRes,
@@ -307,6 +312,7 @@ const refresh = async () => {
       api.matrix(minutes, 80),
       api.serviceMap(minutes, 80),
       api.serviceExposure(minutes, 120),
+      api.externalAccess(minutes, 160),
       api.protocolTimeseries(minutes),
       api.portTimeseries(minutes, 8),
       api.directionTimeseries(minutes),
@@ -340,6 +346,7 @@ const refresh = async () => {
     matrixRows.value = matrixRes.data;
     serviceMap.value = serviceMapRes.data;
     serviceExposure.value = serviceExposureRes.data;
+    externalAccess.value = externalAccessRes.data;
     protocolSeries.value = protocolSeriesRes.data;
     portSeries.value = portSeriesRes.data;
     directionSeries.value = directionSeriesRes.data;
@@ -365,6 +372,7 @@ const refresh = async () => {
       matrixRes.degraded ||
       serviceMapRes.degraded ||
       serviceExposureRes.degraded ||
+      externalAccessRes.degraded ||
       protocolSeriesRes.degraded ||
       portSeriesRes.degraded ||
       directionSeriesRes.degraded ||
@@ -555,6 +563,40 @@ const refresh = async () => {
         client_count: 2,
         sample_client: '10.10.1.77',
         sample_flow: '10.10.1.77:53192 -> 172.20.2.81:22 / tcp'
+      }
+    ];
+    externalAccess.value = [
+      {
+        public_ip: '211.93.22.130',
+        internal_ip: '10.2.0.12',
+        direction: '入站响应',
+        port: '8081',
+        protocol: 'tcp',
+        service: 'HTTP Alternate',
+        category: 'Web',
+        risk: 'medium',
+        bytes: 32000000,
+        packets: 24000,
+        session_count: 8,
+        sample_flow: '10.2.0.12:8081 -> 211.93.22.130:4300 / tcp',
+        first_seen: now - 600,
+        last_seen: now
+      },
+      {
+        public_ip: '203.0.113.24',
+        internal_ip: '10.2.0.12',
+        direction: '出站',
+        port: '443',
+        protocol: 'tcp',
+        service: 'HTTPS',
+        category: 'Web',
+        risk: 'low',
+        bytes: 12000000,
+        packets: 7800,
+        session_count: 4,
+        sample_flow: '10.2.0.12:53210 -> 203.0.113.24:443 / tcp',
+        first_seen: now - 420,
+        last_seen: now - 20
       }
     ];
     protocolSeries.value = [
@@ -802,6 +844,10 @@ const exposedServiceCount = computed(() => serviceExposure.value.length);
 const highRiskServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
 const unknownServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'observe').length);
 const exposureTotalBytes = computed(() => serviceExposure.value.reduce((sum, row) => sum + row.bytes, 0));
+const externalTotalBytes = computed(() => externalAccess.value.reduce((sum, row) => sum + row.bytes, 0));
+const externalPublicCount = computed(() => new Set(externalAccess.value.map((row) => row.public_ip)).size);
+const externalInternalCount = computed(() => new Set(externalAccess.value.map((row) => row.internal_ip)).size);
+const externalInboundCount = computed(() => externalAccess.value.filter((row) => row.direction.includes('入站')).length);
 const serviceRiskRank: Record<string, number> = {
   critical: 5,
   high: 4,
@@ -922,6 +968,10 @@ const trafficChangeItems = computed(() =>
 );
 const exposureRiskItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
 const exposureCategoryItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => row.category, (row) => row.bytes, (row) => row.packets));
+const externalPublicItems = computed(() => aggregateTopItems(externalAccess.value, (row) => row.public_ip, (row) => row.bytes, (row) => row.packets));
+const externalServiceItems = computed(() => aggregateTopItems(externalAccess.value, (row) => row.service, (row) => row.bytes, (row) => row.packets));
+const externalDirectionItems = computed(() => aggregateTopItems(externalAccess.value, (row) => row.direction, (row) => row.bytes, (row) => row.packets));
+const externalRiskItems = computed(() => aggregateTopItems(externalAccess.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
 const assetRoleItems = computed(() => aggregateTopItems(assets.value, (row) => row.role, (row) => row.total_bytes, (row) => row.total_packets));
 const assetCriticalityItems = computed(() => aggregateTopItems(assets.value, (row) => criticalityText(row.criticality), (row) => row.total_bytes, (row) => row.total_packets));
 const insightKindItems = computed(() => aggregateTopItems(securityInsights.value, (row) => insightKindText(row.kind), (row) => row.bytes, (row) => row.packets));
@@ -1308,6 +1358,24 @@ const searchExposureFlow = async (row: ServiceExposure) => {
   await runSearch();
 };
 
+const openExternalInternal = async (row: ExternalAccess) => {
+  profileIP.value = row.internal_ip;
+  currentView.value = 'profile';
+  await loadProfile();
+};
+
+const openExternalPort = async (row: ExternalAccess) => {
+  profilePort.value = row.port;
+  currentView.value = 'port';
+  await loadPortProfile();
+};
+
+const searchExternalFlow = async (row: ExternalAccess) => {
+  searchTerm.value = row.sample_flow || row.public_ip;
+  currentView.value = 'search';
+  await runSearch();
+};
+
 const resetExposureFilters = () => {
   exposureSearch.value = '';
   exposureRiskFilter.value = 'all';
@@ -1335,6 +1403,29 @@ const exportServiceExposure = () => {
     ])
   ];
   exportCSV(`nexaflow-service-exposure-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportExternalAccess = () => {
+  const rows = [
+    ['公网对端', '内部资产', '方向', '端口', '协议', '服务', '类别', '风险', '会话数', '流量字节', '包数', '首次出现', '最近出现', '样例会话'],
+    ...externalAccess.value.map((row) => [
+      row.public_ip,
+      row.internal_ip,
+      row.direction,
+      row.port,
+      row.protocol,
+      row.service,
+      row.category,
+      serviceRiskText(row.risk),
+      String(row.session_count),
+      String(row.bytes),
+      String(row.packets),
+      formatTime(row.first_seen),
+      formatTime(row.last_seen),
+      row.sample_flow
+    ])
+  ];
+  exportCSV(`nexaflow-external-access-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportWindows = () => {
@@ -1923,6 +2014,96 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </tbody>
             </table>
           </section>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'external'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>公网对端</span>
+              <strong>{{ externalPublicCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>内部资产</span>
+              <strong>{{ externalInternalCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>入站对象</span>
+              <strong>{{ externalInboundCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>公网流量</span>
+              <strong>{{ formatBytes(externalTotalBytes) }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="公网对端排行" eyebrow="Public Peer" :items="externalPublicItems" />
+          <HorizontalBarChart title="访问方向分布" eyebrow="Direction" :items="externalDirectionItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="公网服务分布" eyebrow="Service" :items="externalServiceItems" />
+          <HorizontalBarChart title="公网风险分布" eyebrow="Risk" :items="externalRiskItems" />
+        </section>
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="exportExternalAccess">导出公网访问</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / {{ externalAccess.length.toLocaleString() }} 个访问对象 / {{ formatBytes(externalTotalBytes) }}
+          </div>
+        </section>
+        <section class="table-panel wide-key-table external-table">
+          <h2>公网访问明细</h2>
+          <div v-if="externalAccess.length === 0" class="empty-state">暂无公网访问数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>公网对端</th>
+                <th>内部资产</th>
+                <th>方向</th>
+                <th>服务</th>
+                <th>风险</th>
+                <th>会话数</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>最近出现</th>
+                <th>样例会话</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in externalAccess" :key="`${row.public_ip}-${row.internal_ip}-${row.port}-${row.direction}`">
+                <td>{{ row.public_ip }}</td>
+                <td>{{ row.internal_ip }}</td>
+                <td>{{ row.direction }}</td>
+                <td>
+                  <strong>{{ row.service }}</strong>
+                  <span class="cell-subtle">{{ row.port }} / {{ row.protocol }} / {{ row.category }}</span>
+                </td>
+                <td><span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span></td>
+                <td>{{ row.session_count.toLocaleString() }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ formatTime(row.last_seen) }}</td>
+                <td>{{ row.sample_flow }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="openExternalInternal(row)">资产</button>
+                  <button class="inline-button" type="button" @click="openExternalPort(row)">端口</button>
+                  <button class="inline-button" type="button" @click="searchExternalFlow(row)">检索</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </section>
       </template>
 

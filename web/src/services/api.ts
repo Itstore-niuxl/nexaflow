@@ -134,6 +134,23 @@ export interface ServiceExposure {
   sample_flow: string;
 }
 
+export interface ExternalAccess {
+  public_ip: string;
+  internal_ip: string;
+  direction: string;
+  port: string;
+  protocol: string;
+  service: string;
+  category: string;
+  risk: string;
+  bytes: number;
+  packets: number;
+  session_count: number;
+  sample_flow: string;
+  first_seen: number;
+  last_seen: number;
+}
+
 export interface ProtocolPoint {
   ts: number;
   protocol: string;
@@ -346,6 +363,11 @@ export const api = {
   async serviceExposure(minutes = 15, limit = 50) {
     return json<{ data: ServiceExposure[]; degraded: boolean }>(
       `/api/v1/traffic/service-exposure?minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async externalAccess(minutes = 15, limit = 80) {
+    return json<{ data: ExternalAccess[]; degraded: boolean }>(
+      `/api/v1/traffic/external-access?minutes=${minutes}&limit=${limit}`
     );
   },
   async protocolTimeseries(minutes = 15) {
