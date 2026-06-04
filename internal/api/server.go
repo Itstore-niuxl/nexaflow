@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
 	mux.HandleFunc("/api/v1/assets", s.assets)
+	mux.HandleFunc("/api/v1/assets/metadata", s.assetMetadata)
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
@@ -172,6 +173,33 @@ func (s *Server) trafficChanges(w http.ResponseWriter, r *http.Request) {
 func (s *Server) assets(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.Assets(r.Context(), queryMinutes(r), queryLimit(r, 50, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) assetMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		data, err := s.store.AssetMetadata(r.Context(), strings.TrimSpace(r.URL.Query().Get("ip")))
+		writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(stringValue(body["ip"])) == "" {
+		http.Error(w, "ip is required", http.StatusBadRequest)
+		return
+	}
+	data, err := s.store.UpdateAssetMetadata(r.Context(), body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"data": data})
 }
 
 func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {

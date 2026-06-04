@@ -7,6 +7,7 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AssetMetadata,
   type AssetRow,
   type Collector,
   type CollectorConfig,
@@ -66,6 +67,8 @@ const directionSeries = ref<DirectionPoint[]>([]);
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const assets = ref<AssetRow[]>([]);
+const assetEditor = ref<AssetMetadata | null>(null);
+const assetTagsText = ref('');
 const securityInsights = ref<SecurityInsight[]>([]);
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
@@ -93,6 +96,7 @@ const degraded = ref(false);
 const loading = ref(false);
 const switching = ref(false);
 const savingAlerts = ref(false);
+const savingAsset = ref(false);
 const handlingAlert = ref(false);
 const currentView = ref('dashboard');
 const activeTopN = ref('src_ip');
@@ -425,6 +429,14 @@ const refresh = async () => {
     assets.value = [
       {
         ip: '10.10.1.42',
+        name: '',
+        owner: '',
+        business: '',
+        environment: '未分类',
+        criticality: 'normal',
+        tags: [],
+        note: '',
+        metadata_updated_at: 0,
         role: '外联源',
         inbound_bytes: 12000000,
         inbound_packets: 4000,
@@ -438,6 +450,14 @@ const refresh = async () => {
       },
       {
         ip: '172.20.2.10',
+        name: '示例 Web 服务',
+        owner: '平台团队',
+        business: 'NexaFlow',
+        environment: '测试',
+        criticality: 'high',
+        tags: ['web'],
+        note: '',
+        metadata_updated_at: now,
         role: '服务端',
         inbound_bytes: 52000000,
         inbound_packets: 18000,
@@ -605,7 +625,9 @@ const exposureFilteredCount = computed(() => filteredServiceExposure.value.lengt
 const exposureFilteredBytes = computed(() => filteredServiceExposure.value.reduce((sum, row) => sum + row.bytes, 0));
 const assetTotalBytes = computed(() => assets.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const activeAssetCount = computed(() => assets.value.length);
-const serviceAssetCount = computed(() => assets.value.filter((row) => row.role === '服务端').length);
+const annotatedAssetCount = computed(() =>
+  assets.value.filter((row) => row.name || row.owner || row.business || row.tags.length > 0 || row.note).length
+);
 const criticalInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'critical').length);
 const warningInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'warning').length);
 const dominantProtocol = computed(() => trafficAnalysis.value.protocol_mix[0]);
@@ -752,6 +774,16 @@ const serviceRiskText = (risk: string) => {
   return labels[risk] ?? risk;
 };
 
+const criticalityText = (value: string) => {
+  const labels: Record<string, string> = {
+    low: '低',
+    normal: '普通',
+    high: '高',
+    critical: '核心'
+  };
+  return labels[value] ?? value ?? '普通';
+};
+
 const exposureSubject = (row: ServiceExposure) => `dst_port:${row.port}`;
 
 const exposureObject = (row: ServiceExposure) => `${row.ip}:${row.port} / ${row.protocol}`;
@@ -866,6 +898,41 @@ const removeSilence = async (subject: string) => {
     await refresh();
   } finally {
     handlingAlert.value = false;
+  }
+};
+
+const editAsset = (asset: AssetRow) => {
+  assetEditor.value = {
+    ip: asset.ip,
+    name: asset.name || '',
+    owner: asset.owner || '',
+    business: asset.business || '',
+    environment: asset.environment || '未分类',
+    criticality: asset.criticality || 'normal',
+    tags: [...(asset.tags || [])],
+    note: asset.note || '',
+    metadata_updated_at: asset.metadata_updated_at || 0
+  };
+  assetTagsText.value = (asset.tags || []).join(', ');
+};
+
+const saveAssetMetadata = async () => {
+  if (!assetEditor.value) return;
+  savingAsset.value = true;
+  try {
+    const payload: AssetMetadata = {
+      ...assetEditor.value,
+      tags: assetTagsText.value
+        .split(/[,，;；]/)
+        .map((tag) => tag.trim())
+        .filter(Boolean)
+    };
+    await api.updateAssetMetadata(payload);
+    assetEditor.value = null;
+    assetTagsText.value = '';
+    await refresh();
+  } finally {
+    savingAsset.value = false;
   }
 };
 
@@ -1459,8 +1526,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <article class="metric">
             <Gauge :size="22" />
             <div>
-              <span>服务端资产</span>
-              <strong>{{ serviceAssetCount.toLocaleString() }}</strong>
+              <span>已建档资产</span>
+              <strong>{{ annotatedAssetCount.toLocaleString() }}</strong>
             </div>
           </article>
           <article class="metric">
@@ -1471,18 +1538,70 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <section v-if="assetEditor" class="table-panel asset-editor">
+          <div class="panel-heading">
+            <h2>资产台账编辑</h2>
+            <span>{{ assetEditor.ip }}</span>
+          </div>
+          <div class="asset-editor-grid">
+            <label>
+              <span>资产名称</span>
+              <input v-model="assetEditor.name" placeholder="例如 Web 控制台" />
+            </label>
+            <label>
+              <span>负责人</span>
+              <input v-model="assetEditor.owner" placeholder="负责人或团队" />
+            </label>
+            <label>
+              <span>业务系统</span>
+              <input v-model="assetEditor.business" placeholder="业务名称" />
+            </label>
+            <label>
+              <span>环境</span>
+              <select v-model="assetEditor.environment">
+                <option value="生产">生产</option>
+                <option value="测试">测试</option>
+                <option value="办公">办公</option>
+                <option value="未分类">未分类</option>
+              </select>
+            </label>
+            <label>
+              <span>重要性</span>
+              <select v-model="assetEditor.criticality">
+                <option value="critical">核心</option>
+                <option value="high">高</option>
+                <option value="normal">普通</option>
+                <option value="low">低</option>
+              </select>
+            </label>
+            <label>
+              <span>标签</span>
+              <input v-model="assetTagsText" placeholder="逗号分隔，例如 web, 公网, 核心" />
+            </label>
+            <label class="asset-note-field">
+              <span>备注</span>
+              <input v-model="assetEditor.note" placeholder="补充用途、变更或排查备注" />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button type="button" :disabled="savingAsset" @click="saveAssetMetadata">{{ savingAsset ? '保存中...' : '保存台账' }}</button>
+            <button type="button" :disabled="savingAsset" @click="assetEditor = null">取消</button>
+          </div>
+        </section>
         <section class="table-panel asset-table">
           <h2>活跃资产清单</h2>
           <table>
             <thead>
               <tr>
                 <th>IP</th>
+                <th>名称</th>
                 <th>角色</th>
+                <th>业务</th>
+                <th>负责人</th>
+                <th>重要性</th>
                 <th>总流量</th>
-                <th>出站</th>
-                <th>入站</th>
                 <th>包数</th>
-                <th>平均包长</th>
+                <th>标签</th>
                 <th>最近出现</th>
                 <th>操作</th>
               </tr>
@@ -1490,15 +1609,20 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <tbody>
               <tr v-for="asset in assets" :key="asset.ip">
                 <td>{{ asset.ip }}</td>
+                <td>{{ asset.name || '-' }}</td>
                 <td>{{ asset.role }}</td>
+                <td>{{ asset.business || '-' }}</td>
+                <td>{{ asset.owner || '-' }}</td>
+                <td>{{ criticalityText(asset.criticality) }}</td>
                 <td>{{ formatBytes(asset.total_bytes) }}</td>
-                <td>{{ formatBytes(asset.outbound_bytes) }}</td>
-                <td>{{ formatBytes(asset.inbound_bytes) }}</td>
                 <td>{{ asset.total_packets.toLocaleString() }}</td>
-                <td>{{ formatBytes(asset.avg_packet_size) }}</td>
+                <td>{{ asset.tags.length ? asset.tags.join(', ') : '-' }}</td>
                 <td>{{ formatTime(asset.last_seen) }}</td>
                 <td>
-                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                  <div class="row-actions">
+                    <button class="inline-button" type="button" @click="editAsset(asset)">编辑</button>
+                    <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                  </div>
                 </td>
               </tr>
             </tbody>

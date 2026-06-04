@@ -101,6 +101,22 @@ ENGINE = MergeTree
 PARTITION BY toDate(updated_at)
 ORDER BY (id, updated_at)
 TTL updated_at + INTERVAL 180 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.asset_metadata_overrides
+(
+    ip String,
+    name String,
+    owner String,
+    business String,
+    environment LowCardinality(String),
+    criticality LowCardinality(String),
+    tags String,
+    note String,
+    updated_at DateTime
+)
+ENGINE = MergeTree
+PARTITION BY toDate(updated_at)
+ORDER BY (ip, updated_at)
+TTL updated_at + INTERVAL 365 DAY`,
 	}
 	for _, q := range queries {
 		if err := s.exec(ctx, q); err != nil {
@@ -613,8 +629,8 @@ func (s *Store) ServiceExposure(ctx context.Context, minutes, limit int) ([]map[
 				"service":       service.Name,
 				"category":      service.Category,
 				"risk":          service.Risk,
-				"direction":      exposure.Direction,
-				"confidence":     exposure.Confidence,
+				"direction":     exposure.Direction,
+				"confidence":    exposure.Confidence,
 				"bytes":         uint64(0),
 				"packets":       uint64(0),
 				"client_count":  uint64(0),
@@ -676,7 +692,98 @@ FORMAT JSON`, s.database, minutes, limit)
 		row["role"] = assetRole(uintValue(row["inbound_bytes"]), uintValue(row["outbound_bytes"]))
 		row["avg_packet_size"] = averagePacketSize(uintValue(row["total_bytes"]), uintValue(row["total_packets"]))
 	}
+	metadata, metaErr := s.AssetMetadata(ctx, "")
+	if metaErr == nil {
+		for _, row := range parsed.Data {
+			if item, ok := metadata[stringValue(row["ip"])]; ok {
+				mergeAssetMetadata(row, item)
+			} else {
+				mergeAssetMetadata(row, map[string]any{})
+			}
+		}
+	} else {
+		for _, row := range parsed.Data {
+			mergeAssetMetadata(row, map[string]any{})
+		}
+	}
 	return parsed.Data, nil
+}
+
+func (s *Store) AssetMetadata(ctx context.Context, ip string) (map[string]map[string]any, error) {
+	where := ""
+	if strings.TrimSpace(ip) != "" {
+		where = "WHERE ip = '" + escape(strings.TrimSpace(ip)) + "'"
+	}
+	q := fmt.Sprintf(`SELECT
+    ip,
+    argMax(name, updated_at) AS name,
+    argMax(owner, updated_at) AS owner,
+    argMax(business, updated_at) AS business,
+    argMax(environment, updated_at) AS environment,
+    argMax(criticality, updated_at) AS criticality,
+    argMax(tags, updated_at) AS tags,
+    argMax(note, updated_at) AS note,
+    toUnixTimestamp(max(updated_at)) AS metadata_updated_at
+FROM %s.asset_metadata_overrides
+%s
+GROUP BY ip
+FORMAT JSON`, s.database, where)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	result := map[string]map[string]any{}
+	for _, row := range parsed.Data {
+		normalizeAssetMetadata(row)
+		result[stringValue(row["ip"])] = row
+	}
+	return result, nil
+}
+
+func (s *Store) UpdateAssetMetadata(ctx context.Context, row map[string]any) (map[string]any, error) {
+	ip := strings.TrimSpace(stringValue(row["ip"]))
+	if ip == "" {
+		return nil, fmt.Errorf("ip is required")
+	}
+	metadata := map[string]any{
+		"ip":          ip,
+		"name":        strings.TrimSpace(stringValue(row["name"])),
+		"owner":       strings.TrimSpace(stringValue(row["owner"])),
+		"business":    strings.TrimSpace(stringValue(row["business"])),
+		"environment": strings.TrimSpace(stringValue(row["environment"])),
+		"criticality": strings.TrimSpace(stringValue(row["criticality"])),
+		"tags":        normalizeTagString(row["tags"]),
+		"note":        strings.TrimSpace(stringValue(row["note"])),
+	}
+	if metadata["environment"] == "" {
+		metadata["environment"] = "未分类"
+	}
+	if metadata["criticality"] == "" {
+		metadata["criticality"] = "normal"
+	}
+	q := "INSERT INTO " + s.database + ".asset_metadata_overrides FORMAT JSONEachRow"
+	if err := s.execBody(ctx, q, fmt.Sprintf(`{"ip":%q,"name":%q,"owner":%q,"business":%q,"environment":%q,"criticality":%q,"tags":%q,"note":%q,"updated_at":%q}`+"\n",
+		ip,
+		stringValue(metadata["name"]),
+		stringValue(metadata["owner"]),
+		stringValue(metadata["business"]),
+		stringValue(metadata["environment"]),
+		stringValue(metadata["criticality"]),
+		stringValue(metadata["tags"]),
+		stringValue(metadata["note"]),
+		formatTime(time.Now().Unix()),
+	)); err != nil {
+		return nil, err
+	}
+	metadata["metadata_updated_at"] = time.Now().Unix()
+	normalizeAssetMetadata(metadata)
+	return metadata, nil
 }
 
 func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
@@ -1245,8 +1352,8 @@ func demoServiceExposure() []map[string]any {
 			"service":       "HTTPS",
 			"category":      "Web",
 			"risk":          "low",
-			"direction":      "入站",
-			"confidence":     "高",
+			"direction":     "入站",
+			"confidence":    "高",
 			"bytes":         uint64(42000000),
 			"packets":       uint64(14000),
 			"client_count":  uint64(3),
@@ -1260,8 +1367,8 @@ func demoServiceExposure() []map[string]any {
 			"service":       "SSH",
 			"category":      "远程管理",
 			"risk":          "high",
-			"direction":      "入站",
-			"confidence":     "高",
+			"direction":     "入站",
+			"confidence":    "高",
 			"bytes":         uint64(18000000),
 			"packets":       uint64(7200),
 			"client_count":  uint64(2),
@@ -1275,30 +1382,46 @@ func demoAssets() []map[string]any {
 	now := time.Now().Unix()
 	return []map[string]any{
 		{
-			"ip":               "10.10.1.42",
-			"role":             "外联源",
-			"inbound_bytes":    uint64(12000000),
-			"inbound_packets":  uint64(4000),
-			"outbound_bytes":   uint64(68000000),
-			"outbound_packets": uint64(21000),
-			"total_bytes":      uint64(80000000),
-			"total_packets":    uint64(25000),
-			"avg_packet_size":  uint64(3200),
-			"first_seen":       now - 900,
-			"last_seen":        now,
+			"ip":                  "10.10.1.42",
+			"name":                "",
+			"owner":               "",
+			"business":            "",
+			"environment":         "未分类",
+			"criticality":         "normal",
+			"tags":                []string{},
+			"note":                "",
+			"metadata_updated_at": int64(0),
+			"role":                "外联源",
+			"inbound_bytes":       uint64(12000000),
+			"inbound_packets":     uint64(4000),
+			"outbound_bytes":      uint64(68000000),
+			"outbound_packets":    uint64(21000),
+			"total_bytes":         uint64(80000000),
+			"total_packets":       uint64(25000),
+			"avg_packet_size":     uint64(3200),
+			"first_seen":          now - 900,
+			"last_seen":           now,
 		},
 		{
-			"ip":               "172.20.2.10",
-			"role":             "服务端",
-			"inbound_bytes":    uint64(52000000),
-			"inbound_packets":  uint64(18000),
-			"outbound_bytes":   uint64(9000000),
-			"outbound_packets": uint64(2600),
-			"total_bytes":      uint64(61000000),
-			"total_packets":    uint64(20600),
-			"avg_packet_size":  uint64(2961),
-			"first_seen":       now - 900,
-			"last_seen":        now,
+			"ip":                  "172.20.2.10",
+			"name":                "示例 Web 服务",
+			"owner":               "平台团队",
+			"business":            "NexaFlow",
+			"environment":         "测试",
+			"criticality":         "high",
+			"tags":                []string{"web"},
+			"note":                "",
+			"metadata_updated_at": now,
+			"role":                "服务端",
+			"inbound_bytes":       uint64(52000000),
+			"inbound_packets":     uint64(18000),
+			"outbound_bytes":      uint64(9000000),
+			"outbound_packets":    uint64(2600),
+			"total_bytes":         uint64(61000000),
+			"total_packets":       uint64(20600),
+			"avg_packet_size":     uint64(2961),
+			"first_seen":          now - 900,
+			"last_seen":           now,
 		},
 	}
 }
@@ -1428,6 +1551,72 @@ func stringValue(v any) string {
 		return s
 	}
 	return ""
+}
+
+func mergeAssetMetadata(row, metadata map[string]any) {
+	defaults := map[string]any{
+		"name":                "",
+		"owner":               "",
+		"business":            "",
+		"environment":         "未分类",
+		"criticality":         "normal",
+		"tags":                []string{},
+		"note":                "",
+		"metadata_updated_at": int64(0),
+	}
+	for key, value := range defaults {
+		row[key] = value
+	}
+	for _, key := range []string{"name", "owner", "business", "environment", "criticality", "note"} {
+		if value := strings.TrimSpace(stringValue(metadata[key])); value != "" {
+			row[key] = value
+		}
+	}
+	row["tags"] = tagsFromAny(metadata["tags"])
+	if updated := int64Value(metadata["metadata_updated_at"]); updated > 0 {
+		row["metadata_updated_at"] = updated
+	}
+}
+
+func normalizeAssetMetadata(row map[string]any) {
+	if strings.TrimSpace(stringValue(row["environment"])) == "" {
+		row["environment"] = "未分类"
+	}
+	if strings.TrimSpace(stringValue(row["criticality"])) == "" {
+		row["criticality"] = "normal"
+	}
+	row["tags"] = tagsFromAny(row["tags"])
+}
+
+func normalizeTagString(v any) string {
+	return strings.Join(tagsFromAny(v), ",")
+}
+
+func tagsFromAny(v any) []string {
+	var raw []string
+	switch value := v.(type) {
+	case []string:
+		raw = value
+	case []any:
+		for _, item := range value {
+			raw = append(raw, strings.TrimSpace(stringValue(item)))
+		}
+	case string:
+		raw = strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == '，' || r == ';' || r == '；'
+		})
+	}
+	seen := map[string]bool{}
+	tags := []string{}
+	for _, tag := range raw {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
 }
 
 func uintValue(v any) uint64 {

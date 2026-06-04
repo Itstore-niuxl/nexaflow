@@ -160,6 +160,14 @@ export interface SearchResult {
 
 export interface AssetRow {
   ip: string;
+  name: string;
+  owner: string;
+  business: string;
+  environment: string;
+  criticality: string;
+  tags: string[];
+  note: string;
+  metadata_updated_at: number;
   role: string;
   inbound_bytes: number;
   inbound_packets: number;
@@ -170,6 +178,18 @@ export interface AssetRow {
   avg_packet_size: number;
   first_seen: number;
   last_seen: number;
+}
+
+export interface AssetMetadata {
+  ip: string;
+  name: string;
+  owner: string;
+  business: string;
+  environment: string;
+  criticality: string;
+  tags: string[];
+  note: string;
+  metadata_updated_at?: number;
 }
 
 export interface SecurityInsight {
@@ -290,6 +310,17 @@ export const api = {
   },
   async assets(minutes = 15, limit = 50) {
     return json<{ data: AssetRow[]; degraded: boolean }>(`/api/v1/assets?minutes=${minutes}&limit=${limit}`);
+  },
+  async updateAssetMetadata(metadata: AssetMetadata) {
+    const response = await fetch('/api/v1/assets/metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AssetMetadata }>;
   },
   async securityInsights(minutes = 15, limit = 50) {
     return json<{ data: SecurityInsight[]; degraded: boolean }>(
