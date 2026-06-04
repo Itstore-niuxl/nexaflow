@@ -516,6 +516,17 @@ export const api = {
       `/api/v1/security/incident-context?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&minutes=${minutes}&limit=${limit}`
     );
   },
+  async updateIncidentStatus(id: string, status: string) {
+    const response = await fetch('/api/v1/security/incident-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: { id: string; status: string } }>;
+  },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);
   },

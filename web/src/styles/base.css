@@ -904,7 +904,7 @@ td {
 }
 
 .incident-table table {
-  min-width: 1540px;
+  min-width: 1720px;
 }
 
 .anomaly-table table {
@@ -998,7 +998,7 @@ td {
 
 .incident-table th:nth-child(11),
 .incident-table td:nth-child(11) {
-  width: 190px;
+  width: 280px;
 }
 
 .asset-risk-table th:first-child,

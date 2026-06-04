@@ -411,6 +411,28 @@ func (s *Store) UpdateAlertStatus(ctx context.Context, id, status string) error 
 	return s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"status":%q,"updated_at":%q}`+"\n", id, status, formatTime(time.Now().Unix())))
 }
 
+func (s *Store) AlertStatusOverrides(ctx context.Context) (map[string]string, error) {
+	q := fmt.Sprintf(`SELECT id, argMax(status, updated_at) AS status
+FROM %s.alert_status_overrides
+GROUP BY id
+FORMAT JSON`, s.database)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return map[string]string{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return map[string]string{}, err
+	}
+	result := map[string]string{}
+	for _, row := range parsed.Data {
+		result[stringValue(row["id"])] = stringValue(row["status"])
+	}
+	return result, nil
+}
+
 func (s *Store) IPProfile(ctx context.Context, ip string, minutes int) (map[string]any, error) {
 	stats, err := s.ipStats(ctx, ip, minutes)
 	if err != nil {
@@ -1416,6 +1438,7 @@ func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]ma
 	alerts, alertErr := s.Alerts(ctx, max(limit, 50), minutes)
 	insights, insightErr := s.SecurityInsights(ctx, minutes, max(limit, 50))
 	anomalies, anomalyErr := s.TrafficAnomalies(ctx, minutes, max(limit, 50))
+	overrides, overrideErr := s.AlertStatusOverrides(ctx)
 	now := time.Now().Unix()
 	items := make([]map[string]any, 0, len(alerts)+len(insights)+len(anomalies))
 	for _, alert := range alerts {
@@ -1427,6 +1450,7 @@ func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]ma
 	for _, anomaly := range anomalies {
 		items = append(items, incidentFromAnomaly(anomaly, now, minutes))
 	}
+	applyIncidentStatusOverrides(items, overrides)
 	sort.Slice(items, func(i, j int) bool {
 		if incidentStatusWeight(stringValue(items[i]["status"])) != incidentStatusWeight(stringValue(items[j]["status"])) {
 			return incidentStatusWeight(stringValue(items[i]["status"])) > incidentStatusWeight(stringValue(items[j]["status"]))
@@ -1442,10 +1466,10 @@ func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]ma
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	if len(items) == 0 && (alertErr != nil || insightErr != nil || anomalyErr != nil) {
-		return demoSecurityIncidents(now), firstErr(alertErr, insightErr, anomalyErr)
+	if len(items) == 0 && (alertErr != nil || insightErr != nil || anomalyErr != nil || overrideErr != nil) {
+		return demoSecurityIncidents(now), firstErr(alertErr, insightErr, anomalyErr, overrideErr)
 	}
-	return items, firstErr(alertErr, insightErr, anomalyErr)
+	return items, firstErr(alertErr, insightErr, anomalyErr, overrideErr)
 }
 
 func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind string, minutes, limit int) (map[string]any, error) {
@@ -2849,6 +2873,17 @@ func severityScore(severity string) int {
 		return 70
 	default:
 		return 40
+	}
+}
+
+func applyIncidentStatusOverrides(items []map[string]any, overrides map[string]string) {
+	if len(overrides) == 0 {
+		return
+	}
+	for _, item := range items {
+		if status := overrides[stringValue(item["id"])]; status != "" {
+			item["status"] = status
+		}
 	}
 }
 

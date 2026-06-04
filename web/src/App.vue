@@ -1540,6 +1540,25 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   }
 };
 
+const updateIncidentStatus = async (incident: SecurityIncident, status: string) => {
+  handlingAlert.value = true;
+  try {
+    await api.updateIncidentStatus(incident.id, status);
+    const [incidentRes, assetRiskRes] = await Promise.all([
+      api.securityIncidents(selectedMinutes.value, 120),
+      api.assetRiskPosture(selectedMinutes.value, 120)
+    ]);
+    securityIncidents.value = incidentRes.data;
+    assetRisks.value = assetRiskRes.data;
+    degraded.value = incidentRes.degraded || assetRiskRes.degraded;
+    if (selectedIncident.value?.id === incident.id) {
+      selectedIncident.value = securityIncidents.value.find((item) => item.id === incident.id) ?? null;
+    }
+  } finally {
+    handlingAlert.value = false;
+  }
+};
+
 const loadDimensionTrend = async () => {
   loading.value = true;
   try {
@@ -3033,6 +3052,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td class="action-cell">
                   <button class="inline-button" type="button" :disabled="loadingIncidentContext" @click="loadIncidentContext(incident)">上下文</button>
                   <button class="inline-button" type="button" @click="inspectIncident(incident)">追踪</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'ack'" @click="updateIncidentStatus(incident, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'resolved'" @click="updateIncidentStatus(incident, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'open'" @click="updateIncidentStatus(incident, 'open')">重开</button>
                   <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(incident.subject)">忽略</button>
                 </td>
               </tr>

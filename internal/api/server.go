@@ -55,6 +55,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
 	mux.HandleFunc("/api/v1/security/incidents", s.securityIncidents)
 	mux.HandleFunc("/api/v1/security/incident-context", s.securityIncidentContext)
+	mux.HandleFunc("/api/v1/security/incident-status", s.securityIncidentStatus)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -306,7 +307,13 @@ func (s *Server) securityIncidents(w http.ResponseWriter, r *http.Request) {
 	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
 	statusData, _ := s.store.Status(r.Context())
 	if alert := collectorHealthAlert(s.config.CollectorID, statusData); alert.ID != "" && !isSilencedSubject(alert.Subject, runtime.Alerts.SilencedSubjects) {
-		data = append([]map[string]any{collectorIncident(alert)}, data...)
+		collectorRow := collectorIncident(alert)
+		if overrides, overrideErr := s.store.AlertStatusOverrides(r.Context()); overrideErr == nil {
+			if status := overrides[stringValue(collectorRow["id"])]; status != "" {
+				collectorRow["status"] = status
+			}
+		}
+		data = append([]map[string]any{collectorRow}, data...)
 		if len(data) > limit {
 			data = data[:limit]
 		}
@@ -328,6 +335,26 @@ func (s *Server) securityIncidentContext(w http.ResponseWriter, r *http.Request)
 		queryLimit(r, 12, 50),
 	)
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) securityIncidentStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.UpdateAlertStatus(r.Context(), strings.TrimSpace(body.ID), strings.TrimSpace(body.Status)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"data": map[string]string{"id": body.ID, "status": body.Status}})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
