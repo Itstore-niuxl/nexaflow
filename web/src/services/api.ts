@@ -63,6 +63,64 @@ export interface SystemStatus {
   collector?: CollectorConfig & { id?: string };
 }
 
+export interface DataQualitySummary {
+  latest_window_ts: number;
+  freshness_seconds: number;
+  expected_windows: number;
+  observed_windows: number;
+  coverage_ratio: number;
+  gap_count: number;
+  stale_sources: number;
+  source_count: number;
+  interface_count: number;
+  bytes: number;
+  packets: number;
+  drops: number;
+  max_utilization: number;
+}
+
+export interface DataQualitySource {
+  source_id: string;
+  iface: string;
+  windows: number;
+  bytes: number;
+  packets: number;
+  drops: number;
+  max_utilization: number;
+  first_window_ts: number;
+  latest_window_ts: number;
+  freshness_seconds: number;
+  coverage_ratio: number;
+  status: string;
+}
+
+export interface DataQualityGap {
+  source_id: string;
+  iface: string;
+  start_ts: number;
+  end_ts: number;
+  duration_seconds: number;
+  missing_windows: number;
+}
+
+export interface DataQualityRecommendation {
+  level: string;
+  title: string;
+  detail: string;
+}
+
+export interface DataQuality {
+  generated_at: number;
+  minutes: number;
+  status: string;
+  window_interval: number;
+  summary: DataQualitySummary;
+  sources: DataQualitySource[];
+  gaps: DataQualityGap[];
+  recommendations: DataQualityRecommendation[];
+  degraded_reasons: string[];
+}
+
 export interface IPProfile {
   ip: string;
   minutes: number;
@@ -512,6 +570,9 @@ export const api = {
   },
   async status() {
     return json<{ data: SystemStatus; degraded: boolean }>('/api/v1/system/status');
+  },
+  async dataQuality(minutes = 15, limit = 20) {
+    return json<{ data: DataQuality; degraded: boolean }>(`/api/v1/system/data-quality?minutes=${minutes}&limit=${limit}`);
   },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(

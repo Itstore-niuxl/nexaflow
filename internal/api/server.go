@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/alerts/config", s.alertConfig)
 	mux.HandleFunc("/api/v1/alerts/silences", s.alertSilences)
 	mux.HandleFunc("/api/v1/system/status", s.status)
+	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	return cors(mux)
 }
 
@@ -678,6 +679,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"alerts":       runtime.Alerts,
 		"updated_at":   runtime.UpdatedAt,
 	}
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) dataQuality(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.DataQuality(r.Context(), queryMinutes(r), queryLimit(r, 20, 200))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 

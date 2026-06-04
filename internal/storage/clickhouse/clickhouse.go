@@ -379,6 +379,87 @@ FORMAT JSON`, s.database)
 	return parsed.Data[0], nil
 }
 
+func (s *Store) DataQuality(ctx context.Context, minutes, limit int) (map[string]any, error) {
+	if minutes <= 0 {
+		minutes = 15
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	sources, sourceErr := s.dataQualitySources(ctx, minutes, limit)
+	gaps, gapErr := s.dataQualityGaps(ctx, minutes, max(limit*3, 60))
+	now := time.Now().Unix()
+	expectedPerSource := int64(minutes * 60 / 5)
+	if expectedPerSource <= 0 {
+		expectedPerSource = 1
+	}
+	totalWindows := int64(0)
+	totalBytes := uint64(0)
+	totalPackets := uint64(0)
+	totalDrops := uint64(0)
+	maxUtilization := 0.0
+	staleSources := int64(0)
+	latestWindow := int64(0)
+	for _, row := range sources {
+		windows := int64Value(row["windows"])
+		totalWindows += windows
+		totalBytes += uintValue(row["bytes"])
+		totalPackets += uintValue(row["packets"])
+		totalDrops += uintValue(row["drops"])
+		if util := floatValue(row["max_utilization"]); util > maxUtilization {
+			maxUtilization = util
+		}
+		if latest := int64Value(row["latest_window_ts"]); latest > latestWindow {
+			latestWindow = latest
+		}
+		freshness := now - int64Value(row["latest_window_ts"])
+		row["freshness_seconds"] = freshness
+		row["coverage_ratio"] = ratioFloat(float64(windows), float64(expectedPerSource))
+		row["status"] = dataQualitySourceStatus(freshness, floatValue(row["coverage_ratio"]), uintValue(row["drops"]))
+		if stringValue(row["status"]) != "healthy" {
+			staleSources++
+		}
+	}
+	expectedTotal := expectedPerSource * int64(max(len(sources), 1))
+	coverage := ratioFloat(float64(totalWindows), float64(expectedTotal))
+	freshness := int64(0)
+	if latestWindow > 0 {
+		freshness = now - latestWindow
+	}
+	status := dataQualityStatus(freshness, coverage, len(gaps), staleSources)
+	summary := map[string]any{
+		"latest_window_ts":  latestWindow,
+		"freshness_seconds": freshness,
+		"expected_windows":  expectedTotal,
+		"observed_windows":  totalWindows,
+		"coverage_ratio":    coverage,
+		"gap_count":         len(gaps),
+		"stale_sources":     staleSources,
+		"source_count":      len(sources),
+		"interface_count":   countDistinctStrings(sources, "iface"),
+		"bytes":             totalBytes,
+		"packets":           totalPackets,
+		"drops":             totalDrops,
+		"max_utilization":   maxUtilization,
+	}
+	data := map[string]any{
+		"generated_at":     now,
+		"minutes":          minutes,
+		"status":           status,
+		"summary":          summary,
+		"sources":          sources,
+		"gaps":             gaps,
+		"recommendations":  dataQualityRecommendations(status, summary, sources, gaps),
+		"window_interval":  5,
+		"degraded_reasons": []string{},
+	}
+	err := firstErr(sourceErr, gapErr)
+	if len(sources) == 0 && err != nil {
+		return demoDataQuality(minutes), err
+	}
+	return data, err
+}
+
 func (s *Store) Alerts(ctx context.Context, limit, minutes int) ([]model.AlertEvent, error) {
 	q := fmt.Sprintf(`SELECT
     e.id AS id,
@@ -2362,6 +2443,56 @@ func demoStatus() map[string]any {
 	}
 }
 
+func demoDataQuality(minutes int) map[string]any {
+	now := time.Now().Unix()
+	sources := []map[string]any{
+		{
+			"source_id":         "dev-source-01",
+			"iface":             "mock0",
+			"windows":           int64(170),
+			"bytes":             uint64(158000000),
+			"packets":           uint64(98000),
+			"drops":             uint64(0),
+			"max_utilization":   0.08,
+			"first_window_ts":   now - int64(minutes*60),
+			"latest_window_ts":  now - 5,
+			"freshness_seconds": int64(5),
+			"coverage_ratio":    0.94,
+			"status":            "healthy",
+		},
+	}
+	gaps := []map[string]any{
+		{"source_id": "dev-source-01", "iface": "mock0", "start_ts": now - 480, "end_ts": now - 455, "duration_seconds": int64(25), "missing_windows": 4},
+	}
+	return map[string]any{
+		"generated_at":    now,
+		"minutes":         minutes,
+		"status":          "warning",
+		"window_interval": 5,
+		"summary": map[string]any{
+			"latest_window_ts":  now - 5,
+			"freshness_seconds": int64(5),
+			"expected_windows":  int64(minutes * 60 / 5),
+			"observed_windows":  int64(170),
+			"coverage_ratio":    0.94,
+			"gap_count":         len(gaps),
+			"stale_sources":     int64(0),
+			"source_count":      len(sources),
+			"interface_count":   1,
+			"bytes":             uint64(158000000),
+			"packets":           uint64(98000),
+			"drops":             uint64(0),
+			"max_utilization":   0.08,
+		},
+		"sources": sources,
+		"gaps":    gaps,
+		"recommendations": []map[string]string{
+			{"level": "warning", "title": "定位采集断档", "detail": "示例采集源存在短时断档，真实数据接入后会自动展示实际断档"},
+		},
+		"degraded_reasons": []string{"demo data"},
+	}
+}
+
 func demoIPProfile(ip string) map[string]any {
 	if ip == "" {
 		ip = "10.10.1.42"
@@ -3356,6 +3487,157 @@ func mapStringValues(row map[string]any) []string {
 		}
 	}
 	return values
+}
+
+func (s *Store) dataQualitySources(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT
+    source_id,
+    iface,
+    count() AS windows,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(drops) AS drops,
+    max(utilization) AS max_utilization,
+    toUnixTimestamp(min(ts)) AS first_window_ts,
+    toUnixTimestamp(max(ts)) AS latest_window_ts
+FROM %s.link_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+GROUP BY source_id, iface
+ORDER BY latest_window_ts DESC, bytes DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	return parsed.Data, nil
+}
+
+func (s *Store) dataQualityGaps(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT
+    source_id,
+    iface,
+    toUnixTimestamp(ts) AS window_ts
+FROM %s.link_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+ORDER BY source_id ASC, iface ASC, ts ASC
+LIMIT 5000
+FORMAT JSON`, s.database, minutes)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	items := []map[string]any{}
+	lastKey := ""
+	lastTs := int64(0)
+	for _, row := range parsed.Data {
+		key := stringValue(row["source_id"]) + "|" + stringValue(row["iface"])
+		ts := int64Value(row["window_ts"])
+		if key == lastKey && lastTs > 0 && ts-lastTs > 10 {
+			duration := ts - lastTs
+			items = append(items, map[string]any{
+				"source_id":        stringValue(row["source_id"]),
+				"iface":            stringValue(row["iface"]),
+				"start_ts":         lastTs,
+				"end_ts":           ts,
+				"duration_seconds": duration,
+				"missing_windows":  max(int(duration/5)-1, 1),
+			})
+		}
+		lastKey = key
+		lastTs = ts
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return int64Value(items[i]["duration_seconds"]) > int64Value(items[j]["duration_seconds"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+func dataQualitySourceStatus(freshness int64, coverage float64, drops uint64) string {
+	if freshness > 30 || coverage < 0.5 {
+		return "critical"
+	}
+	if freshness > 12 || coverage < 0.9 || drops > 0 {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func dataQualityStatus(freshness int64, coverage float64, gapCount int, staleSources int64) string {
+	if freshness > 30 || coverage < 0.5 || staleSources > 0 && coverage < 0.7 {
+		return "critical"
+	}
+	if freshness > 12 || coverage < 0.9 || gapCount > 0 || staleSources > 0 {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func dataQualityRecommendations(status string, summary map[string]any, sources, gaps []map[string]any) []map[string]string {
+	items := []map[string]string{}
+	if status == "healthy" {
+		items = append(items, map[string]string{"level": "info", "title": "采集质量稳定", "detail": "当前窗口覆盖率和最新窗口延迟正常，可以继续基于实时数据分析"})
+	}
+	if int64Value(summary["freshness_seconds"]) > 12 {
+		items = append(items, map[string]string{"level": "critical", "title": "检查采集延迟", "detail": "最近采集窗口延迟偏高，优先检查 collector 容器、网卡权限和 ClickHouse 写入"})
+	}
+	if floatValue(summary["coverage_ratio"]) < 0.9 {
+		items = append(items, map[string]string{"level": "warning", "title": "补查窗口覆盖率", "detail": "观察范围内采集窗口覆盖不足，建议核对采集进程是否重启或网卡流量是否中断"})
+	}
+	if len(gaps) > 0 {
+		first := gaps[0]
+		items = append(items, map[string]string{"level": "warning", "title": "定位采集断档", "detail": stringValue(first["source_id"]) + " / " + stringValue(first["iface"]) + " 存在最长 " + strconv.FormatInt(int64Value(first["duration_seconds"]), 10) + " 秒断档"})
+	}
+	for _, source := range sources {
+		if uintValue(source["drops"]) > 0 {
+			items = append(items, map[string]string{"level": "warning", "title": "关注丢包计数", "detail": stringValue(source["source_id"]) + " / " + stringValue(source["iface"]) + " 存在采集 drops，建议检查网卡负载或抓包权限"})
+			break
+		}
+	}
+	if len(items) == 0 {
+		items = append(items, map[string]string{"level": "info", "title": "继续观察", "detail": "当前数据质量未出现明显异常"})
+	}
+	return items
+}
+
+func countDistinctStrings(rows []map[string]any, key string) int {
+	seen := map[string]bool{}
+	for _, row := range rows {
+		value := stringValue(row[key])
+		if value != "" {
+			seen[value] = true
+		}
+	}
+	return len(seen)
+}
+
+func ratioFloat(value, total float64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	result := value / total
+	if result > 1 {
+		return 1
+	}
+	if result < 0 {
+		return 0
+	}
+	return result
 }
 
 func incidentContextSelector(subject, kind string) map[string]string {

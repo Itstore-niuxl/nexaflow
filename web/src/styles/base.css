@@ -899,6 +899,8 @@ td {
 .report-incident-table table,
 .rules-table table,
 .rule-finding-table table,
+.data-quality-table table,
+.data-gap-table table,
 .change-table table {
   table-layout: fixed;
 }
@@ -922,6 +924,14 @@ td {
 
 .rule-finding-table table {
   min-width: 1480px;
+}
+
+.data-quality-table table {
+  min-width: 1180px;
+}
+
+.data-gap-table table {
+  min-width: 920px;
 }
 
 .anomaly-table table {
@@ -1077,6 +1087,16 @@ td {
 .rule-editor-panel {
   display: grid;
   gap: 14px;
+}
+
+.data-quality-table th:first-child,
+.data-quality-table td:first-child,
+.data-gap-table th:first-child,
+.data-gap-table td:first-child {
+  width: 22%;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .asset-risk-table th:first-child,

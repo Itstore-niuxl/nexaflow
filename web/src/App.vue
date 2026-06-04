@@ -42,6 +42,7 @@ import {
   type AssetRow,
   type Collector,
   type CollectorConfig,
+  type DataQuality,
   type DimensionPoint,
   type DetectionRule,
   type ExternalAccess,
@@ -92,6 +93,32 @@ const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
+const emptyDataQuality = (): DataQuality => ({
+  generated_at: 0,
+  minutes: 15,
+  status: 'unknown',
+  window_interval: 5,
+  summary: {
+    latest_window_ts: 0,
+    freshness_seconds: 0,
+    expected_windows: 0,
+    observed_windows: 0,
+    coverage_ratio: 0,
+    gap_count: 0,
+    stale_sources: 0,
+    source_count: 0,
+    interface_count: 0,
+    bytes: 0,
+    packets: 0,
+    drops: 0,
+    max_utilization: 0
+  },
+  sources: [],
+  gaps: [],
+  recommendations: [],
+  degraded_reasons: []
+});
+const dataQuality = ref<DataQuality>(emptyDataQuality());
 const alertConfig = ref<AlertConfig>({ flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 });
 const ipProfile = ref<IPProfile>({
   ip: '10.2.0.12',
@@ -246,6 +273,7 @@ const navGroups = [
     items: [
       { id: 'dashboard', label: '总览大屏', icon: LayoutDashboard },
       { id: 'realtime', label: '实时监控', icon: MonitorDot },
+      { id: 'quality', label: '数据质量', icon: Database },
       { id: 'traffic', label: '流量剖析', icon: ChartNoAxesCombined }
     ]
   },
@@ -288,6 +316,7 @@ const navGroups = [
 const viewMeta: Record<string, { title: string; subtitle: string }> = {
   dashboard: { title: '流量总览', subtitle: '近实时流量、采集健康和关键对象排行' },
   realtime: { title: '实时监控', subtitle: '采集窗口、吞吐、包速率和采集器健康状态' },
+  quality: { title: '数据质量', subtitle: '核对采集窗口覆盖率、断档、延迟、采集源和网卡健康状态' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
@@ -350,6 +379,7 @@ const refresh = async () => {
       alertRes,
       interfaceRes,
       statusRes,
+      dataQualityRes,
       windowsRes,
       alertConfigRes,
       matrixRes,
@@ -389,6 +419,7 @@ const refresh = async () => {
       api.alerts(minutes),
       api.interfaces(),
       api.status(),
+      api.dataQuality(minutes, 80),
       api.windows(minutes, 80),
       api.alertConfig(),
       api.matrix(minutes, 80),
@@ -428,6 +459,7 @@ const refresh = async () => {
     alerts.value = alertRes.data;
     interfaces.value = interfaceRes.data;
     systemStatus.value = statusRes.data;
+    dataQuality.value = dataQualityRes.data;
     historyWindows.value = windowsRes.data;
     alertConfig.value = alertConfigRes.data;
     detectionRules.value = alertConfigRes.data.detection_rules ?? [];
@@ -461,6 +493,7 @@ const refresh = async () => {
       ecnRes.degraded ||
       alertRes.degraded ||
       statusRes.degraded ||
+      dataQualityRes.degraded ||
       windowsRes.degraded ||
       matrixRes.degraded ||
       serviceMapRes.degraded ||
@@ -585,6 +618,46 @@ const refresh = async () => {
     collectors.value = [{ id: 'dev-collector-01', source_id: 'dev-source-01', status: 'offline', mode: 'mock', bpf_filter: 'ip or ip6', updated_at: now }];
     interfaces.value = [{ name: 'eth0', state: 'up', type: 'interface' }];
     systemStatus.value = { database: 'degraded', latest_window_ts: now, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 };
+    dataQuality.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      status: 'warning',
+      window_interval: 5,
+      summary: {
+        latest_window_ts: now - 5,
+        freshness_seconds: 5,
+        expected_windows: selectedMinutes.value * 12,
+        observed_windows: 170,
+        coverage_ratio: 0.94,
+        gap_count: 1,
+        stale_sources: 0,
+        source_count: 1,
+        interface_count: 1,
+        bytes: 158000000,
+        packets: 98000,
+        drops: 0,
+        max_utilization: 0.08
+      },
+      sources: [
+        {
+          source_id: 'dev-source-01',
+          iface: 'mock0',
+          windows: 170,
+          bytes: 158000000,
+          packets: 98000,
+          drops: 0,
+          max_utilization: 0.08,
+          first_window_ts: now - selectedMinutes.value * 60,
+          latest_window_ts: now - 5,
+          freshness_seconds: 5,
+          coverage_ratio: 0.94,
+          status: 'healthy'
+        }
+      ],
+      gaps: [{ source_id: 'dev-source-01', iface: 'mock0', start_ts: now - 480, end_ts: now - 455, duration_seconds: 25, missing_windows: 4 }],
+      recommendations: [{ level: 'warning', title: '定位采集断档', detail: '示例采集源存在短时断档，真实数据接入后会自动展示实际断档' }],
+      degraded_reasons: ['demo data']
+    };
     alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
     detectionRules.value = [
       {
@@ -1191,6 +1264,27 @@ const formatRate = (bytes: number, seconds = rangeSeconds.value) => `${((bytes *
 
 const pps = computed(() => Math.round(summary.value.packets / rangeSeconds.value));
 const onlineCollectorCount = computed(() => collectors.value.filter((collector) => collector.status === 'online').length);
+const dataQualitySourceItems = computed(() =>
+  dataQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: Math.round(row.coverage_ratio * 100),
+    packets: row.windows
+  }))
+);
+const dataQualityFreshnessItems = computed(() =>
+  dataQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: row.freshness_seconds,
+    packets: row.windows
+  }))
+);
+const dataQualityDropItems = computed(() =>
+  dataQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: row.drops,
+    packets: row.windows
+  }))
+);
 
 const profileTotalBytes = computed(() => ipProfile.value.inbound_bytes + ipProfile.value.outbound_bytes);
 const profileTotalPackets = computed(() => ipProfile.value.inbound_packets + ipProfile.value.outbound_packets);
@@ -1498,6 +1592,16 @@ const statusText = (status: string) => {
     online: '在线',
     offline: '离线',
     degraded: '降级'
+  };
+  return labels[status] ?? status;
+};
+
+const dataQualityStatusText = (status: string) => {
+  const labels: Record<string, string> = {
+    healthy: '健康',
+    warning: '警告',
+    critical: '严重',
+    unknown: '未知'
   };
   return labels[status] ?? status;
 };
@@ -2076,6 +2180,44 @@ const exportWindows = () => {
   exportCSV(`nexaflow-windows-${selectedMinutes.value}m.csv`, rows);
 };
 
+const exportDataQuality = () => {
+  const rows = [
+    ['类型', '采集源', '网卡', '状态', '窗口数', '覆盖率', '最新延迟秒', '流量字节', '包数', 'Drops', '开始时间', '结束时间', '摘要'],
+    ['摘要', '-', '-', dataQualityStatusText(dataQuality.value.status), String(dataQuality.value.summary.observed_windows), String(dataQuality.value.summary.coverage_ratio), String(dataQuality.value.summary.freshness_seconds), String(dataQuality.value.summary.bytes), String(dataQuality.value.summary.packets), String(dataQuality.value.summary.drops), '', formatTime(dataQuality.value.summary.latest_window_ts), `${dataQuality.value.summary.gap_count} 个断档 / ${dataQuality.value.summary.stale_sources} 个异常源`],
+    ...dataQuality.value.sources.map((row) => [
+      '采集源',
+      row.source_id,
+      row.iface,
+      dataQualityStatusText(row.status),
+      String(row.windows),
+      String(row.coverage_ratio),
+      String(row.freshness_seconds),
+      String(row.bytes),
+      String(row.packets),
+      String(row.drops),
+      formatTime(row.first_window_ts),
+      formatTime(row.latest_window_ts),
+      ''
+    ]),
+    ...dataQuality.value.gaps.map((row) => [
+      '断档',
+      row.source_id,
+      row.iface,
+      'warning',
+      String(row.missing_windows),
+      '',
+      '',
+      '',
+      '',
+      '',
+      formatTime(row.start_ts),
+      formatTime(row.end_ts),
+      `断档 ${row.duration_seconds} 秒`
+    ])
+  ];
+  exportCSV(`nexaflow-data-quality-${selectedMinutes.value}m.csv`, rows);
+};
+
 const exportSelectedTopN = () => {
   const rows = [
     ['对象', '流量字节', '包数'],
@@ -2421,6 +2563,174 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </tbody>
             </table>
           </section>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'quality'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="exportDataQuality">导出数据质量</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / 生成时间 {{ formatTime(dataQuality.generated_at) }} / 窗口间隔 {{ dataQuality.window_interval }} 秒
+          </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>质量状态</span>
+              <strong>{{ dataQualityStatusText(dataQuality.status) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <History :size="22" />
+            <div>
+              <span>窗口覆盖率</span>
+              <strong>{{ (dataQuality.summary.coverage_ratio * 100).toFixed(1) }}%</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RefreshCw :size="22" />
+            <div>
+              <span>最新延迟</span>
+              <strong>{{ dataQuality.summary.freshness_seconds.toLocaleString() }} 秒</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>断档数量</span>
+              <strong>{{ dataQuality.summary.gap_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>采集源 / 网卡</span>
+              <strong>{{ dataQuality.summary.source_count.toLocaleString() }} / {{ dataQuality.summary.interface_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>采集窗口</span>
+              <strong>{{ dataQuality.summary.observed_windows.toLocaleString() }} / {{ dataQuality.summary.expected_windows.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>最大利用率</span>
+              <strong>{{ (dataQuality.summary.max_utilization * 100).toFixed(2) }}%</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>Drops</span>
+              <strong>{{ dataQuality.summary.drops.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="采集源覆盖率" eyebrow="Window Coverage" :items="dataQualitySourceItems" unit="count" />
+          <HorizontalBarChart title="采集源最新延迟" eyebrow="Freshness Seconds" :items="dataQualityFreshnessItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <TrafficHeatmap :points="series" />
+          <HorizontalBarChart title="采集 Drops 分布" eyebrow="Capture Drops" :items="dataQualityDropItems" unit="count" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel report-recommendations">
+            <div class="panel-heading">
+              <h2>质量建议</h2>
+              <span>{{ dataQuality.recommendations.length.toLocaleString() }} 条</span>
+            </div>
+            <article v-for="item in dataQuality.recommendations" :key="`${item.level}-${item.title}`" class="report-recommendation">
+              <span class="severity-pill" :class="item.level">{{ severityText(item.level) }}</span>
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.detail }}</p>
+            </article>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>窗口摘要</h2>
+              <span>{{ formatBytes(dataQuality.summary.bytes) }} / {{ dataQuality.summary.packets.toLocaleString() }} 包</span>
+            </div>
+            <div class="kv-list">
+              <div><span>最近窗口</span><strong>{{ formatTime(dataQuality.summary.latest_window_ts) }}</strong></div>
+              <div><span>异常采集源</span><strong>{{ dataQuality.summary.stale_sources.toLocaleString() }}</strong></div>
+              <div><span>断档数量</span><strong>{{ dataQuality.summary.gap_count.toLocaleString() }}</strong></div>
+              <div><span>覆盖率</span><strong>{{ (dataQuality.summary.coverage_ratio * 100).toFixed(1) }}%</strong></div>
+            </div>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table data-quality-table">
+          <div class="panel-heading">
+            <h2>采集源健康</h2>
+            <span>{{ dataQuality.sources.length.toLocaleString() }} 个采集源 / {{ rangeLabel }}</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>采集源</th>
+                <th>网卡</th>
+                <th>状态</th>
+                <th>窗口数</th>
+                <th>覆盖率</th>
+                <th>最新延迟</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>Drops</th>
+                <th>最近窗口</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in dataQuality.sources" :key="`${row.source_id}-${row.iface}`">
+                <td>{{ row.source_id }}</td>
+                <td>{{ row.iface }}</td>
+                <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                <td>{{ row.windows.toLocaleString() }}</td>
+                <td>{{ (row.coverage_ratio * 100).toFixed(1) }}%</td>
+                <td>{{ row.freshness_seconds.toLocaleString() }} 秒</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ row.drops.toLocaleString() }}</td>
+                <td>{{ formatTime(row.latest_window_ts) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="dataQuality.sources.length === 0" class="empty-state">暂无采集源窗口数据</div>
+        </section>
+        <section class="table-panel wide-key-table data-gap-table">
+          <div class="panel-heading">
+            <h2>采集断档</h2>
+            <span>{{ dataQuality.gaps.length.toLocaleString() }} 条</span>
+          </div>
+          <div v-if="dataQuality.gaps.length === 0" class="empty-state">暂无明显采集断档</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>采集源</th>
+                <th>网卡</th>
+                <th>开始窗口</th>
+                <th>恢复窗口</th>
+                <th>断档秒数</th>
+                <th>缺失窗口</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in dataQuality.gaps" :key="`${row.source_id}-${row.iface}-${row.start_ts}-${row.end_ts}`">
+                <td>{{ row.source_id }}</td>
+                <td>{{ row.iface }}</td>
+                <td>{{ formatTime(row.start_ts) }}</td>
+                <td>{{ formatTime(row.end_ts) }}</td>
+                <td>{{ row.duration_seconds.toLocaleString() }}</td>
+                <td>{{ row.missing_windows.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
       </template>
 
