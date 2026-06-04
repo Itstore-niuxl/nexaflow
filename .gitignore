@@ -1,0 +1,14 @@
+.DS_Store
+dist/
+node_modules/
+coverage/
+*.log
+
+# Go
+bin/
+*.test
+
+# Local config
+.env
+config/*.local.env
+runtime/

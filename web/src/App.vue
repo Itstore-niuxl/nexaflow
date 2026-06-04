@@ -1,0 +1,1533 @@
+<script setup lang="ts">
+import { Activity, AlertTriangle, Database, Gauge, RadioTower, RefreshCw } from '@lucide/vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import DashboardChart from './components/DashboardChart.vue';
+import TopNTable from './components/TopNTable.vue';
+import {
+  api,
+  type AlertConfig,
+  type AlertEvent,
+  type AssetRow,
+  type Collector,
+  type CollectorConfig,
+  type IPProfile,
+  type MatrixRow,
+  type NetworkInterface,
+  type DirectionPoint,
+  type PortProfile,
+  type PortPoint,
+  type ProtocolPoint,
+  type SearchResult,
+  type SecurityInsight,
+  type ServiceMap,
+  type SeriesPoint,
+  type Summary,
+  type SystemStatus,
+  type TrafficAnalysis,
+  type TrafficChange,
+  type TopItem,
+  type WindowRow
+} from './services/api';
+
+const summary = ref<Summary>({ bytes: 0, packets: 0, utilization: 0 });
+const series = ref<SeriesPoint[]>([]);
+const topSrc = ref<TopItem[]>([]);
+const topDst = ref<TopItem[]>([]);
+const topPorts = ref<TopItem[]>([]);
+const topProtocols = ref<TopItem[]>([]);
+const topFlows = ref<TopItem[]>([]);
+const topPairs = ref<TopItem[]>([]);
+const topPacketLens = ref<TopItem[]>([]);
+const collectors = ref<Collector[]>([]);
+const alerts = ref<AlertEvent[]>([]);
+const interfaces = ref<NetworkInterface[]>([]);
+const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
+const alertConfig = ref<AlertConfig>({ flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 });
+const ipProfile = ref<IPProfile>({
+  ip: '10.2.0.12',
+  minutes: 15,
+  inbound_bytes: 0,
+  inbound_packets: 0,
+  outbound_bytes: 0,
+  outbound_packets: 0,
+  top_pairs: [],
+  top_flows: [],
+  last_seen: 0
+});
+const portProfile = ref<PortProfile>({ port: '8081', minutes: 15, bytes: 0, packets: 0, flows: [] });
+const historyWindows = ref<WindowRow[]>([]);
+const matrixRows = ref<MatrixRow[]>([]);
+const serviceMap = ref<ServiceMap>({ nodes: [], links: [] });
+const protocolSeries = ref<ProtocolPoint[]>([]);
+const portSeries = ref<PortPoint[]>([]);
+const directionSeries = ref<DirectionPoint[]>([]);
+const searchTerm = ref('10.2.0.12');
+const searchResults = ref<SearchResult[]>([]);
+const assets = ref<AssetRow[]>([]);
+const securityInsights = ref<SecurityInsight[]>([]);
+const trafficChanges = ref<TrafficChange[]>([]);
+const trafficAnalysis = ref<TrafficAnalysis>({
+  minutes: 15,
+  baseline: {
+    windows: 0,
+    avg_bytes: 0,
+    peak_bytes: 0,
+    p95_bytes: 0,
+    avg_packets: 0,
+    peak_packets: 0,
+    avg_utilization: 0,
+    peak_utilization: 0,
+    avg_mbps: 0,
+    peak_mbps: 0,
+    p95_mbps: 0,
+    burst_ratio: 0
+  },
+  protocol_mix: [],
+  port_mix: [],
+  packet_sizes: [],
+  directions: []
+});
+const degraded = ref(false);
+const loading = ref(false);
+const switching = ref(false);
+const savingAlerts = ref(false);
+const currentView = ref('dashboard');
+const activeTopN = ref('src_ip');
+const selectedMinutes = ref(15);
+const profileIP = ref('10.2.0.12');
+const profilePort = ref('8081');
+const selectedMode = ref('live_pcap');
+const selectedIface = ref('eth0');
+const selectedFilter = ref('ip or ip6');
+let timer: number | undefined;
+
+const navItems = [
+  { id: 'dashboard', label: '总览大屏' },
+  { id: 'realtime', label: '实时监控' },
+  { id: 'traffic', label: '流量剖析' },
+  { id: 'analysis', label: '流向分析' },
+  { id: 'topology', label: '服务拓扑' },
+  { id: 'assets', label: '资产发现' },
+  { id: 'security', label: '风险线索' },
+  { id: 'profile', label: '对象画像' },
+  { id: 'port', label: '端口画像' },
+  { id: 'topn', label: 'TopN 分析' },
+  { id: 'alerts', label: '告警中心' },
+  { id: 'search', label: '检索分析' },
+  { id: 'history', label: '历史回放' },
+  { id: 'collectors', label: '采集器' }
+];
+
+const viewMeta: Record<string, { title: string; subtitle: string }> = {
+  dashboard: { title: '流量总览', subtitle: 'v0.1 模拟流量分析链路' },
+  realtime: { title: '实时监控', subtitle: '采集窗口、吞吐、包速率和采集器健康状态' },
+  traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
+  analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
+  topology: { title: '服务拓扑', subtitle: '基于主机对流量构建节点和链路视图' },
+  assets: { title: '资产发现', subtitle: '按活跃 IP 聚合收发流量、角色和最近出现时间' },
+  security: { title: '风险线索', subtitle: '从重流量会话、敏感端口和主机扇出中提取排查线索' },
+  profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
+  port: { title: '端口画像', subtitle: '围绕目的端口查看流量规模和关联会话' },
+  topn: { title: 'TopN 分析', subtitle: '按 IP、端口、协议和会话维度定位主要流量对象' },
+  alerts: { title: '告警中心', subtitle: '查看阈值、采集健康和异常事件' },
+  search: { title: '检索分析', subtitle: '按 IP、端口、主机对或会话关键字检索流量对象' },
+  history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
+  collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
+};
+
+const pageTitle = computed(() => viewMeta[currentView.value]?.title ?? '流量总览');
+const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? 'v0.1 模拟流量分析链路');
+const rangeSeconds = computed(() => selectedMinutes.value * 60);
+const rangeLabel = computed(() => {
+  if (selectedMinutes.value >= 1440) return '24 小时';
+  if (selectedMinutes.value >= 60) return `${selectedMinutes.value / 60} 小时`;
+  return `${selectedMinutes.value} 分钟`;
+});
+const rangeOptions = [
+  { value: 5, label: '5 分钟' },
+  { value: 15, label: '15 分钟' },
+  { value: 60, label: '1 小时' },
+  { value: 360, label: '6 小时' },
+  { value: 1440, label: '24 小时' }
+];
+
+const refresh = async () => {
+  loading.value = true;
+  try {
+    const minutes = selectedMinutes.value;
+    const [
+      summaryRes,
+      seriesRes,
+      srcRes,
+      dstRes,
+      portRes,
+      protoRes,
+      packetLenRes,
+      flowRes,
+      pairRes,
+      collectorRes,
+      alertRes,
+      interfaceRes,
+      statusRes,
+      windowsRes,
+      alertConfigRes,
+      matrixRes,
+      serviceMapRes,
+      protocolSeriesRes,
+      portSeriesRes,
+      directionSeriesRes,
+      assetsRes,
+      securityRes,
+      trafficAnalysisRes,
+      trafficChangesRes
+    ] = await Promise.all([
+      api.summary(minutes),
+      api.timeseries(minutes),
+      api.topn('ip', 'src', minutes),
+      api.topn('ip', 'dst', minutes),
+      api.topn('dst_port', 'src', minutes),
+      api.topn('protocol', 'src', minutes),
+      api.topn('packet_len', 'src', minutes),
+      api.topn('flow', 'src', minutes),
+      api.topn('pair', 'src', minutes),
+      api.collectors(),
+      api.alerts(minutes),
+      api.interfaces(),
+      api.status(),
+      api.windows(minutes, 80),
+      api.alertConfig(),
+      api.matrix(minutes, 80),
+      api.serviceMap(minutes, 80),
+      api.protocolTimeseries(minutes),
+      api.portTimeseries(minutes, 8),
+      api.directionTimeseries(minutes),
+      api.assets(minutes, 100),
+      api.securityInsights(minutes, 100),
+      api.trafficAnalysis(minutes),
+      api.trafficChanges(minutes, 30)
+    ]);
+    summary.value = summaryRes.data;
+    series.value = seriesRes.data;
+    topSrc.value = srcRes.data;
+    topDst.value = dstRes.data;
+    topPorts.value = portRes.data;
+    topProtocols.value = protoRes.data;
+    topPacketLens.value = packetLenRes.data;
+    topFlows.value = flowRes.data;
+    topPairs.value = pairRes.data;
+    collectors.value = collectorRes.data;
+    alerts.value = alertRes.data;
+    interfaces.value = interfaceRes.data;
+    systemStatus.value = statusRes.data;
+    historyWindows.value = windowsRes.data;
+    alertConfig.value = alertConfigRes.data;
+    matrixRows.value = matrixRes.data;
+    serviceMap.value = serviceMapRes.data;
+    protocolSeries.value = protocolSeriesRes.data;
+    portSeries.value = portSeriesRes.data;
+    directionSeries.value = directionSeriesRes.data;
+    assets.value = assetsRes.data;
+    securityInsights.value = securityRes.data;
+    trafficAnalysis.value = trafficAnalysisRes.data;
+    trafficChanges.value = trafficChangesRes.data;
+    let nextDegraded =
+      summaryRes.degraded ||
+      seriesRes.degraded ||
+      srcRes.degraded ||
+      packetLenRes.degraded ||
+      alertRes.degraded ||
+      statusRes.degraded ||
+      windowsRes.degraded ||
+      matrixRes.degraded ||
+      serviceMapRes.degraded ||
+      protocolSeriesRes.degraded ||
+      portSeriesRes.degraded ||
+      directionSeriesRes.degraded ||
+      assetsRes.degraded ||
+      securityRes.degraded ||
+      trafficAnalysisRes.degraded ||
+      trafficChangesRes.degraded;
+    if (!profileIP.value && srcRes.data[0]) {
+      profileIP.value = srcRes.data[0].key;
+    }
+    if (profileIP.value) {
+      const profileRes = await api.ipProfile(profileIP.value, minutes);
+      ipProfile.value = profileRes.data;
+      nextDegraded = nextDegraded || profileRes.degraded;
+    }
+    if (profilePort.value) {
+      const portProfileRes = await api.portProfile(profilePort.value, minutes);
+      portProfile.value = portProfileRes.data;
+      nextDegraded = nextDegraded || portProfileRes.degraded;
+    }
+    if (searchTerm.value) {
+      const searchRes = await api.search(searchTerm.value, minutes, 80);
+      searchResults.value = searchRes.data;
+      nextDegraded = nextDegraded || searchRes.degraded;
+    }
+    if (collectorRes.data[0]) {
+      selectedMode.value = collectorRes.data[0].mode;
+      selectedIface.value = collectorRes.data[0].iface ?? selectedIface.value;
+      selectedFilter.value = collectorRes.data[0].bpf_filter ?? selectedFilter.value;
+    }
+    degraded.value = nextDegraded;
+  } catch {
+    summary.value = { bytes: 125829120, packets: 94281, utilization: 0.18 };
+    const now = Math.floor(Date.now() / 1000);
+    series.value = Array.from({ length: 12 }, (_, index) => ({
+      ts: now - (11 - index) * 60,
+      bytes: 40000000 + index * 3200000,
+      packets: 24000 + index * 900
+    }));
+    topSrc.value = [
+      { key: '10.10.1.42', bytes: 68000000, packets: 21000 },
+      { key: '10.10.1.77', bytes: 24000000, packets: 9000 },
+      { key: '10.10.1.18', bytes: 13000000, packets: 7000 }
+    ];
+    topDst.value = [
+      { key: '172.20.2.10', bytes: 52000000, packets: 18000 },
+      { key: '172.20.2.81', bytes: 21000000, packets: 8000 },
+      { key: '172.20.2.144', bytes: 11000000, packets: 6000 }
+    ];
+    topPorts.value = [
+      { key: '443', bytes: 88000000, packets: 48000 },
+      { key: '80', bytes: 22000000, packets: 15000 },
+      { key: '53', bytes: 6000000, packets: 18000 }
+    ];
+    topProtocols.value = [
+      { key: 'tcp', bytes: 109000000, packets: 72000 },
+      { key: 'udp', bytes: 15000000, packets: 22000 }
+    ];
+    topFlows.value = [
+      { key: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp', bytes: 42000000, packets: 14000 },
+      { key: '10.10.1.77:53192 -> 172.20.2.81:80 / tcp', bytes: 18000000, packets: 7200 },
+      { key: '10.10.1.18:49812 -> 172.20.2.144:53 / udp', bytes: 5000000, packets: 12000 }
+    ];
+    topPacketLens.value = [
+      { key: '1KB-MTU', bytes: 82000000, packets: 56000 },
+      { key: '65-128B', bytes: 9000000, packets: 80000 }
+    ];
+    topPairs.value = [
+      { key: '10.10.1.42 -> 172.20.2.10', bytes: 52000000, packets: 18000 },
+      { key: '10.10.1.77 -> 172.20.2.81', bytes: 21000000, packets: 8000 },
+      { key: '10.10.1.18 -> 172.20.2.144', bytes: 11000000, packets: 6000 }
+    ];
+    collectors.value = [{ id: 'dev-collector-01', source_id: 'dev-source-01', status: 'offline', mode: 'mock', bpf_filter: 'ip or ip6', updated_at: now }];
+    interfaces.value = [{ name: 'eth0', state: 'up', type: 'interface' }];
+    systemStatus.value = { database: 'degraded', latest_window_ts: now, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 };
+    alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
+    ipProfile.value = {
+      ip: profileIP.value,
+      minutes: selectedMinutes.value,
+      inbound_bytes: 52000000,
+      inbound_packets: 18000,
+      outbound_bytes: 68000000,
+      outbound_packets: 21000,
+      top_pairs: topPairs.value,
+      top_flows: topFlows.value,
+      last_seen: now
+    };
+    alerts.value = [
+      {
+        id: 'demo-api-degraded',
+        severity: 'warning',
+        status: 'open',
+        subject: 'api-server',
+        summary: 'API 无法连接后端服务，正在展示本地示例数据',
+        first_seen: now,
+        last_seen: now
+      }
+    ];
+    portProfile.value = { port: profilePort.value, minutes: selectedMinutes.value, bytes: 88000000, packets: 48000, flows: topFlows.value };
+    historyWindows.value = series.value
+      .slice()
+      .reverse()
+      .map((point) => ({
+        window_ts: point.ts,
+        source_id: 'dev-source-01',
+        iface: 'mock0',
+        bytes: point.bytes,
+        packets: point.packets,
+        utilization: 0.02
+      }));
+    matrixRows.value = topPairs.value.map((item) => {
+      const [src, dst = ''] = item.key.split(' -> ');
+      return { src, dst, bytes: item.bytes, packets: item.packets };
+    });
+    serviceMap.value = {
+      nodes: [
+        { ip: '10.10.1.42', bytes: 52000000, packets: 18000 },
+        { ip: '172.20.2.10', bytes: 52000000, packets: 18000 }
+      ],
+      links: matrixRows.value
+    };
+    protocolSeries.value = [
+      { ts: now - 10, protocol: 'tcp', bytes: 109000000, packets: 72000 },
+      { ts: now - 10, protocol: 'udp', bytes: 15000000, packets: 22000 }
+    ];
+    portSeries.value = [
+      { ts: now - 10, port: '443', bytes: 42000000, packets: 14000 },
+      { ts: now - 10, port: '80', bytes: 18000000, packets: 7200 }
+    ];
+    directionSeries.value = [
+      { ts: now - 10, direction: '出站', bytes: 76000000, packets: 48000 },
+      { ts: now - 10, direction: '内网东西向', bytes: 26000000, packets: 22000 }
+    ];
+    searchResults.value = [
+      { kind: 'flow', key: `${searchTerm.value}:53210 -> 172.20.2.10:443 / tcp`, bytes: 42000000, packets: 14000 },
+      { kind: 'pair', key: `${searchTerm.value} -> 172.20.2.10`, bytes: 52000000, packets: 18000 }
+    ];
+    assets.value = [
+      {
+        ip: '10.10.1.42',
+        role: '外联源',
+        inbound_bytes: 12000000,
+        inbound_packets: 4000,
+        outbound_bytes: 68000000,
+        outbound_packets: 21000,
+        total_bytes: 80000000,
+        total_packets: 25000,
+        avg_packet_size: 3200,
+        first_seen: now - 900,
+        last_seen: now
+      },
+      {
+        ip: '172.20.2.10',
+        role: '服务端',
+        inbound_bytes: 52000000,
+        inbound_packets: 18000,
+        outbound_bytes: 9000000,
+        outbound_packets: 2600,
+        total_bytes: 61000000,
+        total_packets: 20600,
+        avg_packet_size: 2961,
+        first_seen: now - 900,
+        last_seen: now
+      }
+    ];
+    securityInsights.value = [
+      {
+        kind: 'heavy_flow',
+        severity: 'warning',
+        subject: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp',
+        summary: '单会话占近 15 分钟总流量 32.0%',
+        bytes: 42000000,
+        packets: 14000,
+        score: 32
+      },
+      {
+        kind: 'fanout',
+        severity: 'warning',
+        subject: '10.10.1.77',
+        summary: '源主机在 15 分钟内访问 6 个目的主机',
+        bytes: 24000000,
+        packets: 9000,
+        score: 6
+      }
+    ];
+    trafficAnalysis.value = {
+      minutes: selectedMinutes.value,
+      baseline: {
+        windows: 180,
+        avg_bytes: 4800000,
+        peak_bytes: 16000000,
+        p95_bytes: 12000000,
+        avg_packets: 6400,
+        peak_packets: 18000,
+        avg_utilization: 0.02,
+        peak_utilization: 0.08,
+        avg_mbps: 7.68,
+        peak_mbps: 25.6,
+        p95_mbps: 19.2,
+        burst_ratio: 3.33
+      },
+      protocol_mix: topProtocols.value,
+      port_mix: topPorts.value,
+      packet_sizes: [
+        { key: '1KB-MTU', bytes: 82000000, packets: 56000 },
+        { key: '65-128B', bytes: 9000000, packets: 80000 }
+      ],
+      directions: [
+        { key: '出站', bytes: 76000000, packets: 48000 },
+        { key: '内网东西向', bytes: 26000000, packets: 22000 }
+      ]
+    };
+    trafficChanges.value = [
+      {
+        dimension: 'src_ip',
+        key: '10.10.1.42',
+        current_bytes: 68000000,
+        previous_bytes: 22000000,
+        delta_bytes: 46000000,
+        current_packets: 21000,
+        previous_packets: 9000,
+        delta_packets: 12000,
+        change_ratio: 2.09
+      },
+      {
+        dimension: 'dst_port',
+        key: '443',
+        current_bytes: 88000000,
+        previous_bytes: 52000000,
+        delta_bytes: 36000000,
+        current_packets: 48000,
+        previous_packets: 31000,
+        delta_packets: 17000,
+        change_ratio: 0.69
+      }
+    ];
+    degraded.value = true;
+  } finally {
+    loading.value = false;
+  }
+};
+
+onMounted(() => {
+  void refresh();
+  timer = window.setInterval(refresh, 5000);
+});
+
+onUnmounted(() => {
+  if (timer) {
+    window.clearInterval(timer);
+  }
+});
+
+const formatBytes = (value: number) => {
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
+  return `${value.toFixed(0)} B`;
+};
+
+const formatRate = (bytes: number, seconds = rangeSeconds.value) => `${((bytes * 8) / seconds / 1000 / 1000).toFixed(2)} Mbps`;
+
+const pps = computed(() => Math.round(summary.value.packets / rangeSeconds.value));
+
+const profileTotalBytes = computed(() => ipProfile.value.inbound_bytes + ipProfile.value.outbound_bytes);
+const profileTotalPackets = computed(() => ipProfile.value.inbound_packets + ipProfile.value.outbound_packets);
+const topologyTotalBytes = computed(() => matrixRows.value.reduce((sum, row) => sum + row.bytes, 0));
+const topologyNodeCount = computed(() => serviceMap.value.nodes.length);
+const topTopologyLink = computed(() => matrixRows.value[0]);
+const assetTotalBytes = computed(() => assets.value.reduce((sum, row) => sum + row.total_bytes, 0));
+const activeAssetCount = computed(() => assets.value.length);
+const serviceAssetCount = computed(() => assets.value.filter((row) => row.role === '服务端').length);
+const criticalInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'critical').length);
+const warningInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'warning').length);
+const dominantProtocol = computed(() => trafficAnalysis.value.protocol_mix[0]);
+const dominantDirection = computed(() => trafficAnalysis.value.directions[0]);
+const packetSizeTotal = computed(() => trafficAnalysis.value.packet_sizes.reduce((sum, row) => sum + row.bytes, 0));
+const portMixTotal = computed(() => trafficAnalysis.value.port_mix.reduce((sum, row) => sum + row.bytes, 0));
+const portTrendSummary = computed(() => {
+  const grouped = new Map<string, TopItem>();
+  for (const point of portSeries.value) {
+    const current = grouped.get(point.port) ?? { key: point.port, bytes: 0, packets: 0 };
+    current.bytes += point.bytes;
+    current.packets += point.packets;
+    grouped.set(point.port, current);
+  }
+  return Array.from(grouped.values()).sort((a, b) => b.bytes - a.bytes);
+});
+const directionTrendSummary = computed(() => {
+  const grouped = new Map<string, TopItem>();
+  for (const point of directionSeries.value) {
+    const current = grouped.get(point.direction) ?? { key: point.direction, bytes: 0, packets: 0 };
+    current.bytes += point.bytes;
+    current.packets += point.packets;
+    grouped.set(point.direction, current);
+  }
+  return Array.from(grouped.values()).sort((a, b) => b.bytes - a.bytes);
+});
+const protocolSummary = computed(() => {
+  const grouped = new Map<string, TopItem>();
+  for (const point of protocolSeries.value) {
+    const current = grouped.get(point.protocol) ?? { key: point.protocol, bytes: 0, packets: 0 };
+    current.bytes += point.bytes;
+    current.packets += point.packets;
+    grouped.set(point.protocol, current);
+  }
+  return Array.from(grouped.values()).sort((a, b) => b.bytes - a.bytes);
+});
+const alertFlowSharePercent = computed({
+  get: () => Math.round(alertConfig.value.flow_share * 100),
+  set: (value: number) => {
+    alertConfig.value.flow_share = value / 100;
+  }
+});
+const alertLinkUtilPercent = computed({
+  get: () => Math.round(alertConfig.value.link_utilization * 100),
+  set: (value: number) => {
+    alertConfig.value.link_utilization = value / 100;
+  }
+});
+
+const avgPacketSize = computed(() => {
+  if (!summary.value.packets) return '0 B';
+  return formatBytes(summary.value.bytes / summary.value.packets);
+});
+
+const selectedTopN = computed(() => {
+  if (activeTopN.value === 'dst_ip') return topDst.value;
+  if (activeTopN.value === 'dst_port') return topPorts.value;
+  if (activeTopN.value === 'protocol') return topProtocols.value;
+  if (activeTopN.value === 'packet_len') return topPacketLens.value;
+  if (activeTopN.value === 'flow') return topFlows.value;
+  if (activeTopN.value === 'pair') return topPairs.value;
+  return topSrc.value;
+});
+
+const selectedTopNTitle = computed(() => {
+  if (activeTopN.value === 'dst_ip') return '目的 IP 排行';
+  if (activeTopN.value === 'dst_port') return '目的端口排行';
+  if (activeTopN.value === 'protocol') return '协议排行';
+  if (activeTopN.value === 'packet_len') return '包长分布排行';
+  if (activeTopN.value === 'flow') return '会话排行';
+  if (activeTopN.value === 'pair') return '主机对排行';
+  return '源 IP 排行';
+});
+
+const statusText = (status: string) => {
+  const labels: Record<string, string> = {
+    online: '在线',
+    offline: '离线',
+    degraded: '降级'
+  };
+  return labels[status] ?? status;
+};
+
+const modeText = (mode: string) => {
+  const labels: Record<string, string> = {
+    mock: '模拟流量',
+    pcap_replay: 'PCAP 回放',
+    live_pcap: '网卡采集'
+  };
+  return labels[mode] ?? mode;
+};
+
+const severityText = (severity: string) => {
+  const labels: Record<string, string> = {
+    info: '提示',
+    warning: '警告',
+    critical: '严重'
+  };
+  return labels[severity] ?? severity;
+};
+
+const changeDimensionText = (dimension: string) => {
+  const labels: Record<string, string> = {
+    src_ip: '源 IP',
+    dst_ip: '目的 IP',
+    dst_port: '目的端口',
+    protocol: '协议'
+  };
+  return labels[dimension] ?? dimension;
+};
+
+const formatChangeRatio = (value: number) => {
+  if (value >= 999) return '新增';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${(value * 100).toFixed(1)}%`;
+};
+
+const insightKindText = (kind: string) => {
+  const labels: Record<string, string> = {
+    heavy_flow: '重流量会话',
+    fanout: '主机扇出',
+    sensitive_port: '敏感端口'
+  };
+  return labels[kind] ?? kind;
+};
+
+const alertStatusText = (status: string) => {
+  const labels: Record<string, string> = {
+    open: '未处理',
+    ack: '已确认',
+    resolved: '已恢复'
+  };
+  return labels[status] ?? status;
+};
+
+const formatTime = (ts: number) => {
+  if (!ts) return '-';
+  return new Date(ts * 1000).toLocaleString();
+};
+
+const applyCaptureConfig = async () => {
+  switching.value = true;
+  try {
+    const config: CollectorConfig = {
+      mode: selectedMode.value,
+      iface: selectedIface.value,
+      source_id: `${selectedMode.value}-${selectedIface.value}`,
+      bpf_filter: selectedFilter.value.trim() || 'ip or ip6'
+    };
+    await api.updateCollectorConfig(config);
+    await refresh();
+  } finally {
+    switching.value = false;
+  }
+};
+
+const loadProfile = async () => {
+  if (!profileIP.value.trim()) return;
+  loading.value = true;
+  try {
+    const profileRes = await api.ipProfile(profileIP.value.trim(), selectedMinutes.value);
+    ipProfile.value = profileRes.data;
+    degraded.value = profileRes.degraded;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const loadPortProfile = async () => {
+  if (!profilePort.value.trim()) return;
+  loading.value = true;
+  try {
+    const profileRes = await api.portProfile(profilePort.value.trim(), selectedMinutes.value);
+    portProfile.value = profileRes.data;
+    degraded.value = profileRes.degraded;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const runSearch = async () => {
+  if (!searchTerm.value.trim()) return;
+  loading.value = true;
+  try {
+    const result = await api.search(searchTerm.value.trim(), selectedMinutes.value, 80);
+    searchResults.value = result.data;
+    degraded.value = result.degraded;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const saveAlertConfig = async () => {
+  savingAlerts.value = true;
+  try {
+    const result = await api.updateAlertConfig(alertConfig.value);
+    alertConfig.value = result.data;
+    await refresh();
+  } finally {
+    savingAlerts.value = false;
+  }
+};
+
+const exportWindows = () => {
+  const rows = [
+    ['时间', '采集源', '网卡', '流量字节', '包数', '利用率'],
+    ...historyWindows.value.map((row) => [
+      formatTime(row.window_ts),
+      row.source_id,
+      row.iface,
+      String(row.bytes),
+      String(row.packets),
+      String(row.utilization)
+    ])
+  ];
+  exportCSV(`nexaflow-windows-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportSelectedTopN = () => {
+  const rows = [
+    ['对象', '流量字节', '包数'],
+    ...selectedTopN.value.map((item) => [item.key, String(item.bytes), String(item.packets)])
+  ];
+  exportCSV(`nexaflow-${activeTopN.value}-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportCSV = (filename: string, rows: string[][]) => {
+  const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+};
+</script>
+
+<template>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <RadioTower :size="24" />
+        <span>NexaFlow</span>
+      </div>
+      <nav>
+        <button
+          v-for="item in navItems"
+          :key="item.id"
+          type="button"
+          :class="{ active: currentView === item.id }"
+          @click="currentView = item.id"
+        >
+          {{ item.label }}
+        </button>
+      </nav>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <h1>{{ pageTitle }}</h1>
+          <p>{{ pageSubtitle }}</p>
+        </div>
+        <div class="topbar-actions">
+          <label class="range-control">
+            <span>时间范围</span>
+            <select v-model="selectedMinutes" @change="refresh">
+              <option v-for="item in rangeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+            </select>
+          </label>
+          <button class="icon-button" :class="{ spinning: loading }" type="button" @click="refresh" aria-label="刷新">
+            <RefreshCw :size="18" />
+          </button>
+        </div>
+      </header>
+
+      <div v-if="degraded" class="notice">
+        <AlertTriangle :size="18" />
+        API 当前处于降级模式，ClickHouse 写入实时窗口后将自动展示真实数据。
+      </div>
+
+      <section class="metrics-grid">
+        <article class="metric">
+          <Gauge :size="22" />
+          <div>
+            <span>近 {{ rangeLabel }} 吞吐</span>
+            <strong>{{ formatRate(summary.bytes) }}</strong>
+          </div>
+        </article>
+        <article class="metric">
+          <Activity :size="22" />
+          <div>
+            <span>包数</span>
+            <strong>{{ summary.packets.toLocaleString() }}</strong>
+          </div>
+        </article>
+        <article class="metric">
+          <Database :size="22" />
+          <div>
+            <span>总流量</span>
+            <strong>{{ formatBytes(summary.bytes) }}</strong>
+          </div>
+        </article>
+        <article class="metric">
+          <RadioTower :size="22" />
+          <div>
+            <span>链路利用率</span>
+            <strong>{{ (summary.utilization * 100).toFixed(2) }}%</strong>
+          </div>
+        </article>
+      </section>
+
+      <template v-if="currentView === 'dashboard'">
+        <section class="main-grid">
+          <DashboardChart class="chart-panel" :points="series" />
+          <section class="collector-panel">
+            <h2>采集器状态</h2>
+            <div v-for="collector in collectors" :key="collector.id" class="collector-row">
+              <span class="status-dot" :class="{ offline: collector.status !== 'online' }"></span>
+              <div>
+                <strong>{{ collector.id }}</strong>
+                <small>{{ collector.source_id }} / {{ collector.iface ?? '-' }} / {{ modeText(collector.mode) }}</small>
+              </div>
+              <b :class="{ warning: collector.status !== 'online' }">{{ statusText(collector.status) }}</b>
+            </div>
+          </section>
+        </section>
+
+        <section class="tables-grid">
+          <TopNTable title="源 IP 排行" :items="topSrc" />
+          <TopNTable title="目的 IP 排行" :items="topDst" />
+          <TopNTable title="目的端口排行" :items="topPorts" />
+          <TopNTable title="协议排行" :items="topProtocols" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'realtime'">
+        <section class="main-grid">
+          <DashboardChart class="chart-panel" :points="series" />
+          <section class="collector-panel">
+            <h2>实时窗口指标</h2>
+            <div class="kv-list">
+              <div><span>当前 PPS</span><strong>{{ pps.toLocaleString() }}</strong></div>
+              <div><span>平均包长</span><strong>{{ avgPacketSize }}</strong></div>
+              <div><span>刷新周期</span><strong>5 秒</strong></div>
+              <div><span>数据状态</span><strong>{{ degraded ? '降级' : '实时' }}</strong></div>
+            </div>
+          </section>
+        </section>
+        <section class="table-panel">
+          <h2>最近窗口</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>吞吐</th>
+                <th>流量</th>
+                <th>包数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="point in series.slice().reverse()" :key="point.ts">
+                <td>{{ formatTime(point.ts) }}</td>
+                <td>{{ formatRate(point.bytes, 5) }}</td>
+                <td>{{ formatBytes(point.bytes) }}</td>
+                <td>{{ point.packets.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="协议趋势汇总" :items="protocolSummary" />
+          <section class="table-panel">
+            <h2>协议窗口明细</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>协议</th>
+                  <th>流量</th>
+                  <th>包数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="point in protocolSeries.slice().reverse().slice(0, 12)" :key="`${point.ts}-${point.protocol}`">
+                  <td>{{ formatTime(point.ts) }}</td>
+                  <td>{{ point.protocol }}</td>
+                  <td>{{ formatBytes(point.bytes) }}</td>
+                  <td>{{ point.packets.toLocaleString() }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'traffic'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>平均吞吐</span>
+              <strong>{{ trafficAnalysis.baseline.avg_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>P95 吞吐</span>
+              <strong>{{ trafficAnalysis.baseline.p95_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>峰值吞吐</span>
+              <strong>{{ trafficAnalysis.baseline.peak_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>突发倍数</span>
+              <strong>{{ trafficAnalysis.baseline.burst_ratio.toFixed(2) }}x</strong>
+            </div>
+          </article>
+        </section>
+        <section class="main-grid">
+          <section class="collector-panel">
+            <h2>基线摘要</h2>
+            <div class="kv-list">
+              <div><span>观察窗口</span><strong>{{ trafficAnalysis.baseline.windows.toLocaleString() }}</strong></div>
+              <div><span>平均窗口流量</span><strong>{{ formatBytes(trafficAnalysis.baseline.avg_bytes) }}</strong></div>
+              <div><span>峰值窗口流量</span><strong>{{ formatBytes(trafficAnalysis.baseline.peak_bytes) }}</strong></div>
+              <div><span>P95 窗口流量</span><strong>{{ formatBytes(trafficAnalysis.baseline.p95_bytes) }}</strong></div>
+              <div><span>峰值包数</span><strong>{{ trafficAnalysis.baseline.peak_packets.toLocaleString() }}</strong></div>
+              <div><span>峰值利用率</span><strong>{{ (trafficAnalysis.baseline.peak_utilization * 100).toFixed(2) }}%</strong></div>
+            </div>
+          </section>
+          <section class="collector-panel">
+            <h2>结构摘要</h2>
+            <div class="kv-list">
+              <div><span>主导方向</span><strong>{{ dominantDirection?.key ?? '-' }}</strong></div>
+              <div><span>方向流量</span><strong>{{ dominantDirection ? formatBytes(dominantDirection.bytes) : '0 B' }}</strong></div>
+              <div><span>主导协议</span><strong>{{ dominantProtocol?.key ?? '-' }}</strong></div>
+              <div><span>协议流量</span><strong>{{ dominantProtocol ? formatBytes(dominantProtocol.bytes) : '0 B' }}</strong></div>
+              <div><span>包长样本流量</span><strong>{{ formatBytes(packetSizeTotal) }}</strong></div>
+              <div><span>端口样本流量</span><strong>{{ formatBytes(portMixTotal) }}</strong></div>
+            </div>
+          </section>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="方向分布" :items="trafficAnalysis.directions" />
+          <TopNTable title="协议占比" :items="trafficAnalysis.protocol_mix" />
+          <TopNTable title="包长分布" :items="trafficAnalysis.packet_sizes" />
+          <TopNTable title="端口服务混合" :items="trafficAnalysis.port_mix" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="方向趋势汇总" :items="directionTrendSummary" />
+          <TopNTable title="端口趋势汇总" :items="portTrendSummary" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <h2>方向趋势明细</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>方向</th>
+                  <th>流量</th>
+                  <th>包数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="point in directionSeries.slice().reverse().slice(0, 16)" :key="`${point.ts}-${point.direction}`">
+                  <td>{{ formatTime(point.ts) }}</td>
+                  <td>{{ point.direction }}</td>
+                  <td>{{ formatBytes(point.bytes) }}</td>
+                  <td>{{ point.packets.toLocaleString() }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="table-panel">
+            <h2>端口趋势明细</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>端口</th>
+                  <th>流量</th>
+                  <th>包数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="point in portSeries.slice().reverse().slice(0, 16)" :key="`${point.ts}-${point.port}`">
+                  <td>{{ formatTime(point.ts) }}</td>
+                  <td>{{ point.port }}</td>
+                  <td>{{ formatBytes(point.bytes) }}</td>
+                  <td>{{ point.packets.toLocaleString() }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table change-table">
+          <h2>变化检测</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>维度</th>
+                <th>当前流量</th>
+                <th>上一段</th>
+                <th>增量</th>
+                <th>变化率</th>
+                <th>包数增量</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in trafficChanges" :key="`${row.dimension}-${row.key}`">
+                <td>{{ row.key }}</td>
+                <td>{{ changeDimensionText(row.dimension) }}</td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.previous_bytes) }}</td>
+                <td :class="{ positive: row.delta_bytes > 0, negative: row.delta_bytes < 0 }">{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
+                <td :class="{ positive: row.change_ratio > 0, negative: row.change_ratio < 0 }">{{ formatChangeRatio(row.change_ratio) }}</td>
+                <td :class="{ positive: row.delta_packets > 0, negative: row.delta_packets < 0 }">{{ row.delta_packets.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'analysis'">
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="主机对排行" :items="topPairs" />
+          <TopNTable title="会话排行" :items="topFlows" />
+          <TopNTable title="目的端口排行" :items="topPorts" />
+          <TopNTable title="协议排行" :items="topProtocols" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'topology'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>拓扑链路流量</span>
+              <strong>{{ formatBytes(topologyTotalBytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>节点数</span>
+              <strong>{{ topologyNodeCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>最重链路</span>
+              <strong>{{ topTopologyLink ? formatBytes(topTopologyLink.bytes) : '0 B' }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>链路数</span>
+              <strong>{{ matrixRows.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <h2>拓扑链路</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>源</th>
+                  <th>目的</th>
+                  <th>流量</th>
+                  <th>包数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in matrixRows" :key="`${row.src}-${row.dst}`">
+                  <td>{{ row.src }}</td>
+                  <td>{{ row.dst }}</td>
+                  <td>{{ formatBytes(row.bytes) }}</td>
+                  <td>{{ row.packets.toLocaleString() }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="table-panel">
+            <h2>拓扑节点</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>节点</th>
+                  <th>关联流量</th>
+                  <th>关联包数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="node in serviceMap.nodes" :key="node.ip">
+                  <td>{{ node.ip }}</td>
+                  <td>{{ formatBytes(node.bytes) }}</td>
+                  <td>{{ node.packets.toLocaleString() }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'assets'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>资产总流量</span>
+              <strong>{{ formatBytes(assetTotalBytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>活跃资产</span>
+              <strong>{{ activeAssetCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>服务端资产</span>
+              <strong>{{ serviceAssetCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>观察范围</span>
+              <strong>{{ rangeLabel }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="table-panel asset-table">
+          <h2>活跃资产清单</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>IP</th>
+                <th>角色</th>
+                <th>总流量</th>
+                <th>出站</th>
+                <th>入站</th>
+                <th>包数</th>
+                <th>平均包长</th>
+                <th>最近出现</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="asset in assets" :key="asset.ip">
+                <td>{{ asset.ip }}</td>
+                <td>{{ asset.role }}</td>
+                <td>{{ formatBytes(asset.total_bytes) }}</td>
+                <td>{{ formatBytes(asset.outbound_bytes) }}</td>
+                <td>{{ formatBytes(asset.inbound_bytes) }}</td>
+                <td>{{ asset.total_packets.toLocaleString() }}</td>
+                <td>{{ formatBytes(asset.avg_packet_size) }}</td>
+                <td>{{ formatTime(asset.last_seen) }}</td>
+                <td>
+                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'security'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重线索</span>
+              <strong>{{ criticalInsightCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>警告线索</span>
+              <strong>{{ warningInsightCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>线索总数</span>
+              <strong>{{ securityInsights.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>观察范围</span>
+              <strong>{{ rangeLabel }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="table-panel wide-key-table risk-table">
+          <h2>风险线索</h2>
+          <div v-if="securityInsights.length === 0" class="empty-state">暂无风险线索</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>类型</th>
+                <th>级别</th>
+                <th>摘要</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>评分</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in securityInsights" :key="`${item.kind}-${item.subject}`">
+                <td>{{ item.subject }}</td>
+                <td>{{ insightKindText(item.kind) }}</td>
+                <td>
+                  <span class="severity-pill" :class="item.severity">{{ severityText(item.severity) }}</span>
+                </td>
+                <td>{{ item.summary }}</td>
+                <td>{{ formatBytes(item.bytes) }}</td>
+                <td>{{ item.packets.toLocaleString() }}</td>
+                <td>{{ item.score }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'profile'">
+        <section class="toolbar-panel profile-toolbar">
+          <label class="filter-field">
+            <span>IP 地址</span>
+            <input v-model="profileIP" placeholder="输入 IP，例如 10.2.0.12" @keyup.enter="loadProfile" />
+          </label>
+          <button type="button" @click="loadProfile">查询画像</button>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>总流量</span>
+              <strong>{{ formatBytes(profileTotalBytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>总包数</span>
+              <strong>{{ profileTotalPackets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>出站 / 入站</span>
+              <strong>{{ formatBytes(ipProfile.outbound_bytes) }} / {{ formatBytes(ipProfile.inbound_bytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>最近出现</span>
+              <strong>{{ formatTime(ipProfile.last_seen) }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable :title="`${ipProfile.ip} 主机对`" :items="ipProfile.top_pairs" />
+          <TopNTable :title="`${ipProfile.ip} 会话`" :items="ipProfile.top_flows" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'port'">
+        <section class="toolbar-panel profile-toolbar">
+          <label class="filter-field">
+            <span>目的端口</span>
+            <input v-model="profilePort" placeholder="输入端口，例如 8081 / 443 / 80" @keyup.enter="loadPortProfile" />
+          </label>
+          <button type="button" @click="loadPortProfile">查询端口</button>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>端口流量</span>
+              <strong>{{ formatBytes(portProfile.bytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>端口包数</span>
+              <strong>{{ portProfile.packets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>平均包长</span>
+              <strong>{{ portProfile.packets ? formatBytes(portProfile.bytes / portProfile.packets) : '0 B' }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>观察范围</span>
+              <strong>{{ rangeLabel }}</strong>
+            </div>
+          </article>
+        </section>
+        <TopNTable :title="`目的端口 ${portProfile.port} 关联会话`" :items="portProfile.flows" />
+      </template>
+
+      <template v-else-if="currentView === 'topn'">
+        <section class="toolbar-panel">
+          <button type="button" :class="{ active: activeTopN === 'src_ip' }" @click="activeTopN = 'src_ip'">源 IP</button>
+          <button type="button" :class="{ active: activeTopN === 'dst_ip' }" @click="activeTopN = 'dst_ip'">目的 IP</button>
+          <button type="button" :class="{ active: activeTopN === 'pair' }" @click="activeTopN = 'pair'">主机对</button>
+          <button type="button" :class="{ active: activeTopN === 'dst_port' }" @click="activeTopN = 'dst_port'">目的端口</button>
+          <button type="button" :class="{ active: activeTopN === 'protocol' }" @click="activeTopN = 'protocol'">协议</button>
+          <button type="button" :class="{ active: activeTopN === 'packet_len' }" @click="activeTopN = 'packet_len'">包长</button>
+          <button type="button" :class="{ active: activeTopN === 'flow' }" @click="activeTopN = 'flow'">会话</button>
+          <button type="button" class="command-button" @click="exportSelectedTopN">导出 CSV</button>
+        </section>
+        <TopNTable :title="selectedTopNTitle" :items="selectedTopN" />
+      </template>
+
+      <template v-else-if="currentView === 'alerts'">
+        <section class="toolbar-panel alert-config-panel">
+          <label>
+            <span>单会话字节阈值</span>
+            <input v-model.number="alertConfig.flow_bytes" type="number" min="1" />
+          </label>
+          <label>
+            <span>单会话占比阈值</span>
+            <input v-model.number="alertFlowSharePercent" type="number" min="1" max="100" />
+          </label>
+          <label>
+            <span>源主机包数阈值</span>
+            <input v-model.number="alertConfig.source_packets" type="number" min="1" />
+          </label>
+          <label>
+            <span>链路利用率阈值</span>
+            <input v-model.number="alertLinkUtilPercent" type="number" min="1" max="100" />
+          </label>
+          <button type="button" :disabled="savingAlerts" @click="saveAlertConfig">
+            {{ savingAlerts ? '保存中...' : '保存阈值' }}
+          </button>
+        </section>
+        <section class="table-panel">
+          <h2>告警事件</h2>
+          <div v-if="alerts.length === 0" class="empty-state">暂无告警事件</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>级别</th>
+                <th>状态</th>
+                <th>对象</th>
+                <th>摘要</th>
+                <th>最近出现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="alert in alerts" :key="alert.id">
+                <td>{{ severityText(alert.severity) }}</td>
+                <td>{{ alertStatusText(alert.status) }}</td>
+                <td>{{ alert.subject }}</td>
+                <td>{{ alert.summary }}</td>
+                <td>{{ formatTime(alert.last_seen) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'search'">
+        <section class="toolbar-panel profile-toolbar">
+          <label class="filter-field">
+            <span>检索关键字</span>
+            <input v-model="searchTerm" placeholder="IP / 端口 / 会话片段，例如 10.2.0.12 或 8081" @keyup.enter="runSearch" />
+          </label>
+          <button type="button" @click="runSearch">检索</button>
+        </section>
+        <section class="table-panel">
+          <h2>检索结果</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>对象</th>
+                <th>流量</th>
+                <th>包数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in searchResults" :key="`${row.kind}-${row.key}`">
+                <td>{{ row.kind }}</td>
+                <td>{{ row.key }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'history'">
+        <section class="toolbar-panel">
+          <button type="button" class="command-button" @click="exportWindows">导出窗口 CSV</button>
+        </section>
+        <section class="table-panel">
+          <h2>历史窗口</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>采集源</th>
+                <th>网卡</th>
+                <th>吞吐</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>利用率</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in historyWindows" :key="`${row.source_id}-${row.iface}-${row.window_ts}`">
+                <td>{{ formatTime(row.window_ts) }}</td>
+                <td>{{ row.source_id }}</td>
+                <td>{{ row.iface }}</td>
+                <td>{{ formatRate(row.bytes, 5) }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ (row.utilization * 100).toFixed(2) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else>
+        <section class="toolbar-panel capture-control">
+          <label>
+            <span>采集模式</span>
+            <select v-model="selectedMode">
+              <option value="live_pcap">网卡采集</option>
+              <option value="mock">模拟流量</option>
+            </select>
+          </label>
+          <label>
+            <span>采集网卡</span>
+            <select v-model="selectedIface">
+              <option v-for="item in interfaces" :key="item.name" :value="item.name">
+                {{ item.name }} / {{ item.state }}
+              </option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span>采集过滤</span>
+            <input v-model="selectedFilter" placeholder="ip or ip6 / tcp / port 443 / host 1.1.1.1" />
+          </label>
+          <button type="button" :disabled="switching" @click="applyCaptureConfig">
+            {{ switching ? '切换中...' : '应用采集配置' }}
+          </button>
+        </section>
+        <section class="collector-grid">
+          <article class="collector-card">
+            <div class="collector-card-header">
+              <span class="status-dot" :class="{ offline: systemStatus.database !== 'ok' }"></span>
+              <strong>系统状态</strong>
+              <b :class="{ warning: systemStatus.database !== 'ok' }">{{ systemStatus.database === 'ok' ? '正常' : '降级' }}</b>
+            </div>
+            <div class="kv-list">
+              <div><span>最近窗口</span><strong>{{ formatTime(systemStatus.latest_window_ts) }}</strong></div>
+              <div><span>24 小时窗口</span><strong>{{ systemStatus.windows_24h.toLocaleString() }}</strong></div>
+              <div><span>采集源数</span><strong>{{ systemStatus.sources_24h.toLocaleString() }}</strong></div>
+              <div><span>网卡数</span><strong>{{ systemStatus.interfaces_24h.toLocaleString() }}</strong></div>
+            </div>
+          </article>
+          <article v-for="collector in collectors" :key="collector.id" class="collector-card">
+            <div class="collector-card-header">
+              <span class="status-dot" :class="{ offline: collector.status !== 'online' }"></span>
+              <strong>{{ collector.id }}</strong>
+              <b :class="{ warning: collector.status !== 'online' }">{{ statusText(collector.status) }}</b>
+            </div>
+            <div class="kv-list">
+              <div><span>采集源</span><strong>{{ collector.source_id }}</strong></div>
+              <div><span>采集网卡</span><strong>{{ collector.iface ?? '-' }}</strong></div>
+              <div><span>采集模式</span><strong>{{ modeText(collector.mode) }}</strong></div>
+              <div><span>采集过滤</span><strong>{{ collector.bpf_filter ?? '-' }}</strong></div>
+              <div><span>配置更新时间</span><strong>{{ formatTime(collector.updated_at ?? 0) }}</strong></div>
+              <div><span>窗口大小</span><strong>5 秒</strong></div>
+              <div><span>数据链路</span><strong>Redis / ClickHouse</strong></div>
+            </div>
+          </article>
+        </section>
+      </template>
+    </section>
+  </main>
+</template>
