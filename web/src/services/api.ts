@@ -121,6 +121,8 @@ export interface ServiceExposure {
   service: string;
   category: string;
   risk: string;
+  direction: string;
+  confidence: string;
   bytes: number;
   packets: number;
   client_count: number;

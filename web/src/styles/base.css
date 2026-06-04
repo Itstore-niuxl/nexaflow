@@ -669,20 +669,20 @@ th {
 
 .exposure-table th:first-child,
 .exposure-table td:first-child {
-  width: 20%;
+  width: 17%;
   min-width: 0;
 }
 
-.exposure-table th:nth-child(8),
-.exposure-table td:nth-child(8) {
-  width: 24%;
+.exposure-table th:nth-child(10),
+.exposure-table td:nth-child(10) {
+  width: 22%;
   white-space: normal;
   word-break: break-word;
   text-align: left;
 }
 
-.exposure-table th:nth-child(9),
-.exposure-table td:nth-child(9) {
+.exposure-table th:nth-child(11),
+.exposure-table td:nth-child(11) {
   width: 180px;
 }
 

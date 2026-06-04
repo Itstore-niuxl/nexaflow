@@ -595,31 +595,37 @@ func (s *Store) ServiceExposure(ctx context.Context, minutes, limit int) ([]map[
 	clients := map[string]map[string]bool{}
 	for _, flow := range flows {
 		parsed, ok := parseFlowKey(flow.Key)
-		if !ok || parsed.DstPort == "" {
+		if !ok {
 			continue
 		}
-		service := identifyService(parsed.DstPort, parsed.Proto)
-		key := parsed.DstIP + "|" + parsed.DstPort + "|" + parsed.Proto
+		exposure, ok := inferExposureEndpoint(parsed)
+		if !ok {
+			continue
+		}
+		service := identifyService(exposure.Port, parsed.Proto)
+		key := exposure.IP + "|" + exposure.Port + "|" + parsed.Proto
 		row := grouped[key]
 		if row == nil {
 			row = map[string]any{
-				"ip":            parsed.DstIP,
-				"port":          parsed.DstPort,
+				"ip":            exposure.IP,
+				"port":          exposure.Port,
 				"protocol":      parsed.Proto,
 				"service":       service.Name,
 				"category":      service.Category,
 				"risk":          service.Risk,
+				"direction":      exposure.Direction,
+				"confidence":     exposure.Confidence,
 				"bytes":         uint64(0),
 				"packets":       uint64(0),
 				"client_count":  uint64(0),
-				"sample_client": parsed.SrcIP,
+				"sample_client": exposure.ClientIP,
 				"sample_flow":   flow.Key,
 			}
 			clients[key] = map[string]bool{}
 		}
 		row["bytes"] = uintValue(row["bytes"]) + flow.Bytes
 		row["packets"] = uintValue(row["packets"]) + flow.Packets
-		clients[key][parsed.SrcIP] = true
+		clients[key][exposure.ClientIP] = true
 		row["client_count"] = uint64(len(clients[key]))
 		grouped[key] = row
 	}
@@ -1239,6 +1245,8 @@ func demoServiceExposure() []map[string]any {
 			"service":       "HTTPS",
 			"category":      "Web",
 			"risk":          "low",
+			"direction":      "入站",
+			"confidence":     "高",
 			"bytes":         uint64(42000000),
 			"packets":       uint64(14000),
 			"client_count":  uint64(3),
@@ -1252,6 +1260,8 @@ func demoServiceExposure() []map[string]any {
 			"service":       "SSH",
 			"category":      "远程管理",
 			"risk":          "high",
+			"direction":      "入站",
+			"confidence":     "高",
 			"bytes":         uint64(18000000),
 			"packets":       uint64(7200),
 			"client_count":  uint64(2),
@@ -1542,11 +1552,116 @@ type serviceInfo struct {
 	Risk     string
 }
 
+type exposureEndpoint struct {
+	IP         string
+	Port       string
+	ClientIP   string
+	Direction  string
+	Confidence string
+}
+
+func inferExposureEndpoint(flow parsedFlow) (exposureEndpoint, bool) {
+	srcInternal := isManagedAssetIP(flow.SrcIP)
+	dstInternal := isManagedAssetIP(flow.DstIP)
+	srcService := servicePortScore(flow.SrcPort)
+	dstService := servicePortScore(flow.DstPort)
+
+	switch {
+	case !srcInternal && dstInternal:
+		if dstService <= 0 {
+			return exposureEndpoint{}, false
+		}
+		return exposureEndpoint{
+			IP:         flow.DstIP,
+			Port:       flow.DstPort,
+			ClientIP:   flow.SrcIP,
+			Direction:  "入站",
+			Confidence: confidenceLabel(dstService),
+		}, true
+	case srcInternal && !dstInternal:
+		if srcService <= 0 {
+			return exposureEndpoint{}, false
+		}
+		return exposureEndpoint{
+			IP:         flow.SrcIP,
+			Port:       flow.SrcPort,
+			ClientIP:   flow.DstIP,
+			Direction:  "入站响应",
+			Confidence: confidenceLabel(srcService),
+		}, true
+	case srcInternal && dstInternal:
+		if dstService <= 0 && srcService <= 0 {
+			return exposureEndpoint{}, false
+		}
+		if dstService >= srcService {
+			return exposureEndpoint{
+				IP:         flow.DstIP,
+				Port:       flow.DstPort,
+				ClientIP:   flow.SrcIP,
+				Direction:  "内网服务",
+				Confidence: confidenceLabel(dstService),
+			}, true
+		}
+		return exposureEndpoint{
+			IP:         flow.SrcIP,
+			Port:       flow.SrcPort,
+			ClientIP:   flow.DstIP,
+			Direction:  "内网服务响应",
+			Confidence: confidenceLabel(srcService),
+		}, true
+	default:
+		return exposureEndpoint{}, false
+	}
+}
+
+func servicePortScore(port string) int {
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if isKnownServicePort(port) {
+		return 3
+	}
+	if n < 1024 {
+		return 2
+	}
+	if n < 32768 {
+		return 1
+	}
+	return 0
+}
+
+func confidenceLabel(score int) string {
+	switch {
+	case score >= 3:
+		return "高"
+	case score == 2:
+		return "中"
+	default:
+		return "低"
+	}
+}
+
 func identifyService(port, proto string) serviceInfo {
 	if proto == "udp" && port == "53" {
 		return serviceInfo{Name: "DNS", Category: "基础网络", Risk: "low"}
 	}
-	services := map[string]serviceInfo{
+	if service, ok := knownServices()[port]; ok {
+		return service
+	}
+	if n, err := strconv.Atoi(port); err == nil && n >= 1024 {
+		return serviceInfo{Name: "业务/动态端口", Category: "业务服务", Risk: "observe"}
+	}
+	return serviceInfo{Name: "未知服务", Category: "未知", Risk: "observe"}
+}
+
+func isKnownServicePort(port string) bool {
+	_, ok := knownServices()[port]
+	return ok
+}
+
+func knownServices() map[string]serviceInfo {
+	return map[string]serviceInfo{
 		"20":    {Name: "FTP Data", Category: "文件传输", Risk: "medium"},
 		"21":    {Name: "FTP", Category: "文件传输", Risk: "medium"},
 		"22":    {Name: "SSH", Category: "远程管理", Risk: "high"},
@@ -1579,13 +1694,6 @@ func identifyService(port, proto string) serviceInfo {
 		"11211": {Name: "Memcached", Category: "缓存", Risk: "critical"},
 		"27017": {Name: "MongoDB", Category: "数据库", Risk: "critical"},
 	}
-	if service, ok := services[port]; ok {
-		return service
-	}
-	if n, err := strconv.Atoi(port); err == nil && n >= 1024 {
-		return serviceInfo{Name: "业务/动态端口", Category: "业务服务", Risk: "observe"}
-	}
-	return serviceInfo{Name: "未知服务", Category: "未知", Risk: "observe"}
 }
 
 func riskWeight(risk string) int {
@@ -1609,6 +1717,14 @@ func isInternalIP(ip string) bool {
 		return false
 	}
 	return addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast()
+}
+
+func isManagedAssetIP(ip string) bool {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	return addr.IsPrivate() || addr.IsLoopback()
 }
 
 func averagePacketSize(bytes, packets uint64) uint64 {

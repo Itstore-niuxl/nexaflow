@@ -382,6 +382,8 @@ const refresh = async () => {
         service: 'HTTPS',
         category: 'Web',
         risk: 'low',
+        direction: '入站',
+        confidence: '高',
         bytes: 42000000,
         packets: 14000,
         client_count: 3,
@@ -395,6 +397,8 @@ const refresh = async () => {
         service: 'SSH',
         category: '远程管理',
         risk: 'high',
+        direction: '入站',
+        confidence: '高',
         bytes: 18000000,
         packets: 7200,
         client_count: 2,
@@ -586,6 +590,8 @@ const filteredServiceExposure = computed(() => {
         row.protocol,
         row.service,
         row.category,
+        row.direction,
+        row.confidence,
         row.sample_client,
         row.sample_flow
       ]
@@ -889,7 +895,7 @@ const resetExposureFilters = () => {
 
 const exportServiceExposure = () => {
   const rows = [
-    ['服务对象', 'IP', '端口', '协议', '服务', '类别', '风险', '客户端数', '流量字节', '包数', '样例客户端', '样例会话'],
+    ['服务对象', 'IP', '端口', '协议', '服务', '类别', '风险', '方向', '可信度', '客户端数', '流量字节', '包数', '样例客户端', '样例会话'],
     ...filteredServiceExposure.value.map((row) => [
       exposureObject(row),
       row.ip,
@@ -898,6 +904,8 @@ const exportServiceExposure = () => {
       row.service,
       row.category,
       serviceRiskText(row.risk),
+      row.direction,
+      row.confidence,
       String(row.client_count),
       String(row.bytes),
       String(row.packets),
@@ -1387,6 +1395,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <th>服务</th>
                 <th>类别</th>
                 <th>风险</th>
+                <th>方向</th>
+                <th>可信度</th>
                 <th>客户端数</th>
                 <th>流量</th>
                 <th>包数</th>
@@ -1402,6 +1412,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>
                   <span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span>
                 </td>
+                <td>{{ row.direction || '-' }}</td>
+                <td>{{ row.confidence || '-' }}</td>
                 <td>{{ row.client_count.toLocaleString() }}</td>
                 <td>{{ formatBytes(row.bytes) }}</td>
                 <td>{{ row.packets.toLocaleString() }}</td>
