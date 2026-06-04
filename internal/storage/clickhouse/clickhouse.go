@@ -77,6 +77,32 @@ ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (source_id, dimension, ts, dim_key)
 TTL ts + INTERVAL 7 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.flow_sessions_5s
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    flow_key String,
+    src_ip String,
+    src_port UInt16,
+    dst_ip String,
+    dst_port UInt16,
+    protocol LowCardinality(String),
+    service LowCardinality(String),
+    category LowCardinality(String),
+    risk LowCardinality(String),
+    direction LowCardinality(String),
+    server_ip String,
+    server_port UInt16,
+    client_ip String,
+    confidence LowCardinality(String),
+    bytes UInt64,
+    packets UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, ts, dst_ip, dst_port, src_ip, protocol)
+TTL ts + INTERVAL 7 DAY`,
 		`CREATE TABLE IF NOT EXISTS ` + s.database + `.link_traffic_1m
 (
     ts DateTime,
@@ -249,6 +275,9 @@ func (s *Store) WriteWindow(ctx context.Context, win model.WindowResult) error {
 		return err
 	}
 	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "flow", win.TopFlow); err != nil {
+		return err
+	}
+	if err := s.insertFlowSessions(ctx, win.SourceID, win.Iface, win.Ts, win.TopFlow); err != nil {
 		return err
 	}
 	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "pair", win.TopPair); err != nil {
@@ -1106,6 +1135,74 @@ func (s *Store) relatedSecurityInsights(ctx context.Context, dimension, key stri
 }
 
 func (s *Store) Sessions(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
+	rows, err := s.flowSessions(ctx, q, minutes, limit)
+	if err == nil && len(rows) > 0 {
+		return rows, nil
+	}
+	fallbackRows, fallbackErr := s.legacySessions(ctx, q, minutes, limit)
+	if fallbackErr != nil {
+		return fallbackRows, firstErr(err, fallbackErr)
+	}
+	return fallbackRows, err
+}
+
+func (s *Store) flowSessions(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
+	where := ""
+	if q = strings.TrimSpace(q); q != "" {
+		escaped := escape(q)
+		where = fmt.Sprintf(` AND (
+    position(flow_key, '%s') > 0 OR
+    position(src_ip, '%s') > 0 OR
+    position(dst_ip, '%s') > 0 OR
+    position(service, '%s') > 0 OR
+    position(category, '%s') > 0 OR
+    position(protocol, '%s') > 0 OR
+    toString(src_port) = '%s' OR
+    toString(dst_port) = '%s'
+)`, escaped, escaped, escaped, escaped, escaped, escaped, escaped, escaped)
+	}
+	query := fmt.Sprintf(`SELECT
+    flow_key AS key,
+    any(src_ip) AS src_ip,
+    any(toString(src_port)) AS src_port,
+    any(dst_ip) AS dst_ip,
+    any(toString(dst_port)) AS dst_port,
+    any(protocol) AS protocol,
+    any(service) AS service,
+    any(category) AS category,
+    any(risk) AS risk,
+    any(direction) AS direction,
+    any(server_ip) AS server_ip,
+    any(toString(server_port)) AS server_port,
+    any(client_ip) AS client_ip,
+    any(confidence) AS confidence,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    min(toUnixTimestamp(ts)) AS first_seen,
+    max(toUnixTimestamp(ts)) AS last_seen
+FROM %s.flow_sessions_5s
+WHERE ts >= now() - INTERVAL %d MINUTE%s
+GROUP BY key
+ORDER BY bytes DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, where, limit)
+	body, err := s.query(ctx, query)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	for _, row := range parsed.Data {
+		row["avg_packet_size"] = ratio(floatValue(row["bytes"]), floatValue(row["packets"]))
+	}
+	return parsed.Data, nil
+}
+
+func (s *Store) legacySessions(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
 	where := ""
 	if q = strings.TrimSpace(q); q != "" {
 		where = " AND position(dim_key, '" + escape(q) + "') > 0"
@@ -2493,6 +2590,46 @@ func (s *Store) insertDim(ctx context.Context, sourceID, iface string, ts int64,
 			formatTime(ts), sourceID, iface, dimension, row.Key, row.Bytes, row.Packets)
 	}
 	return s.execBody(ctx, "INSERT INTO "+s.database+".dimension_traffic_5s FORMAT JSONEachRow", b.String())
+}
+
+func (s *Store) insertFlowSessions(ctx context.Context, sourceID, iface string, ts int64, rows []model.TopItem) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, row := range rows {
+		parsed, ok := parseFlowKey(row.Key)
+		if !ok {
+			continue
+		}
+		service := identifyService(parsed.DstPort, parsed.Proto)
+		session := sessionRow(row, ts, ts)
+		fmt.Fprintf(&b, `{"ts":%q,"source_id":%q,"iface":%q,"flow_key":%q,"src_ip":%q,"src_port":%d,"dst_ip":%q,"dst_port":%d,"protocol":%q,"service":%q,"category":%q,"risk":%q,"direction":%q,"server_ip":%q,"server_port":%d,"client_ip":%q,"confidence":%q,"bytes":%d,"packets":%d}`+"\n",
+			formatTime(ts),
+			sourceID,
+			iface,
+			row.Key,
+			parsed.SrcIP,
+			uint16Value(parsed.SrcPort),
+			parsed.DstIP,
+			uint16Value(parsed.DstPort),
+			parsed.Proto,
+			service.Name,
+			service.Category,
+			service.Risk,
+			stringValue(session["direction"]),
+			stringValue(session["server_ip"]),
+			uint16Value(stringValue(session["server_port"])),
+			stringValue(session["client_ip"]),
+			stringValue(session["confidence"]),
+			row.Bytes,
+			row.Packets,
+		)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return s.execBody(ctx, "INSERT INTO "+s.database+".flow_sessions_5s FORMAT JSONEachRow", b.String())
 }
 
 func (s *Store) insertAlert(ctx context.Context, row model.AlertEvent) error {
@@ -4695,6 +4832,28 @@ func uintValue(v any) uint64 {
 		return uint64(value)
 	case float64:
 		return uint64(value)
+	default:
+		return 0
+	}
+}
+
+func uint16Value(v any) uint16 {
+	switch value := v.(type) {
+	case uint16:
+		return value
+	case uint64:
+		return uint16(value)
+	case uint:
+		return uint16(value)
+	case int:
+		return uint16(value)
+	case int64:
+		return uint16(value)
+	case float64:
+		return uint16(value)
+	case string:
+		n, _ := strconv.Atoi(value)
+		return uint16(n)
 	default:
 		return 0
 	}

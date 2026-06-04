@@ -45,6 +45,33 @@ PARTITION BY toDate(ts)
 ORDER BY (source_id, dimension, ts, dim_key)
 TTL ts + INTERVAL 7 DAY;
 
+CREATE TABLE IF NOT EXISTS nexaflow.flow_sessions_5s
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    flow_key String,
+    src_ip String,
+    src_port UInt16,
+    dst_ip String,
+    dst_port UInt16,
+    protocol LowCardinality(String),
+    service LowCardinality(String),
+    category LowCardinality(String),
+    risk LowCardinality(String),
+    direction LowCardinality(String),
+    server_ip String,
+    server_port UInt16,
+    client_ip String,
+    confidence LowCardinality(String),
+    bytes UInt64,
+    packets UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, ts, dst_ip, dst_port, src_ip, protocol)
+TTL ts + INTERVAL 7 DAY;
+
 CREATE TABLE IF NOT EXISTS nexaflow.alert_events
 (
     id String,
@@ -59,4 +86,3 @@ ENGINE = MergeTree
 PARTITION BY toDate(first_seen)
 ORDER BY (severity, status, first_seen, id)
 TTL first_seen + INTERVAL 180 DAY;
-

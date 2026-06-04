@@ -5,6 +5,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +44,7 @@ func main() {
 		return config.LoadRuntime(cfg.RuntimePath, defaultRuntime).Alerts
 	}).Run(packets, windows)
 
+	captureStats := newInterfaceStatsTracker()
 	log.Printf("collector started runtime_config=%s window=%s", cfg.RuntimePath, cfg.Window)
 	for {
 		select {
@@ -48,6 +52,7 @@ func main() {
 			log.Println("collector stopped")
 			return
 		case win := <-windows:
+			captureStats.apply(&win.Link)
 			if err := ch.WriteWindow(ctx, win); err != nil {
 				log.Printf("clickhouse write failed: %v", err)
 				if initErr := ch.Init(ctx); initErr != nil {
@@ -112,4 +117,63 @@ func runCapture(ctx context.Context, runtime config.CaptureRuntime, packets chan
 		log.Printf("mode %q is not implemented, falling back to mock", runtime.Mode)
 		mock.New(runtime.SourceID, runtime.Iface).Run(ctx, packets)
 	}
+}
+
+type interfaceStats struct {
+	dropped uint64
+	errors  uint64
+	known   bool
+}
+
+type interfaceStatsTracker struct {
+	last map[string]interfaceStats
+}
+
+func newInterfaceStatsTracker() *interfaceStatsTracker {
+	return &interfaceStatsTracker{last: map[string]interfaceStats{}}
+}
+
+func (t *interfaceStatsTracker) apply(link *model.LinkWindow) {
+	if link == nil || strings.TrimSpace(link.Iface) == "" || link.Iface == "any" {
+		return
+	}
+	current, err := readInterfaceStats(link.Iface)
+	if err != nil {
+		return
+	}
+	previous := t.last[link.Iface]
+	t.last[link.Iface] = current
+	if !previous.known {
+		return
+	}
+	link.Drops += deltaCounter(current.dropped, previous.dropped)
+	link.Drops += deltaCounter(current.errors, previous.errors)
+}
+
+func readInterfaceStats(iface string) (interfaceStats, error) {
+	base := filepath.Join("/sys/class/net", iface, "statistics")
+	dropped, err := readUintFile(filepath.Join(base, "rx_dropped"))
+	if err != nil {
+		return interfaceStats{}, err
+	}
+	errors, err := readUintFile(filepath.Join(base, "rx_errors"))
+	if err != nil {
+		return interfaceStats{}, err
+	}
+	return interfaceStats{dropped: dropped, errors: errors, known: true}, nil
+}
+
+func readUintFile(path string) (uint64, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+}
+
+func deltaCounter(current, previous uint64) uint64 {
+	if current < previous {
+		return 0
+	}
+	return current - previous
 }
