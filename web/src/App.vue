@@ -53,6 +53,7 @@ import {
   type SearchResult,
   type SecurityInsight,
   type SecurityIncident,
+  type SecurityIncidentContext,
   type ServiceExposure,
   type ServiceMap,
   type SessionRow,
@@ -120,6 +121,18 @@ const emptyObjectRelations = (): ObjectRelations => ({
   insights: []
 });
 const objectRelations = ref<ObjectRelations>(emptyObjectRelations());
+const emptyIncidentContext = (): SecurityIncidentContext => ({
+  subject: '',
+  kind: '',
+  minutes: 15,
+  selector: { dimension: 'flow', key: '', query: '', direction: 'src' },
+  relations: emptyObjectRelations(),
+  sessions: [],
+  search_results: [],
+  insights: [],
+  anomalies: [],
+  playbook_actions: []
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -128,6 +141,8 @@ const assetEditor = ref<AssetMetadata | null>(null);
 const assetTagsText = ref('');
 const securityInsights = ref<SecurityInsight[]>([]);
 const securityIncidents = ref<SecurityIncident[]>([]);
+const incidentContext = ref<SecurityIncidentContext>(emptyIncidentContext());
+const selectedIncident = ref<SecurityIncident | null>(null);
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnomalies = ref<TrafficAnomaly[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
@@ -157,6 +172,7 @@ const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
 const handlingAlert = ref(false);
+const loadingIncidentContext = ref(false);
 const currentView = ref('dashboard');
 const activeTopN = ref('src_ip');
 const selectedMinutes = ref(15);
@@ -814,6 +830,34 @@ const refresh = async () => {
         recommended_action: '确认新增服务是否符合变更计划，检查关联资产、端口画像和会话明细'
       }
     ];
+    selectedIncident.value = securityIncidents.value[0];
+    incidentContext.value = {
+      subject: '211.93.22.130 -> 10.2.0.12',
+      kind: 'external_session_burst',
+      minutes: selectedMinutes.value,
+      selector: { dimension: 'pair', key: '211.93.22.130 -> 10.2.0.12', query: '211.93.22.130 -> 10.2.0.12', direction: 'src' },
+      relations: {
+        dimension: 'pair',
+        key: '211.93.22.130 -> 10.2.0.12',
+        direction: 'src',
+        minutes: selectedMinutes.value,
+        summary: { key: '211.93.22.130 -> 10.2.0.12', bytes: 7000000, packets: 6800, related_count: 2 },
+        related_ips: [{ key: '10.2.0.12', bytes: 7000000, packets: 6800 }],
+        related_ports: [{ key: '8081/tcp', bytes: 7000000, packets: 6800 }],
+        related_services: [{ key: 'HTTP Alternate', bytes: 7000000, packets: 6800 }],
+        related_flows: [{ key: '10.2.0.12:8081 -> 211.93.22.130:4300 / tcp', bytes: 7000000, packets: 6800 }],
+        insights: []
+      },
+      sessions: sessions.value.slice(0, 2),
+      search_results: [{ kind: 'flow', key: '10.2.0.12:8081 -> 211.93.22.130:4300 / tcp', bytes: 7000000, packets: 6800 }],
+      insights: securityInsights.value.slice(0, 2),
+      anomalies: trafficAnomalies.value.slice(0, 1),
+      playbook_actions: [
+        { label: '核对公网来源', description: '确认来源 IP 是否属于可信业务或已登记访问方' },
+        { label: '检查端口暴露', description: '核对 8081 服务用途、防火墙策略和访问来源限制' },
+        { label: '关联会话复盘', description: '查看同一来源的会话数量、目的端口扩散和最近出现时间' }
+      ]
+    };
     trafficAnalysis.value = {
       minutes: selectedMinutes.value,
       baseline: {
@@ -1083,6 +1127,21 @@ const incidentKindItems = computed(() => aggregateTopItems(securityIncidents.val
 const criticalIncidentCount = computed(() => securityIncidents.value.filter((row) => row.severity === 'critical').length);
 const openIncidentCount = computed(() => securityIncidents.value.filter((row) => row.status === 'open').length);
 const incidentTotalBytes = computed(() => securityIncidents.value.reduce((sum, row) => sum + row.bytes, 0));
+const incidentContextSessionItems = computed(() => incidentContext.value.sessions.map((row) => ({ key: row.key, bytes: row.bytes, packets: row.packets })));
+const incidentContextInsightItems = computed(() =>
+  incidentContext.value.insights.map((row) => ({
+    key: `${severityText(row.severity)} / ${incidentKindText(row.kind)} / ${row.subject}`,
+    bytes: row.bytes,
+    packets: row.packets
+  }))
+);
+const incidentContextAnomalyItems = computed(() =>
+  incidentContext.value.anomalies.map((row) => ({
+    key: `${changeDimensionText(row.dimension)} / ${row.key}`,
+    bytes: Math.abs(row.delta_bytes),
+    packets: Math.abs(row.delta_packets)
+  }))
+);
 const searchResultItems = computed(() => aggregateTopItems(searchResults.value, (row) => `${row.kind}: ${row.key}`, (row) => row.bytes, (row) => row.packets));
 const sessionServiceItems = computed(() => aggregateTopItems(sessions.value, (row) => row.service, (row) => row.bytes, (row) => row.packets));
 const sessionDirectionItems = computed(() => aggregateTopItems(sessions.value, (row) => row.direction, (row) => row.bytes, (row) => row.packets));
@@ -1391,6 +1450,18 @@ const inspectIncident = async (incident: SecurityIncident) => {
   searchTerm.value = subject;
   currentView.value = 'search';
   await runSearch();
+};
+
+const loadIncidentContext = async (incident: SecurityIncident) => {
+  selectedIncident.value = incident;
+  loadingIncidentContext.value = true;
+  try {
+    const result = await api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12);
+    incidentContext.value = result.data;
+    degraded.value = result.degraded;
+  } finally {
+    loadingIncidentContext.value = false;
+  }
 };
 
 const loadDimensionTrend = async () => {
@@ -2693,6 +2764,71 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <HorizontalBarChart title="事件类别流量" eyebrow="Category Traffic" :items="incidentCategoryItems" />
           <HorizontalBarChart title="事件类型流量" eyebrow="Kind Traffic" :items="incidentKindItems" />
         </section>
+        <section v-if="selectedIncident" class="table-panel incident-context-panel">
+          <div class="panel-heading">
+            <h2>事件上下文</h2>
+            <span>{{ loadingIncidentContext ? '加载中...' : `${incidentContext.selector.dimension} / ${incidentContext.selector.key || incidentContext.subject}` }}</span>
+          </div>
+          <div class="incident-context-summary">
+            <div>
+              <span>事件对象</span>
+              <strong>{{ selectedIncident.subject }}</strong>
+            </div>
+            <div>
+              <span>事件类型</span>
+              <strong>{{ incidentKindText(selectedIncident.kind) }}</strong>
+            </div>
+            <div>
+              <span>关联流量</span>
+              <strong>{{ formatBytes(incidentContext.relations.summary.bytes || selectedIncident.bytes) }}</strong>
+            </div>
+            <div>
+              <span>关联会话</span>
+              <strong>{{ incidentContext.sessions.length.toLocaleString() }}</strong>
+            </div>
+          </div>
+          <div class="playbook-list">
+            <article v-for="action in incidentContext.playbook_actions" :key="action.label">
+              <strong>{{ action.label }}</strong>
+              <span>{{ action.description }}</span>
+            </article>
+          </div>
+          <section class="command-grid">
+            <HorizontalBarChart title="上下文关联 IP" eyebrow="Related IP" :items="incidentContext.relations.related_ips" />
+            <HorizontalBarChart title="上下文关联端口" eyebrow="Related Port" :items="incidentContext.relations.related_ports" />
+          </section>
+          <section class="tables-grid analysis-grid">
+            <TopNTable title="关联服务" :items="incidentContext.relations.related_services" />
+            <TopNTable title="关联会话" :items="incidentContextSessionItems" />
+            <TopNTable title="关联风险线索" :items="incidentContextInsightItems" />
+            <TopNTable title="关联异常波动" :items="incidentContextAnomalyItems" />
+          </section>
+          <div v-if="incidentContext.sessions.length" class="context-session-list">
+            <h3>会话明细</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>会话</th>
+                  <th>服务</th>
+                  <th>风险</th>
+                  <th>方向</th>
+                  <th>流量</th>
+                  <th>最近出现</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in incidentContext.sessions" :key="row.key">
+                  <td>{{ row.key }}</td>
+                  <td>{{ row.service }}</td>
+                  <td><span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span></td>
+                  <td>{{ row.direction }}</td>
+                  <td>{{ formatBytes(row.bytes) }}</td>
+                  <td>{{ formatTime(row.last_seen) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
         <section class="table-panel wide-key-table incident-table">
           <div class="panel-heading">
             <h2>统一事件流</h2>
@@ -2728,6 +2864,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ incident.score }}</td>
                 <td>{{ formatTime(incident.last_seen) }}</td>
                 <td class="action-cell">
+                  <button class="inline-button" type="button" :disabled="loadingIncidentContext" @click="loadIncidentContext(incident)">上下文</button>
                   <button class="inline-button" type="button" @click="inspectIncident(incident)">追踪</button>
                   <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(incident.subject)">忽略</button>
                 </td>

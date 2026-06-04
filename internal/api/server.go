@@ -53,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/assets/metadata", s.assetMetadata)
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
 	mux.HandleFunc("/api/v1/security/incidents", s.securityIncidents)
+	mux.HandleFunc("/api/v1/security/incident-context", s.securityIncidentContext)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -302,6 +303,22 @@ func (s *Server) securityIncidents(w http.ResponseWriter, r *http.Request) {
 			data = data[:limit]
 		}
 	}
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) securityIncidentContext(w http.ResponseWriter, r *http.Request) {
+	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
+	if subject == "" {
+		http.Error(w, "subject is required", http.StatusBadRequest)
+		return
+	}
+	data, err := s.store.SecurityIncidentContext(
+		r.Context(),
+		subject,
+		strings.TrimSpace(r.URL.Query().Get("kind")),
+		queryMinutes(r),
+		queryLimit(r, 12, 50),
+	)
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 

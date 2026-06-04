@@ -270,6 +270,33 @@ export interface SecurityIncident {
   recommended_action: string;
 }
 
+export interface IncidentSelector {
+  dimension: string;
+  key: string;
+  query: string;
+  direction: string;
+}
+
+export interface PlaybookAction {
+  label: string;
+  description: string;
+}
+
+export interface SecurityIncidentContext {
+  subject: string;
+  kind: string;
+  minutes: number;
+  selector: IncidentSelector;
+  relations: ObjectRelations;
+  sessions: SessionRow[];
+  search_results: SearchResult[];
+  insights: SecurityInsight[];
+  anomalies: TrafficAnomaly[];
+  playbook_actions: PlaybookAction[];
+  ip_profile?: IPProfile;
+  port_profile?: PortProfile;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -454,6 +481,11 @@ export const api = {
   async securityIncidents(minutes = 15, limit = 80) {
     return json<{ data: SecurityIncident[]; degraded: boolean }>(
       `/api/v1/security/incidents?minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async securityIncidentContext(subject: string, kind = '', minutes = 15, limit = 12) {
+    return json<{ data: SecurityIncidentContext; degraded: boolean }>(
+      `/api/v1/security/incident-context?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&minutes=${minutes}&limit=${limit}`
     );
   },
   async trafficAnalysis(minutes = 15) {

@@ -1340,6 +1340,44 @@ func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]ma
 	return items, firstErr(alertErr, insightErr, anomalyErr)
 }
 
+func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind string, minutes, limit int) (map[string]any, error) {
+	selector := incidentContextSelector(subject, kind)
+	relationDimension := selector["dimension"]
+	relationKey := selector["key"]
+	if relationDimension == "link" {
+		relationDimension = "flow"
+		relationKey = ""
+	}
+	relations, relationErr := s.ObjectRelations(ctx, relationDimension, relationKey, selector["direction"], minutes, limit)
+	sessions, sessionErr := s.Sessions(ctx, selector["query"], minutes, limit)
+	searchRows, searchErr := s.Search(ctx, selector["query"], minutes, limit)
+	insights, insightErr := s.incidentRelatedInsights(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
+	anomalies, anomalyErr := s.incidentRelatedAnomalies(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
+	context := map[string]any{
+		"subject":          subject,
+		"kind":             kind,
+		"minutes":          minutes,
+		"selector":         selector,
+		"relations":        relations,
+		"sessions":         sessions,
+		"search_results":   searchRows,
+		"insights":         insights,
+		"anomalies":        anomalies,
+		"playbook_actions": incidentPlaybookActions(kind, selector["dimension"]),
+	}
+	if selector["dimension"] == "ip" && selector["key"] != "" {
+		profile, profileErr := s.IPProfile(ctx, selector["key"], minutes)
+		context["ip_profile"] = profile
+		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, profileErr)
+	}
+	if selector["dimension"] == "dst_port" && selector["key"] != "" {
+		profile, profileErr := s.PortProfile(ctx, selector["key"], minutes)
+		context["port_profile"] = profile
+		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, profileErr)
+	}
+	return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr)
+}
+
 func (s *Store) ipStats(ctx context.Context, ip string, minutes int) (map[string]model.TopItem, error) {
 	q := fmt.Sprintf(`SELECT direction AS key, sum(bytes) AS bytes, sum(packets) AS packets
 FROM %s.ip_traffic_5s
@@ -2648,6 +2686,181 @@ func severityScore(severity string) int {
 	default:
 		return 40
 	}
+}
+
+func incidentContextSelector(subject, kind string) map[string]string {
+	subject = strings.TrimSpace(subject)
+	selector := map[string]string{
+		"dimension": "flow",
+		"key":       subject,
+		"query":     subject,
+		"direction": "src",
+	}
+	if subject == "" {
+		return selector
+	}
+	prefix, value, hasPrefix := strings.Cut(subject, ":")
+	if hasPrefix {
+		value = strings.TrimSpace(value)
+		switch prefix {
+		case "src_ip", "dst_ip", "ip":
+			selector["dimension"] = "ip"
+			selector["key"] = value
+			selector["query"] = value
+			if prefix == "dst_ip" {
+				selector["direction"] = "dst"
+			}
+			return selector
+		case "dst_port":
+			selector["dimension"] = "dst_port"
+			selector["key"] = value
+			selector["query"] = ":" + value + " /"
+			return selector
+		case "service", "protocol", "flow", "pair":
+			selector["dimension"] = prefix
+			selector["key"] = value
+			selector["query"] = value
+			return selector
+		case "link":
+			selector["dimension"] = "link"
+			selector["key"] = value
+			selector["query"] = ""
+			return selector
+		}
+	}
+	if strings.Contains(subject, " -> ") && strings.Contains(subject, " / ") {
+		selector["dimension"] = "flow"
+		selector["key"] = subject
+		selector["query"] = subject
+		return selector
+	}
+	if strings.Contains(subject, " -> ") {
+		selector["dimension"] = "pair"
+		selector["key"] = subject
+		selector["query"] = subject
+		return selector
+	}
+	if port := subjectPort(subject); port != "" {
+		selector["dimension"] = "dst_port"
+		selector["key"] = port
+		selector["query"] = ":" + port + " /"
+		return selector
+	}
+	if ip := firstIPInText(subject); ip != "" {
+		selector["dimension"] = "ip"
+		selector["key"] = ip
+		selector["query"] = ip
+		return selector
+	}
+	if kind == "link_burst" {
+		selector["dimension"] = "link"
+		selector["key"] = "链路总流量"
+		selector["query"] = ""
+	}
+	return selector
+}
+
+func (s *Store) incidentRelatedInsights(ctx context.Context, dimension, key, query string, minutes, limit int) ([]map[string]any, error) {
+	if dimension != "" && dimension != "link" {
+		rows, err := s.relatedSecurityInsights(ctx, dimension, key, minutes, limit)
+		if len(rows) > 0 || err != nil {
+			return rows, err
+		}
+	}
+	rows, err := s.SecurityInsights(ctx, minutes, max(limit*3, 30))
+	return filterMapsByText(rows, []string{key, query}, limit), err
+}
+
+func (s *Store) incidentRelatedAnomalies(ctx context.Context, dimension, key, query string, minutes, limit int) ([]map[string]any, error) {
+	rows, err := s.TrafficAnomalies(ctx, minutes, max(limit*3, 30))
+	markers := []string{key, query, dimension + ":" + key}
+	filtered := make([]map[string]any, 0, limit)
+	for _, row := range rows {
+		text := strings.Join([]string{
+			stringValue(row["dimension"]),
+			stringValue(row["key"]),
+			stringValue(row["summary"]),
+		}, " ")
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(text, marker) {
+				filtered = append(filtered, row)
+				break
+			}
+		}
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	if len(filtered) == 0 && dimension == "link" {
+		for _, row := range rows {
+			if stringValue(row["dimension"]) == "link" {
+				filtered = append(filtered, row)
+			}
+			if len(filtered) >= limit {
+				break
+			}
+		}
+	}
+	return filtered, err
+}
+
+func filterMapsByText(rows []map[string]any, markers []string, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = len(rows)
+	}
+	filtered := make([]map[string]any, 0, limit)
+	for _, row := range rows {
+		text := strings.Join([]string{
+			stringValue(row["subject"]),
+			stringValue(row["summary"]),
+			stringValue(row["kind"]),
+		}, " ")
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(text, marker) {
+				filtered = append(filtered, row)
+				break
+			}
+		}
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered
+}
+
+func incidentPlaybookActions(kind, dimension string) []map[string]string {
+	actions := []map[string]string{
+		{"label": "查看对象画像", "description": "核对收发方向、最近出现时间、关联主机对和会话排行"},
+		{"label": "检查白名单", "description": "确认对象是否为已知业务、维护窗口或可信来源"},
+		{"label": "复核访问策略", "description": "对公网、高危服务或新增服务检查防火墙和 ACL 策略"},
+	}
+	if kind == "outbound_probe" || kind == "fanout" {
+		actions = append(actions, map[string]string{"label": "排查横向移动", "description": "查看源主机关联目的、端口扩散和短时会话数量"})
+	}
+	if kind == "link_burst" || dimension == "link" {
+		actions = append(actions, map[string]string{"label": "确认业务峰值", "description": "对照链路趋势、TopN 和变更窗口确认是否为正常流量放量"})
+	}
+	if dimension == "dst_port" || dimension == "service" {
+		actions = append(actions, map[string]string{"label": "确认服务归属", "description": "核对资产负责人、服务用途、暴露方向和客户端来源"})
+	}
+	return actions
+}
+
+func subjectPort(subject string) string {
+	if strings.HasPrefix(subject, "dst_port:") {
+		return strings.TrimPrefix(subject, "dst_port:")
+	}
+	return ""
+}
+
+func firstIPInText(text string) string {
+	normalized := strings.NewReplacer(":", " ", "/", " ", ">", " ", "-", " ", ",", " ", "(", " ", ")", " ").Replace(text)
+	for _, token := range strings.Fields(normalized) {
+		if addr, err := netip.ParseAddr(token); err == nil {
+			return addr.String()
+		}
+	}
+	return ""
 }
 
 func anomalyFromChange(row map[string]any, minutes int) (map[string]any, bool) {
