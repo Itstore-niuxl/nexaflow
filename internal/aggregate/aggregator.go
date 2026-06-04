@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"nexaflow/internal/config"
+	"nexaflow/internal/enrich"
 	"nexaflow/internal/model"
 )
 
@@ -36,6 +37,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 	flows := map[string]counter{}
 	pairs := map[string]counter{}
 	packetLens := map[string]counter{}
+	services := map[string]counter{}
+	serviceCategories := map[string]counter{}
+	serviceRisks := map[string]counter{}
 
 	flush := func() {
 		if current == 0 {
@@ -66,6 +70,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 			TopFlow:      top(flows, 20),
 			TopPair:      top(pairs, 20),
 			TopPacketLen: top(packetLens, 20),
+			TopService:   top(services, 20),
+			TopSvcCat:    top(serviceCategories, 20),
+			TopSvcRisk:   top(serviceRisks, 20),
 		}
 		policy := a.alerts()
 		result.Alerts = append(result.Alerts, anomalyAlerts(result, policy)...)
@@ -95,6 +102,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 		flows = map[string]counter{}
 		pairs = map[string]counter{}
 		packetLens = map[string]counter{}
+		services = map[string]counter{}
+		serviceCategories = map[string]counter{}
+		serviceRisks = map[string]counter{}
 	}
 
 	for pkt := range in {
@@ -115,6 +125,10 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 		add(flows, flowKey(pkt), pkt.Length)
 		add(pairs, pairKey(pkt), pkt.Length)
 		add(packetLens, packetLenBucket(pkt.Length), pkt.Length)
+		service := enrich.IdentifyService(pkt.DstPort, pkt.Proto)
+		add(services, service.Name, pkt.Length)
+		add(serviceCategories, service.Category, pkt.Length)
+		add(serviceRisks, service.Risk, pkt.Length)
 		link.bytes += uint64(pkt.Length)
 		link.packets++
 	}

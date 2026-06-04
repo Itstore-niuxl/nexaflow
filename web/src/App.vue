@@ -68,6 +68,9 @@ const topProtocols = ref<TopItem[]>([]);
 const topFlows = ref<TopItem[]>([]);
 const topPairs = ref<TopItem[]>([]);
 const topPacketLens = ref<TopItem[]>([]);
+const topServices = ref<TopItem[]>([]);
+const topServiceCategories = ref<TopItem[]>([]);
+const topServiceRisks = ref<TopItem[]>([]);
 const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
 const interfaces = ref<NetworkInterface[]>([]);
@@ -226,6 +229,9 @@ const refresh = async () => {
       portRes,
       protoRes,
       packetLenRes,
+      serviceRes,
+      serviceCategoryRes,
+      serviceRiskRes,
       flowRes,
       pairRes,
       collectorRes,
@@ -252,6 +258,9 @@ const refresh = async () => {
       api.topn('dst_port', 'src', minutes),
       api.topn('protocol', 'src', minutes),
       api.topn('packet_len', 'src', minutes),
+      api.topn('service', 'src', minutes),
+      api.topn('service_category', 'src', minutes),
+      api.topn('service_risk', 'src', minutes),
       api.topn('flow', 'src', minutes),
       api.topn('pair', 'src', minutes),
       api.collectors(),
@@ -278,6 +287,9 @@ const refresh = async () => {
     topPorts.value = portRes.data;
     topProtocols.value = protoRes.data;
     topPacketLens.value = packetLenRes.data;
+    topServices.value = serviceRes.data;
+    topServiceCategories.value = serviceCategoryRes.data;
+    topServiceRisks.value = serviceRiskRes.data;
     topFlows.value = flowRes.data;
     topPairs.value = pairRes.data;
     collectors.value = collectorRes.data;
@@ -301,6 +313,9 @@ const refresh = async () => {
       seriesRes.degraded ||
       srcRes.degraded ||
       packetLenRes.degraded ||
+      serviceRes.degraded ||
+      serviceCategoryRes.degraded ||
+      serviceRiskRes.degraded ||
       alertRes.degraded ||
       statusRes.degraded ||
       windowsRes.degraded ||
@@ -375,6 +390,19 @@ const refresh = async () => {
     topPacketLens.value = [
       { key: '1KB-MTU', bytes: 82000000, packets: 56000 },
       { key: '65-128B', bytes: 9000000, packets: 80000 }
+    ];
+    topServices.value = [
+      { key: 'HTTPS', bytes: 88000000, packets: 48000 },
+      { key: 'HTTP', bytes: 22000000, packets: 15000 },
+      { key: 'DNS', bytes: 6000000, packets: 18000 }
+    ];
+    topServiceCategories.value = [
+      { key: 'Web', bytes: 110000000, packets: 63000 },
+      { key: '基础网络', bytes: 6000000, packets: 18000 }
+    ];
+    topServiceRisks.value = [
+      { key: 'low', bytes: 116000000, packets: 81000 },
+      { key: 'medium', bytes: 18000000, packets: 7200 }
     ];
     topPairs.value = [
       { key: '10.10.1.42 -> 172.20.2.10', bytes: 52000000, packets: 18000 },
@@ -762,6 +790,9 @@ const avgPacketSize = computed(() => {
 const selectedTopN = computed(() => {
   if (activeTopN.value === 'dst_ip') return topDst.value;
   if (activeTopN.value === 'dst_port') return topPorts.value;
+  if (activeTopN.value === 'service') return topServices.value;
+  if (activeTopN.value === 'service_category') return topServiceCategories.value;
+  if (activeTopN.value === 'service_risk') return topServiceRisks.value;
   if (activeTopN.value === 'protocol') return topProtocols.value;
   if (activeTopN.value === 'packet_len') return topPacketLens.value;
   if (activeTopN.value === 'flow') return topFlows.value;
@@ -772,6 +803,9 @@ const selectedTopN = computed(() => {
 const selectedTopNTitle = computed(() => {
   if (activeTopN.value === 'dst_ip') return '目的 IP 排行';
   if (activeTopN.value === 'dst_port') return '目的端口排行';
+  if (activeTopN.value === 'service') return '应用服务排行';
+  if (activeTopN.value === 'service_category') return '服务类别排行';
+  if (activeTopN.value === 'service_risk') return '服务风险排行';
   if (activeTopN.value === 'protocol') return '协议排行';
   if (activeTopN.value === 'packet_len') return '包长分布排行';
   if (activeTopN.value === 'flow') return '会话排行';
@@ -1359,6 +1393,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TrafficHeatmap :points="series" />
           <HorizontalBarChart title="变化对象排行" eyebrow="Change Ranking" :items="trafficChangeItems" />
         </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="应用服务排行" eyebrow="Service Ranking" :items="topServices" />
+          <HorizontalBarChart title="服务风险流量" eyebrow="Service Risk" :items="topServiceRisks" />
+        </section>
         <section class="main-grid">
           <section class="collector-panel">
             <h2>基线摘要</h2>
@@ -1386,6 +1424,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
         <section class="tables-grid analysis-grid">
           <TopNTable title="方向分布" :items="trafficAnalysis.directions" />
           <TopNTable title="协议占比" :items="trafficAnalysis.protocol_mix" />
+          <TopNTable title="应用服务" :items="topServices" />
+          <TopNTable title="服务类别" :items="topServiceCategories" />
           <TopNTable title="包长分布" :items="trafficAnalysis.packet_sizes" />
           <TopNTable title="端口服务混合" :items="trafficAnalysis.port_mix" />
         </section>
@@ -1592,6 +1632,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
         <section class="command-grid">
           <HorizontalBarChart title="风险级别流量" eyebrow="Risk Mix" :items="exposureRiskItems" />
           <HorizontalBarChart title="服务类别流量" eyebrow="Service Category" :items="exposureCategoryItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="识别服务排行" eyebrow="Recognized Service" :items="topServices" />
+          <HorizontalBarChart title="服务风险排行" eyebrow="Recognized Risk" :items="topServiceRisks" />
         </section>
         <section class="toolbar-panel exposure-toolbar">
           <label class="filter-field">
@@ -1964,6 +2008,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" :class="{ active: activeTopN === 'dst_ip' }" @click="activeTopN = 'dst_ip'">目的 IP</button>
           <button type="button" :class="{ active: activeTopN === 'pair' }" @click="activeTopN = 'pair'">主机对</button>
           <button type="button" :class="{ active: activeTopN === 'dst_port' }" @click="activeTopN = 'dst_port'">目的端口</button>
+          <button type="button" :class="{ active: activeTopN === 'service' }" @click="activeTopN = 'service'">应用服务</button>
+          <button type="button" :class="{ active: activeTopN === 'service_category' }" @click="activeTopN = 'service_category'">服务类别</button>
+          <button type="button" :class="{ active: activeTopN === 'service_risk' }" @click="activeTopN = 'service_risk'">服务风险</button>
           <button type="button" :class="{ active: activeTopN === 'protocol' }" @click="activeTopN = 'protocol'">协议</button>
           <button type="button" :class="{ active: activeTopN === 'packet_len' }" @click="activeTopN = 'packet_len'">包长</button>
           <button type="button" :class="{ active: activeTopN === 'flow' }" @click="activeTopN = 'flow'">会话</button>

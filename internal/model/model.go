@@ -40,6 +40,9 @@ type WindowResult struct {
 	TopFlow      []TopItem    `json:"top_flow"`
 	TopPair      []TopItem    `json:"top_pair"`
 	TopPacketLen []TopItem    `json:"top_packet_len"`
+	TopService   []TopItem    `json:"top_service"`
+	TopSvcCat    []TopItem    `json:"top_service_category"`
+	TopSvcRisk   []TopItem    `json:"top_service_risk"`
 	Alerts       []AlertEvent `json:"alerts"`
 }
 
