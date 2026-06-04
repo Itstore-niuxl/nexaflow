@@ -91,6 +91,16 @@ ENGINE = MergeTree
 PARTITION BY toDate(first_seen)
 ORDER BY (severity, status, first_seen, id)
 TTL first_seen + INTERVAL 180 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.alert_status_overrides
+(
+    id String,
+    status LowCardinality(String),
+    updated_at DateTime
+)
+ENGINE = MergeTree
+PARTITION BY toDate(updated_at)
+ORDER BY (id, updated_at)
+TTL updated_at + INTERVAL 180 DAY`,
 	}
 	for _, q := range queries {
 		if err := s.exec(ctx, q); err != nil {
@@ -248,18 +258,23 @@ FORMAT JSON`, s.database)
 
 func (s *Store) Alerts(ctx context.Context, limit, minutes int) ([]model.AlertEvent, error) {
 	q := fmt.Sprintf(`SELECT
-    id,
-    severity,
-    status,
-    subject,
-    summary,
-    toUnixTimestamp(first_seen) AS first_seen,
-    toUnixTimestamp(last_seen) AS last_seen
-FROM %s.alert_events
-WHERE last_seen >= now() - INTERVAL %d MINUTE
+    e.id AS id,
+    e.severity AS severity,
+    if(o.id = '', e.status, o.status) AS status,
+    e.subject AS subject,
+    e.summary AS summary,
+    toUnixTimestamp(e.first_seen) AS first_seen,
+    toUnixTimestamp(e.last_seen) AS last_seen
+FROM %s.alert_events AS e
+LEFT JOIN (
+    SELECT id, argMax(status, updated_at) AS status
+    FROM %s.alert_status_overrides
+    GROUP BY id
+) AS o ON e.id = o.id
+WHERE e.last_seen >= now() - INTERVAL %d MINUTE
 ORDER BY last_seen DESC
 LIMIT %d
-FORMAT JSON`, s.database, minutes, limit)
+FORMAT JSON`, s.database, s.database, minutes, limit)
 	body, err := s.query(ctx, q)
 	if err != nil {
 		return demoAlerts(), err
@@ -271,6 +286,17 @@ FORMAT JSON`, s.database, minutes, limit)
 		return demoAlerts(), err
 	}
 	return parsed.Data, nil
+}
+
+func (s *Store) UpdateAlertStatus(ctx context.Context, id, status string) error {
+	if id == "" {
+		return fmt.Errorf("alert id is required")
+	}
+	if status != "open" && status != "ack" && status != "resolved" {
+		return fmt.Errorf("unsupported alert status %q", status)
+	}
+	q := "INSERT INTO " + s.database + ".alert_status_overrides FORMAT JSONEachRow"
+	return s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"status":%q,"updated_at":%q}`+"\n", id, status, formatTime(time.Now().Unix())))
 }
 
 func (s *Store) IPProfile(ctx context.Context, ip string, minutes int) (map[string]any, error) {
@@ -558,6 +584,59 @@ func (s *Store) TrafficChanges(ctx context.Context, minutes, limit int) ([]map[s
 		return demoTrafficChanges(), firstErr(srcErr, dstErr, portErr, protoErr)
 	}
 	return changes, firstErr(srcErr, dstErr, portErr, protoErr)
+}
+
+func (s *Store) ServiceExposure(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	flows, err := s.TopN(ctx, "flow", "src", limit*5, minutes)
+	if err != nil {
+		return demoServiceExposure(), err
+	}
+	grouped := map[string]map[string]any{}
+	clients := map[string]map[string]bool{}
+	for _, flow := range flows {
+		parsed, ok := parseFlowKey(flow.Key)
+		if !ok || parsed.DstPort == "" {
+			continue
+		}
+		service := identifyService(parsed.DstPort, parsed.Proto)
+		key := parsed.DstIP + "|" + parsed.DstPort + "|" + parsed.Proto
+		row := grouped[key]
+		if row == nil {
+			row = map[string]any{
+				"ip":            parsed.DstIP,
+				"port":          parsed.DstPort,
+				"protocol":      parsed.Proto,
+				"service":       service.Name,
+				"category":      service.Category,
+				"risk":          service.Risk,
+				"bytes":         uint64(0),
+				"packets":       uint64(0),
+				"client_count":  uint64(0),
+				"sample_client": parsed.SrcIP,
+				"sample_flow":   flow.Key,
+			}
+			clients[key] = map[string]bool{}
+		}
+		row["bytes"] = uintValue(row["bytes"]) + flow.Bytes
+		row["packets"] = uintValue(row["packets"]) + flow.Packets
+		clients[key][parsed.SrcIP] = true
+		row["client_count"] = uint64(len(clients[key]))
+		grouped[key] = row
+	}
+	rows := make([]map[string]any, 0, len(grouped))
+	for _, row := range grouped {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if riskWeight(stringValue(rows[i]["risk"])) != riskWeight(stringValue(rows[j]["risk"])) {
+			return riskWeight(stringValue(rows[i]["risk"])) > riskWeight(stringValue(rows[j]["risk"]))
+		}
+		return uintValue(rows[i]["bytes"]) > uintValue(rows[j]["bytes"])
+	})
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 func (s *Store) Assets(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
@@ -1151,6 +1230,37 @@ func demoTrafficChanges() []map[string]any {
 	}
 }
 
+func demoServiceExposure() []map[string]any {
+	return []map[string]any{
+		{
+			"ip":            "172.20.2.10",
+			"port":          "443",
+			"protocol":      "tcp",
+			"service":       "HTTPS",
+			"category":      "Web",
+			"risk":          "low",
+			"bytes":         uint64(42000000),
+			"packets":       uint64(14000),
+			"client_count":  uint64(3),
+			"sample_client": "10.10.1.42",
+			"sample_flow":   "10.10.1.42:53210 -> 172.20.2.10:443 / tcp",
+		},
+		{
+			"ip":            "172.20.2.81",
+			"port":          "22",
+			"protocol":      "tcp",
+			"service":       "SSH",
+			"category":      "远程管理",
+			"risk":          "high",
+			"bytes":         uint64(18000000),
+			"packets":       uint64(7200),
+			"client_count":  uint64(2),
+			"sample_client": "10.10.1.77",
+			"sample_flow":   "10.10.1.77:53192 -> 172.20.2.81:22 / tcp",
+		},
+	}
+}
+
 func demoAssets() []map[string]any {
 	now := time.Now().Unix()
 	return []map[string]any{
@@ -1249,6 +1359,45 @@ func splitPair(key string) (string, string) {
 		return key, ""
 	}
 	return parts[0], parts[1]
+}
+
+type parsedFlow struct {
+	SrcIP   string
+	SrcPort string
+	DstIP   string
+	DstPort string
+	Proto   string
+}
+
+func parseFlowKey(key string) (parsedFlow, bool) {
+	parts := strings.SplitN(key, " / ", 2)
+	if len(parts) != 2 {
+		return parsedFlow{}, false
+	}
+	endpoints := strings.SplitN(parts[0], " -> ", 2)
+	if len(endpoints) != 2 {
+		return parsedFlow{}, false
+	}
+	srcIP, srcPort, srcOk := splitEndpoint(endpoints[0])
+	dstIP, dstPort, dstOk := splitEndpoint(endpoints[1])
+	if !srcOk || !dstOk {
+		return parsedFlow{}, false
+	}
+	return parsedFlow{
+		SrcIP:   srcIP,
+		SrcPort: srcPort,
+		DstIP:   dstIP,
+		DstPort: dstPort,
+		Proto:   strings.TrimSpace(parts[1]),
+	}, true
+}
+
+func splitEndpoint(value string) (string, string, bool) {
+	index := strings.LastIndex(value, ":")
+	if index <= 0 || index == len(value)-1 {
+		return "", "", false
+	}
+	return value[:index], value[index+1:], true
 }
 
 func addNode(nodes map[string]map[string]any, ip string, bytes, packets uint64) {
@@ -1384,6 +1533,73 @@ func directionLabel(src, dst string) string {
 		return "入站"
 	default:
 		return "公网侧"
+	}
+}
+
+type serviceInfo struct {
+	Name     string
+	Category string
+	Risk     string
+}
+
+func identifyService(port, proto string) serviceInfo {
+	if proto == "udp" && port == "53" {
+		return serviceInfo{Name: "DNS", Category: "基础网络", Risk: "low"}
+	}
+	services := map[string]serviceInfo{
+		"20":    {Name: "FTP Data", Category: "文件传输", Risk: "medium"},
+		"21":    {Name: "FTP", Category: "文件传输", Risk: "medium"},
+		"22":    {Name: "SSH", Category: "远程管理", Risk: "high"},
+		"23":    {Name: "Telnet", Category: "远程管理", Risk: "critical"},
+		"25":    {Name: "SMTP", Category: "邮件", Risk: "medium"},
+		"53":    {Name: "DNS", Category: "基础网络", Risk: "low"},
+		"80":    {Name: "HTTP", Category: "Web", Risk: "low"},
+		"110":   {Name: "POP3", Category: "邮件", Risk: "medium"},
+		"123":   {Name: "NTP", Category: "基础网络", Risk: "low"},
+		"139":   {Name: "NetBIOS", Category: "文件共享", Risk: "high"},
+		"143":   {Name: "IMAP", Category: "邮件", Risk: "medium"},
+		"389":   {Name: "LDAP", Category: "目录服务", Risk: "high"},
+		"443":   {Name: "HTTPS", Category: "Web", Risk: "low"},
+		"445":   {Name: "SMB", Category: "文件共享", Risk: "high"},
+		"465":   {Name: "SMTPS", Category: "邮件", Risk: "medium"},
+		"587":   {Name: "SMTP Submission", Category: "邮件", Risk: "medium"},
+		"993":   {Name: "IMAPS", Category: "邮件", Risk: "medium"},
+		"995":   {Name: "POP3S", Category: "邮件", Risk: "medium"},
+		"1433":  {Name: "SQL Server", Category: "数据库", Risk: "critical"},
+		"1521":  {Name: "Oracle", Category: "数据库", Risk: "critical"},
+		"3306":  {Name: "MySQL", Category: "数据库", Risk: "critical"},
+		"3389":  {Name: "RDP", Category: "远程管理", Risk: "critical"},
+		"5432":  {Name: "PostgreSQL", Category: "数据库", Risk: "critical"},
+		"5900":  {Name: "VNC", Category: "远程管理", Risk: "critical"},
+		"6379":  {Name: "Redis", Category: "缓存", Risk: "critical"},
+		"8080":  {Name: "HTTP Alternate", Category: "Web", Risk: "medium"},
+		"8081":  {Name: "HTTP Alternate", Category: "Web", Risk: "medium"},
+		"8443":  {Name: "HTTPS Alternate", Category: "Web", Risk: "medium"},
+		"9200":  {Name: "Elasticsearch", Category: "搜索/数据", Risk: "critical"},
+		"11211": {Name: "Memcached", Category: "缓存", Risk: "critical"},
+		"27017": {Name: "MongoDB", Category: "数据库", Risk: "critical"},
+	}
+	if service, ok := services[port]; ok {
+		return service
+	}
+	if n, err := strconv.Atoi(port); err == nil && n >= 1024 {
+		return serviceInfo{Name: "业务/动态端口", Category: "业务服务", Risk: "observe"}
+	}
+	return serviceInfo{Name: "未知服务", Category: "未知", Risk: "observe"}
+}
+
+func riskWeight(risk string) int {
+	switch risk {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
 	}
 }
 

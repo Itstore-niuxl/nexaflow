@@ -70,15 +70,17 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 		policy := a.alerts()
 		result.Alerts = append(result.Alerts, anomalyAlerts(result, policy)...)
 		if util > policy.LinkUtilization {
-			result.Alerts = append(result.Alerts, model.AlertEvent{
-				ID:        "link-util-" + strconv.FormatInt(current, 10),
-				Severity:  "warning",
-				Status:    "open",
-				Subject:   sourceID,
-				Summary:   "链路利用率超过阈值 " + strconv.FormatFloat(policy.LinkUtilization*100, 'f', 1, 64) + "%",
-				FirstSeen: current,
-				LastSeen:  current,
-			})
+			if !isSilenced(policy, sourceID) {
+				result.Alerts = append(result.Alerts, model.AlertEvent{
+					ID:        "link-util-" + strconv.FormatInt(current, 10),
+					Severity:  "warning",
+					Status:    "open",
+					Subject:   sourceID,
+					Summary:   "链路利用率超过阈值 " + strconv.FormatFloat(policy.LinkUtilization*100, 'f', 1, 64) + "%",
+					FirstSeen: current,
+					LastSeen:  current,
+				})
+			}
 		}
 		out <- result
 	}
@@ -201,7 +203,7 @@ func anomalyAlerts(result model.WindowResult, policy config.Alerts) []model.Aler
 	alerts := []model.AlertEvent{}
 	if len(result.TopFlow) > 0 {
 		share := float64(result.TopFlow[0].Bytes) / float64(result.Link.Bytes)
-		if result.TopFlow[0].Bytes >= policy.FlowBytes && share >= policy.FlowShare {
+		if result.TopFlow[0].Bytes >= policy.FlowBytes && share >= policy.FlowShare && !isSilenced(policy, result.TopFlow[0].Key) {
 			alerts = append(alerts, model.AlertEvent{
 				ID:        "top-flow-" + result.TopFlow[0].Key + "-" + strconv.FormatInt(result.Ts, 10),
 				Severity:  "warning",
@@ -215,7 +217,7 @@ func anomalyAlerts(result model.WindowResult, policy config.Alerts) []model.Aler
 	}
 	if len(result.TopSrcIP) > 0 {
 		pps := float64(result.TopSrcIP[0].Packets) / 5
-		if result.TopSrcIP[0].Packets >= policy.SourcePackets {
+		if result.TopSrcIP[0].Packets >= policy.SourcePackets && !isSilenced(policy, result.TopSrcIP[0].Key) {
 			alerts = append(alerts, model.AlertEvent{
 				ID:        "talker-pps-" + result.TopSrcIP[0].Key + "-" + strconv.FormatInt(result.Ts, 10),
 				Severity:  "info",
@@ -228,4 +230,13 @@ func anomalyAlerts(result model.WindowResult, policy config.Alerts) []model.Aler
 		}
 	}
 	return alerts
+}
+
+func isSilenced(policy config.Alerts, subject string) bool {
+	for _, item := range policy.SilencedSubjects {
+		if item == subject {
+			return true
+		}
+	}
+	return false
 }

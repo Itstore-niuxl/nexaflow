@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,10 +35,11 @@ type CaptureRuntime struct {
 }
 
 type Alerts struct {
-	FlowBytes       uint64  `json:"flow_bytes"`
-	FlowShare       float64 `json:"flow_share"`
-	SourcePackets   uint64  `json:"source_packets"`
-	LinkUtilization float64 `json:"link_utilization"`
+	FlowBytes        uint64   `json:"flow_bytes"`
+	FlowShare        float64  `json:"flow_share"`
+	SourcePackets    uint64   `json:"source_packets"`
+	LinkUtilization  float64  `json:"link_utilization"`
+	SilencedSubjects []string `json:"silenced_subjects"`
 }
 
 func Load() Config {
@@ -157,7 +159,22 @@ func normalizeAlerts(alerts Alerts) Alerts {
 	if alerts.LinkUtilization <= 0 {
 		alerts.LinkUtilization = defaults.LinkUtilization
 	}
+	alerts.SilencedSubjects = normalizeSilencedSubjects(alerts.SilencedSubjects)
 	return alerts
+}
+
+func normalizeSilencedSubjects(subjects []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, subject := range subjects {
+		subject = strings.TrimSpace(subject)
+		if subject == "" || seen[subject] {
+			continue
+		}
+		seen[subject] = true
+		result = append(result, subject)
+	}
+	return result
 }
 
 func dir(path string) string {

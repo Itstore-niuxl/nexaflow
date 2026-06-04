@@ -19,6 +19,7 @@ import {
   type ProtocolPoint,
   type SearchResult,
   type SecurityInsight,
+  type ServiceExposure,
   type ServiceMap,
   type SeriesPoint,
   type Summary,
@@ -58,6 +59,7 @@ const portProfile = ref<PortProfile>({ port: '8081', minutes: 15, bytes: 0, pack
 const historyWindows = ref<WindowRow[]>([]);
 const matrixRows = ref<MatrixRow[]>([]);
 const serviceMap = ref<ServiceMap>({ nodes: [], links: [] });
+const serviceExposure = ref<ServiceExposure[]>([]);
 const protocolSeries = ref<ProtocolPoint[]>([]);
 const portSeries = ref<PortPoint[]>([]);
 const directionSeries = ref<DirectionPoint[]>([]);
@@ -91,6 +93,7 @@ const degraded = ref(false);
 const loading = ref(false);
 const switching = ref(false);
 const savingAlerts = ref(false);
+const handlingAlert = ref(false);
 const currentView = ref('dashboard');
 const activeTopN = ref('src_ip');
 const selectedMinutes = ref(15);
@@ -99,6 +102,7 @@ const profilePort = ref('8081');
 const selectedMode = ref('live_pcap');
 const selectedIface = ref('eth0');
 const selectedFilter = ref('ip or ip6');
+const whitelistSubject = ref('');
 let timer: number | undefined;
 
 const navItems = [
@@ -107,6 +111,7 @@ const navItems = [
   { id: 'traffic', label: '流量剖析' },
   { id: 'analysis', label: '流向分析' },
   { id: 'topology', label: '服务拓扑' },
+  { id: 'exposure', label: '服务暴露' },
   { id: 'assets', label: '资产发现' },
   { id: 'security', label: '风险线索' },
   { id: 'profile', label: '对象画像' },
@@ -124,6 +129,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   topology: { title: '服务拓扑', subtitle: '基于主机对流量构建节点和链路视图' },
+  exposure: { title: '服务暴露', subtitle: '识别目的 IP 上的服务端口、协议、服务类型和风险级别' },
   assets: { title: '资产发现', subtitle: '按活跃 IP 聚合收发流量、角色和最近出现时间' },
   security: { title: '风险线索', subtitle: '从重流量会话、敏感端口和主机扇出中提取排查线索' },
   profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
@@ -173,6 +179,7 @@ const refresh = async () => {
       alertConfigRes,
       matrixRes,
       serviceMapRes,
+      serviceExposureRes,
       protocolSeriesRes,
       portSeriesRes,
       directionSeriesRes,
@@ -198,6 +205,7 @@ const refresh = async () => {
       api.alertConfig(),
       api.matrix(minutes, 80),
       api.serviceMap(minutes, 80),
+      api.serviceExposure(minutes, 120),
       api.protocolTimeseries(minutes),
       api.portTimeseries(minutes, 8),
       api.directionTimeseries(minutes),
@@ -223,6 +231,7 @@ const refresh = async () => {
     alertConfig.value = alertConfigRes.data;
     matrixRows.value = matrixRes.data;
     serviceMap.value = serviceMapRes.data;
+    serviceExposure.value = serviceExposureRes.data;
     protocolSeries.value = protocolSeriesRes.data;
     portSeries.value = portSeriesRes.data;
     directionSeries.value = directionSeriesRes.data;
@@ -240,6 +249,7 @@ const refresh = async () => {
       windowsRes.degraded ||
       matrixRes.degraded ||
       serviceMapRes.degraded ||
+      serviceExposureRes.degraded ||
       protocolSeriesRes.degraded ||
       portSeriesRes.degraded ||
       directionSeriesRes.degraded ||
@@ -361,6 +371,34 @@ const refresh = async () => {
       ],
       links: matrixRows.value
     };
+    serviceExposure.value = [
+      {
+        ip: '172.20.2.10',
+        port: '443',
+        protocol: 'tcp',
+        service: 'HTTPS',
+        category: 'Web',
+        risk: 'low',
+        bytes: 42000000,
+        packets: 14000,
+        client_count: 3,
+        sample_client: '10.10.1.42',
+        sample_flow: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp'
+      },
+      {
+        ip: '172.20.2.81',
+        port: '22',
+        protocol: 'tcp',
+        service: 'SSH',
+        category: '远程管理',
+        risk: 'high',
+        bytes: 18000000,
+        packets: 7200,
+        client_count: 2,
+        sample_client: '10.10.1.77',
+        sample_flow: '10.10.1.77:53192 -> 172.20.2.81:22 / tcp'
+      }
+    ];
     protocolSeries.value = [
       { ts: now - 10, protocol: 'tcp', bytes: 109000000, packets: 72000 },
       { ts: now - 10, protocol: 'udp', bytes: 15000000, packets: 22000 }
@@ -509,6 +547,10 @@ const profileTotalPackets = computed(() => ipProfile.value.inbound_packets + ipP
 const topologyTotalBytes = computed(() => matrixRows.value.reduce((sum, row) => sum + row.bytes, 0));
 const topologyNodeCount = computed(() => serviceMap.value.nodes.length);
 const topTopologyLink = computed(() => matrixRows.value[0]);
+const exposedServiceCount = computed(() => serviceExposure.value.length);
+const highRiskServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
+const unknownServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'observe').length);
+const exposureTotalBytes = computed(() => serviceExposure.value.reduce((sum, row) => sum + row.bytes, 0));
 const assetTotalBytes = computed(() => assets.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const activeAssetCount = computed(() => assets.value.length);
 const serviceAssetCount = computed(() => assets.value.filter((row) => row.role === '服务端').length);
@@ -647,6 +689,17 @@ const alertStatusText = (status: string) => {
   return labels[status] ?? status;
 };
 
+const serviceRiskText = (risk: string) => {
+  const labels: Record<string, string> = {
+    critical: '严重',
+    high: '高',
+    medium: '中',
+    low: '低',
+    observe: '观察'
+  };
+  return labels[risk] ?? risk;
+};
+
 const formatTime = (ts: number) => {
   if (!ts) return '-';
   return new Date(ts * 1000).toLocaleString();
@@ -712,6 +765,46 @@ const saveAlertConfig = async () => {
     await refresh();
   } finally {
     savingAlerts.value = false;
+  }
+};
+
+const updateAlertStatus = async (alert: AlertEvent, status: string) => {
+  handlingAlert.value = true;
+  try {
+    await api.updateAlertStatus(alert.id, status);
+    await refresh();
+  } finally {
+    handlingAlert.value = false;
+  }
+};
+
+const silenceSubject = async (subject: string) => {
+  if (!subject.trim()) return;
+  handlingAlert.value = true;
+  try {
+    const result = await api.addAlertSilence(subject.trim());
+    alertConfig.value.silenced_subjects = result.data;
+    await refresh();
+  } finally {
+    handlingAlert.value = false;
+  }
+};
+
+const addWhitelistSubject = async () => {
+  const subject = whitelistSubject.value.trim();
+  if (!subject) return;
+  await silenceSubject(subject);
+  whitelistSubject.value = '';
+};
+
+const removeSilence = async (subject: string) => {
+  handlingAlert.value = true;
+  try {
+    const result = await api.removeAlertSilence(subject);
+    alertConfig.value.silenced_subjects = result.data;
+    await refresh();
+  } finally {
+    handlingAlert.value = false;
   }
 };
 
@@ -1131,6 +1224,70 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
       </template>
 
+      <template v-else-if="currentView === 'exposure'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>暴露服务</span>
+              <strong>{{ exposedServiceCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>高风险服务</span>
+              <strong>{{ highRiskServiceCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>待识别端口</span>
+              <strong>{{ unknownServiceCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>服务流量</span>
+              <strong>{{ formatBytes(exposureTotalBytes) }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="table-panel wide-key-table exposure-table">
+          <h2>服务暴露面</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>服务对象</th>
+                <th>服务</th>
+                <th>类别</th>
+                <th>风险</th>
+                <th>客户端数</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>样例会话</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in serviceExposure" :key="`${row.ip}-${row.port}-${row.protocol}`">
+                <td>{{ row.ip }}:{{ row.port }} / {{ row.protocol }}</td>
+                <td>{{ row.service }}</td>
+                <td>{{ row.category }}</td>
+                <td>
+                  <span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span>
+                </td>
+                <td>{{ row.client_count.toLocaleString() }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ row.sample_flow }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
       <template v-else-if="currentView === 'assets'">
         <section class="metrics-grid">
           <article class="metric">
@@ -1241,6 +1398,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <th>流量</th>
                 <th>包数</th>
                 <th>评分</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -1254,6 +1412,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatBytes(item.bytes) }}</td>
                 <td>{{ item.packets.toLocaleString() }}</td>
                 <td>{{ item.score }}</td>
+                <td>
+                  <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(item.subject)">忽略</button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -1381,6 +1542,32 @@ const exportCSV = (filename: string, rows: string[][]) => {
             {{ savingAlerts ? '保存中...' : '保存阈值' }}
           </button>
         </section>
+        <section class="table-panel whitelist-panel">
+          <div class="panel-heading">
+            <h2>白名单管理</h2>
+            <span>被忽略的对象不会再生成新告警，风险线索也会自动过滤。</span>
+          </div>
+          <div class="whitelist-form">
+            <label class="filter-field">
+              <span>对象</span>
+              <input v-model="whitelistSubject" placeholder="输入 IP、会话、采集源或风险线索对象" @keyup.enter="addWhitelistSubject" />
+            </label>
+            <button type="button" :disabled="handlingAlert || !whitelistSubject.trim()" @click="addWhitelistSubject">加入白名单</button>
+          </div>
+          <div class="whitelist-list">
+            <button
+              v-for="subject in alertConfig.silenced_subjects ?? []"
+              :key="subject"
+              type="button"
+              class="silence-chip"
+              :disabled="handlingAlert"
+              @click="removeSilence(subject)"
+            >
+              {{ subject }} ×
+            </button>
+            <span v-if="(alertConfig.silenced_subjects ?? []).length === 0" class="muted-text">暂无白名单对象</span>
+          </div>
+        </section>
         <section class="table-panel">
           <h2>告警事件</h2>
           <div v-if="alerts.length === 0" class="empty-state">暂无告警事件</div>
@@ -1392,6 +1579,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <th>对象</th>
                 <th>摘要</th>
                 <th>最近出现</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -1401,6 +1589,11 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ alert.subject }}</td>
                 <td>{{ alert.summary }}</td>
                 <td>{{ formatTime(alert.last_seen) }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'ack'" @click="updateAlertStatus(alert, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved'" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(alert.subject)">忽略</button>
+                </td>
               </tr>
             </tbody>
           </table>

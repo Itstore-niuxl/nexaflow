@@ -93,6 +93,7 @@ export interface AlertConfig {
   flow_share: number;
   source_packets: number;
   link_utilization: number;
+  silenced_subjects?: string[];
 }
 
 export interface MatrixRow {
@@ -111,6 +112,20 @@ export interface ServiceNode {
 export interface ServiceMap {
   nodes: ServiceNode[];
   links: MatrixRow[];
+}
+
+export interface ServiceExposure {
+  ip: string;
+  port: string;
+  protocol: string;
+  service: string;
+  category: string;
+  risk: string;
+  bytes: number;
+  packets: number;
+  client_count: number;
+  sample_client: string;
+  sample_flow: string;
 }
 
 export interface ProtocolPoint {
@@ -252,6 +267,11 @@ export const api = {
   async serviceMap(minutes = 15, limit = 50) {
     return json<{ data: ServiceMap; degraded: boolean }>(`/api/v1/traffic/service-map?minutes=${minutes}&limit=${limit}`);
   },
+  async serviceExposure(minutes = 15, limit = 50) {
+    return json<{ data: ServiceExposure[]; degraded: boolean }>(
+      `/api/v1/traffic/service-exposure?minutes=${minutes}&limit=${limit}`
+    );
+  },
   async protocolTimeseries(minutes = 15) {
     return json<{ data: ProtocolPoint[]; degraded: boolean }>(`/api/v1/traffic/protocol-timeseries?minutes=${minutes}`);
   },
@@ -293,6 +313,39 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: AlertConfig }>;
+  },
+  async updateAlertStatus(id: string, status: string) {
+    const response = await fetch('/api/v1/alerts/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, status })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: { id: string; status: string } }>;
+  },
+  async addAlertSilence(subject: string) {
+    const response = await fetch('/api/v1/alerts/silences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: string[] }>;
+  },
+  async removeAlertSilence(subject: string) {
+    const response = await fetch('/api/v1/alerts/silences', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: string[] }>;
   },
   async updateCollectorConfig(config: CollectorConfig) {
     const response = await fetch('/api/v1/collectors/config', {

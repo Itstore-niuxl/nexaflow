@@ -34,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/windows", s.windows)
 	mux.HandleFunc("/api/v1/traffic/matrix", s.matrix)
 	mux.HandleFunc("/api/v1/traffic/service-map", s.serviceMap)
+	mux.HandleFunc("/api/v1/traffic/service-exposure", s.serviceExposure)
 	mux.HandleFunc("/api/v1/traffic/protocol-timeseries", s.protocolTimeseries)
 	mux.HandleFunc("/api/v1/traffic/port-timeseries", s.portTimeseries)
 	mux.HandleFunc("/api/v1/traffic/direction-timeseries", s.directionTimeseries)
@@ -46,7 +47,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
 	mux.HandleFunc("/api/v1/alerts", s.alerts)
+	mux.HandleFunc("/api/v1/alerts/status", s.alertStatus)
 	mux.HandleFunc("/api/v1/alerts/config", s.alertConfig)
+	mux.HandleFunc("/api/v1/alerts/silences", s.alertSilences)
 	mux.HandleFunc("/api/v1/system/status", s.status)
 	return cors(mux)
 }
@@ -130,6 +133,11 @@ func (s *Server) serviceMap(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
+func (s *Server) serviceExposure(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.ServiceExposure(r.Context(), queryMinutes(r), queryLimit(r, 50, 500))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
 func (s *Server) protocolTimeseries(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.ProtocolTimeseries(r.Context(), queryMinutes(r))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
@@ -168,6 +176,8 @@ func (s *Server) assets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.SecurityInsights(r.Context(), queryMinutes(r), queryLimit(r, 50, 200))
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -210,7 +220,7 @@ func (s *Server) collectorConfig(w http.ResponseWriter, r *http.Request) {
 	if body.BPFFilter == "" {
 		body.BPFFilter = current.BPFFilter
 	}
-	if body.Alerts == (config.Alerts{}) {
+	if alertsEmpty(body.Alerts) {
 		body.Alerts = current.Alerts
 	}
 	if body.SourceID == "" && body.Mode != "" && body.Iface != "" {
@@ -255,6 +265,26 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
+func (s *Server) alertStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.store.UpdateAlertStatus(r.Context(), strings.TrimSpace(body.ID), strings.TrimSpace(body.Status)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"data": map[string]string{"id": body.ID, "status": body.Status}})
+}
+
 func (s *Server) alertConfig(w http.ResponseWriter, r *http.Request) {
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	if r.Method == http.MethodGet {
@@ -276,6 +306,40 @@ func (s *Server) alertConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts})
+}
+
+func (s *Server) alertSilences(w http.ResponseWriter, r *http.Request) {
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]any{"data": runtime.Alerts.SilencedSubjects})
+		return
+	}
+	var body struct {
+		Subject string `json:"subject"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	subject := strings.TrimSpace(body.Subject)
+	if subject == "" {
+		http.Error(w, "subject is required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		runtime.Alerts.SilencedSubjects = append(runtime.Alerts.SilencedSubjects, subject)
+	case http.MethodDelete:
+		runtime.Alerts.SilencedSubjects = removeString(runtime.Alerts.SilencedSubjects, subject)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.SilencedSubjects})
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -345,4 +409,51 @@ func queryLimit(r *http.Request, fallback, max int) int {
 		}
 	}
 	return limit
+}
+
+func filterSilencedMaps(rows []map[string]any, subjects []string, key string) []map[string]any {
+	if len(subjects) == 0 {
+		return rows
+	}
+	result := []map[string]any{}
+	for _, row := range rows {
+		if !isSilencedSubject(stringValue(row[key]), subjects) {
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+func isSilencedSubject(subject string, subjects []string) bool {
+	for _, item := range subjects {
+		if item == subject {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(items []string, target string) []string {
+	result := []string{}
+	for _, item := range items {
+		if item != target {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func stringValue(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func alertsEmpty(alerts config.Alerts) bool {
+	return alerts.FlowBytes == 0 &&
+		alerts.FlowShare == 0 &&
+		alerts.SourcePackets == 0 &&
+		alerts.LinkUtilization == 0 &&
+		len(alerts.SilencedSubjects) == 0
 }
