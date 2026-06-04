@@ -905,6 +905,7 @@ td {
 .rules-table table,
 .rule-finding-table table,
 .data-quality-table table,
+.capture-quality-table table,
 .data-gap-table table,
 .capacity-growth-table table,
 .service-analytics-table table,
@@ -936,6 +937,10 @@ td {
 
 .data-quality-table table {
   min-width: 1180px;
+}
+
+.capture-quality-table table {
+  min-width: 1420px;
 }
 
 .data-gap-table table {
@@ -1111,6 +1116,8 @@ td {
 
 .data-quality-table th:first-child,
 .data-quality-table td:first-child,
+.capture-quality-table th:first-child,
+.capture-quality-table td:first-child,
 .data-gap-table th:first-child,
 .data-gap-table td:first-child {
   width: 22%;

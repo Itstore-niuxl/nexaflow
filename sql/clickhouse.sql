@@ -72,6 +72,25 @@ PARTITION BY toDate(ts)
 ORDER BY (source_id, ts, dst_ip, dst_port, src_ip, protocol)
 TTL ts + INTERVAL 7 DAY;
 
+CREATE TABLE IF NOT EXISTS nexaflow.capture_quality_5s
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    rx_bytes UInt64,
+    rx_packets UInt64,
+    rx_dropped UInt64,
+    rx_errors UInt64,
+    tx_bytes UInt64,
+    tx_packets UInt64,
+    tx_dropped UInt64,
+    tx_errors UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, iface, ts)
+TTL ts + INTERVAL 7 DAY;
+
 CREATE TABLE IF NOT EXISTS nexaflow.alert_events
 (
     id String,

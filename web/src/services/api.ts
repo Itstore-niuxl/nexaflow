@@ -121,6 +121,52 @@ export interface DataQuality {
   degraded_reasons: string[];
 }
 
+export interface CaptureQualitySummary {
+  windows: number;
+  rx_bytes: number;
+  rx_packets: number;
+  rx_dropped: number;
+  rx_errors: number;
+  tx_bytes: number;
+  tx_packets: number;
+  tx_dropped: number;
+  tx_errors: number;
+  drop_ratio: number;
+  error_ratio: number;
+  source_count: number;
+  interface_count: number;
+  latest_window_ts: number;
+}
+
+export interface CaptureQualitySource {
+  source_id: string;
+  iface: string;
+  windows: number;
+  rx_bytes: number;
+  rx_packets: number;
+  rx_dropped: number;
+  rx_errors: number;
+  tx_bytes: number;
+  tx_packets: number;
+  tx_dropped: number;
+  tx_errors: number;
+  first_window_ts: number;
+  latest_window_ts: number;
+  freshness_seconds: number;
+  drop_ratio: number;
+  error_ratio: number;
+  status: string;
+}
+
+export interface CaptureQuality {
+  generated_at: number;
+  minutes: number;
+  status: string;
+  summary: CaptureQualitySummary;
+  sources: CaptureQualitySource[];
+  recommendations: DataQualityRecommendation[];
+}
+
 export interface IPProfile {
   ip: string;
   minutes: number;
@@ -664,6 +710,9 @@ export const api = {
   },
   async dataQuality(minutes = 15, limit = 20) {
     return json<{ data: DataQuality; degraded: boolean }>(`/api/v1/system/data-quality?minutes=${minutes}&limit=${limit}`);
+  },
+  async captureQuality(minutes = 15, limit = 20) {
+    return json<{ data: CaptureQuality; degraded: boolean }>(`/api/v1/system/capture-quality?minutes=${minutes}&limit=${limit}`);
   },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(

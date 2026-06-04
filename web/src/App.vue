@@ -41,6 +41,7 @@ import {
   type AssetRiskPosture,
   type AssetRow,
   type CapacityPlanning,
+  type CaptureQuality,
   type Collector,
   type CollectorConfig,
   type DataQuality,
@@ -121,6 +122,30 @@ const emptyDataQuality = (): DataQuality => ({
   degraded_reasons: []
 });
 const dataQuality = ref<DataQuality>(emptyDataQuality());
+const emptyCaptureQuality = (): CaptureQuality => ({
+  generated_at: 0,
+  minutes: 15,
+  status: 'unknown',
+  summary: {
+    windows: 0,
+    rx_bytes: 0,
+    rx_packets: 0,
+    rx_dropped: 0,
+    rx_errors: 0,
+    tx_bytes: 0,
+    tx_packets: 0,
+    tx_dropped: 0,
+    tx_errors: 0,
+    drop_ratio: 0,
+    error_ratio: 0,
+    source_count: 0,
+    interface_count: 0,
+    latest_window_ts: 0
+  },
+  sources: [],
+  recommendations: []
+});
+const captureQuality = ref<CaptureQuality>(emptyCaptureQuality());
 const alertConfig = ref<AlertConfig>({ flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 });
 const ipProfile = ref<IPProfile>({
   ip: '10.2.0.12',
@@ -432,6 +457,7 @@ const refresh = async () => {
       interfaceRes,
       statusRes,
       dataQualityRes,
+      captureQualityRes,
       windowsRes,
       alertConfigRes,
       matrixRes,
@@ -474,6 +500,7 @@ const refresh = async () => {
       api.interfaces(),
       api.status(),
       api.dataQuality(minutes, 80),
+      api.captureQuality(minutes, 80),
       api.windows(minutes, 80),
       api.alertConfig(),
       api.matrix(minutes, 80),
@@ -516,6 +543,7 @@ const refresh = async () => {
     interfaces.value = interfaceRes.data;
     systemStatus.value = statusRes.data;
     dataQuality.value = dataQualityRes.data;
+    captureQuality.value = captureQualityRes.data;
     historyWindows.value = windowsRes.data;
     alertConfig.value = alertConfigRes.data;
     detectionRules.value = alertConfigRes.data.detection_rules ?? [];
@@ -552,6 +580,7 @@ const refresh = async () => {
       alertRes.degraded ||
       statusRes.degraded ||
       dataQualityRes.degraded ||
+      captureQualityRes.degraded ||
       windowsRes.degraded ||
       matrixRes.degraded ||
       serviceMapRes.degraded ||
@@ -717,6 +746,49 @@ const refresh = async () => {
       gaps: [{ source_id: 'dev-source-01', iface: 'mock0', start_ts: now - 480, end_ts: now - 455, duration_seconds: 25, missing_windows: 4 }],
       recommendations: [{ level: 'warning', title: '定位采集断档', detail: '示例采集源存在短时断档，真实数据接入后会自动展示实际断档' }],
       degraded_reasons: ['demo data']
+    };
+    captureQuality.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      status: 'healthy',
+      summary: {
+        windows: 170,
+        rx_bytes: 158000000,
+        rx_packets: 98000,
+        rx_dropped: 0,
+        rx_errors: 0,
+        tx_bytes: 12000000,
+        tx_packets: 9000,
+        tx_dropped: 0,
+        tx_errors: 0,
+        drop_ratio: 0,
+        error_ratio: 0,
+        source_count: 1,
+        interface_count: 1,
+        latest_window_ts: now - 5
+      },
+      sources: [
+        {
+          source_id: 'dev-source-01',
+          iface: 'mock0',
+          windows: 170,
+          rx_bytes: 158000000,
+          rx_packets: 98000,
+          rx_dropped: 0,
+          rx_errors: 0,
+          tx_bytes: 12000000,
+          tx_packets: 9000,
+          tx_dropped: 0,
+          tx_errors: 0,
+          first_window_ts: now - selectedMinutes.value * 60,
+          latest_window_ts: now - 5,
+          freshness_seconds: 5,
+          drop_ratio: 0,
+          error_ratio: 0,
+          status: 'healthy'
+        }
+      ],
+      recommendations: [{ level: 'info', title: '接口采集稳定', detail: '当前网卡 RX/TX 丢包和错误计数未出现异常增量' }]
     };
     alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
     detectionRules.value = [
@@ -1512,6 +1584,27 @@ const dataQualityDropItems = computed(() =>
   dataQuality.value.sources.map((row) => ({
     key: `${row.source_id} / ${row.iface}`,
     bytes: row.drops,
+    packets: row.windows
+  }))
+);
+const captureQualityTrafficItems = computed(() =>
+  captureQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: row.rx_bytes + row.tx_bytes,
+    packets: row.rx_packets + row.tx_packets
+  }))
+);
+const captureQualityDropItems = computed(() =>
+  captureQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: row.rx_dropped + row.tx_dropped,
+    packets: row.windows
+  }))
+);
+const captureQualityErrorItems = computed(() =>
+  captureQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: row.rx_errors + row.tx_errors,
     packets: row.windows
   }))
 );
@@ -2983,6 +3076,54 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TrafficHeatmap :points="series" />
           <HorizontalBarChart title="采集 Drops 分布" eyebrow="Capture Drops" :items="dataQualityDropItems" unit="count" />
         </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>接口质量</span>
+              <strong>{{ dataQualityStatusText(captureQuality.status) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>RX / TX 包</span>
+              <strong>{{ captureQuality.summary.rx_packets.toLocaleString() }} / {{ captureQuality.summary.tx_packets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>接口 Dropped</span>
+              <strong>{{ (captureQuality.summary.rx_dropped + captureQuality.summary.tx_dropped).toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>接口 Errors</span>
+              <strong>{{ (captureQuality.summary.rx_errors + captureQuality.summary.tx_errors).toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="接口 RX/TX 流量" eyebrow="Interface Traffic" :items="captureQualityTrafficItems" />
+          <HorizontalBarChart title="接口 Dropped" eyebrow="Interface Drops" :items="captureQualityDropItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="接口 Errors" eyebrow="Interface Errors" :items="captureQualityErrorItems" unit="count" />
+          <section class="table-panel report-recommendations">
+            <div class="panel-heading">
+              <h2>接口质量建议</h2>
+              <span>{{ captureQuality.recommendations.length.toLocaleString() }} 条</span>
+            </div>
+            <article v-for="item in captureQuality.recommendations" :key="`capture-${item.level}-${item.title}`" class="report-recommendation">
+              <span class="severity-pill" :class="item.level">{{ severityText(item.level) }}</span>
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.detail }}</p>
+            </article>
+          </section>
+        </section>
         <section class="tables-grid analysis-grid">
           <section class="table-panel report-recommendations">
             <div class="panel-heading">
@@ -3007,6 +3148,49 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div><span>覆盖率</span><strong>{{ (dataQuality.summary.coverage_ratio * 100).toFixed(1) }}%</strong></div>
             </div>
           </section>
+        </section>
+        <section class="table-panel wide-key-table capture-quality-table">
+          <div class="panel-heading">
+            <h2>接口采集质量</h2>
+            <span>{{ captureQuality.sources.length.toLocaleString() }} 个接口 / {{ rangeLabel }}</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>采集源</th>
+                <th>网卡</th>
+                <th>状态</th>
+                <th>窗口</th>
+                <th>RX 流量</th>
+                <th>RX 包</th>
+                <th>RX Dropped</th>
+                <th>RX Errors</th>
+                <th>TX 流量</th>
+                <th>TX 包</th>
+                <th>TX Dropped</th>
+                <th>TX Errors</th>
+                <th>最近窗口</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in captureQuality.sources" :key="`capture-${row.source_id}-${row.iface}`">
+                <td>{{ row.source_id }}</td>
+                <td>{{ row.iface }}</td>
+                <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                <td>{{ row.windows.toLocaleString() }}</td>
+                <td>{{ formatBytes(row.rx_bytes) }}</td>
+                <td>{{ row.rx_packets.toLocaleString() }}</td>
+                <td>{{ row.rx_dropped.toLocaleString() }}</td>
+                <td>{{ row.rx_errors.toLocaleString() }}</td>
+                <td>{{ formatBytes(row.tx_bytes) }}</td>
+                <td>{{ row.tx_packets.toLocaleString() }}</td>
+                <td>{{ row.tx_dropped.toLocaleString() }}</td>
+                <td>{{ row.tx_errors.toLocaleString() }}</td>
+                <td>{{ formatTime(row.latest_window_ts) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="captureQuality.sources.length === 0" class="empty-state">暂无接口采集质量数据</div>
         </section>
         <section class="table-panel wide-key-table data-quality-table">
           <div class="panel-heading">

@@ -54,3 +54,50 @@ func TestServiceAnalyticsFromSessions(t *testing.T) {
 		t.Fatalf("expected HTTPS server count 1, got %d", uintValue(https["server_count"]))
 	}
 }
+
+func TestCaptureQualityRowStatus(t *testing.T) {
+	healthy := map[string]any{
+		"rx_packets":        uint64(1000),
+		"tx_packets":        uint64(1000),
+		"rx_dropped":        uint64(0),
+		"tx_dropped":        uint64(0),
+		"rx_errors":         uint64(0),
+		"tx_errors":         uint64(0),
+		"drop_ratio":        0.0,
+		"error_ratio":       0.0,
+		"freshness_seconds": int64(5),
+	}
+	if status := captureQualityRowStatus(healthy); status != "healthy" {
+		t.Fatalf("expected healthy, got %s", status)
+	}
+
+	dropped := map[string]any{
+		"rx_packets":        uint64(1000),
+		"tx_packets":        uint64(1000),
+		"rx_dropped":        uint64(1),
+		"tx_dropped":        uint64(0),
+		"rx_errors":         uint64(0),
+		"tx_errors":         uint64(0),
+		"drop_ratio":        0.0005,
+		"error_ratio":       0.0,
+		"freshness_seconds": int64(5),
+	}
+	if status := captureQualityRowStatus(dropped); status != "warning" {
+		t.Fatalf("expected warning, got %s", status)
+	}
+
+	errors := map[string]any{
+		"rx_packets":        uint64(1000),
+		"tx_packets":        uint64(1000),
+		"rx_dropped":        uint64(0),
+		"tx_dropped":        uint64(0),
+		"rx_errors":         uint64(1),
+		"tx_errors":         uint64(0),
+		"drop_ratio":        0.0,
+		"error_ratio":       0.0005,
+		"freshness_seconds": int64(5),
+	}
+	if status := captureQualityRowStatus(errors); status != "critical" {
+		t.Fatalf("expected critical, got %s", status)
+	}
+}

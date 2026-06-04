@@ -52,7 +52,7 @@ func main() {
 			log.Println("collector stopped")
 			return
 		case win := <-windows:
-			captureStats.apply(&win.Link)
+			captureStats.apply(&win)
 			if err := ch.WriteWindow(ctx, win); err != nil {
 				log.Printf("clickhouse write failed: %v", err)
 				if initErr := ch.Init(ctx); initErr != nil {
@@ -120,9 +120,15 @@ func runCapture(ctx context.Context, runtime config.CaptureRuntime, packets chan
 }
 
 type interfaceStats struct {
-	dropped uint64
-	errors  uint64
-	known   bool
+	rxBytes   uint64
+	rxPackets uint64
+	rxDropped uint64
+	rxErrors  uint64
+	txBytes   uint64
+	txPackets uint64
+	txDropped uint64
+	txErrors  uint64
+	known     bool
 }
 
 type interfaceStatsTracker struct {
@@ -133,34 +139,64 @@ func newInterfaceStatsTracker() *interfaceStatsTracker {
 	return &interfaceStatsTracker{last: map[string]interfaceStats{}}
 }
 
-func (t *interfaceStatsTracker) apply(link *model.LinkWindow) {
-	if link == nil || strings.TrimSpace(link.Iface) == "" || link.Iface == "any" {
+func (t *interfaceStatsTracker) apply(win *model.WindowResult) {
+	if win == nil || strings.TrimSpace(win.Iface) == "" || win.Iface == "any" {
 		return
 	}
-	current, err := readInterfaceStats(link.Iface)
+	current, err := readInterfaceStats(win.Iface)
 	if err != nil {
 		return
 	}
-	previous := t.last[link.Iface]
-	t.last[link.Iface] = current
-	if !previous.known {
-		return
+	previous := t.last[win.Iface]
+	t.last[win.Iface] = current
+	quality := model.CaptureQualityWindow{
+		Ts:       win.Ts,
+		SourceID: win.SourceID,
+		Iface:    win.Iface,
 	}
-	link.Drops += deltaCounter(current.dropped, previous.dropped)
-	link.Drops += deltaCounter(current.errors, previous.errors)
+	if previous.known {
+		quality.RxBytes = deltaCounter(current.rxBytes, previous.rxBytes)
+		quality.RxPackets = deltaCounter(current.rxPackets, previous.rxPackets)
+		quality.RxDropped = deltaCounter(current.rxDropped, previous.rxDropped)
+		quality.RxErrors = deltaCounter(current.rxErrors, previous.rxErrors)
+		quality.TxBytes = deltaCounter(current.txBytes, previous.txBytes)
+		quality.TxPackets = deltaCounter(current.txPackets, previous.txPackets)
+		quality.TxDropped = deltaCounter(current.txDropped, previous.txDropped)
+		quality.TxErrors = deltaCounter(current.txErrors, previous.txErrors)
+	}
+	win.Link.Drops += quality.RxDropped + quality.RxErrors
+	win.Capture = &quality
 }
 
 func readInterfaceStats(iface string) (interfaceStats, error) {
 	base := filepath.Join("/sys/class/net", iface, "statistics")
-	dropped, err := readUintFile(filepath.Join(base, "rx_dropped"))
-	if err != nil {
+	stats := interfaceStats{known: true}
+	var err error
+	if stats.rxBytes, err = readUintFile(filepath.Join(base, "rx_bytes")); err != nil {
 		return interfaceStats{}, err
 	}
-	errors, err := readUintFile(filepath.Join(base, "rx_errors"))
-	if err != nil {
+	if stats.rxPackets, err = readUintFile(filepath.Join(base, "rx_packets")); err != nil {
 		return interfaceStats{}, err
 	}
-	return interfaceStats{dropped: dropped, errors: errors, known: true}, nil
+	if stats.rxDropped, err = readUintFile(filepath.Join(base, "rx_dropped")); err != nil {
+		return interfaceStats{}, err
+	}
+	if stats.rxErrors, err = readUintFile(filepath.Join(base, "rx_errors")); err != nil {
+		return interfaceStats{}, err
+	}
+	if stats.txBytes, err = readUintFile(filepath.Join(base, "tx_bytes")); err != nil {
+		return interfaceStats{}, err
+	}
+	if stats.txPackets, err = readUintFile(filepath.Join(base, "tx_packets")); err != nil {
+		return interfaceStats{}, err
+	}
+	if stats.txDropped, err = readUintFile(filepath.Join(base, "tx_dropped")); err != nil {
+		return interfaceStats{}, err
+	}
+	if stats.txErrors, err = readUintFile(filepath.Join(base, "tx_errors")); err != nil {
+		return interfaceStats{}, err
+	}
+	return stats, nil
 }
 
 func readUintFile(path string) (uint64, error) {
