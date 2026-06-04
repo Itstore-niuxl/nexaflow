@@ -5,6 +5,7 @@ import {
   ChartNoAxesCombined,
   CircleGauge,
   Database,
+  FileText,
   Gauge,
   HardDrive,
   History,
@@ -51,6 +52,7 @@ import {
   type PortProfile,
   type PortPoint,
   type ProtocolPoint,
+  type ReportOverview,
   type SearchResult,
   type SecurityInsight,
   type SecurityIncident,
@@ -135,6 +137,38 @@ const emptyIncidentContext = (): SecurityIncidentContext => ({
   anomalies: [],
   playbook_actions: []
 });
+const emptyReportOverview = (): ReportOverview => ({
+  generated_at: 0,
+  minutes: 15,
+  summary: {
+    minutes: 15,
+    bytes: 0,
+    packets: 0,
+    utilization: 0,
+    asset_count: 0,
+    critical_assets: 0,
+    open_incidents: 0,
+    critical_incidents: 0,
+    anomaly_count: 0,
+    critical_anomalies: 0,
+    exposed_services: 0,
+    high_risk_services: 0,
+    external_access: 0,
+    external_session_sum: 0,
+    avg_mbps: 0,
+    peak_mbps: 0,
+    p95_mbps: 0
+  },
+  asset_risks: [],
+  incidents: [],
+  anomalies: [],
+  exposures: [],
+  external_access: [],
+  top_src: [],
+  top_ports: [],
+  top_services: [],
+  recommendations: []
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -149,6 +183,7 @@ const selectedIncident = ref<SecurityIncident | null>(null);
 const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
 const incidentNoteText = ref('');
 const savingIncidentNote = ref(false);
+const reportOverview = ref<ReportOverview>(emptyReportOverview());
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnomalies = ref<TrafficAnomaly[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
@@ -235,6 +270,7 @@ const navGroups = [
   {
     title: '工具',
     items: [
+      { id: 'reports', label: '报表中心', icon: FileText },
       { id: 'search', label: '检索分析', icon: Search },
       { id: 'history', label: '历史回放', icon: History },
       { id: 'collectors', label: '采集器', icon: Settings2 }
@@ -260,6 +296,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   topn: { title: 'TopN 分析', subtitle: '按 IP、端口、协议和会话维度定位主要流量对象' },
   sessions: { title: '会话追踪', subtitle: '结构化查看源/目的、端口、协议、服务、方向和风险' },
   alerts: { title: '告警中心', subtitle: '查看阈值、采集健康和异常事件' },
+  reports: { title: '报表中心', subtitle: '汇总资产风险、事件、异常、暴露面和 Top 流量对象，支持巡检导出' },
   search: { title: '检索分析', subtitle: '按 IP、端口、主机对或会话关键字检索流量对象' },
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
@@ -321,7 +358,8 @@ const refresh = async () => {
       incidentRes,
       trafficAnalysisRes,
       trafficChangesRes,
-      trafficAnomaliesRes
+      trafficAnomaliesRes,
+      reportRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -358,7 +396,8 @@ const refresh = async () => {
       api.securityIncidents(minutes, 120),
       api.trafficAnalysis(minutes),
       api.trafficChanges(minutes, 30),
-      api.trafficAnomalies(minutes, 40)
+      api.trafficAnomalies(minutes, 40),
+      api.reportOverview(minutes, 12)
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -396,6 +435,7 @@ const refresh = async () => {
     trafficAnalysis.value = trafficAnalysisRes.data;
     trafficChanges.value = trafficChangesRes.data;
     trafficAnomalies.value = trafficAnomaliesRes.data;
+    reportOverview.value = reportRes.data;
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -424,7 +464,8 @@ const refresh = async () => {
       incidentRes.degraded ||
       trafficAnalysisRes.degraded ||
       trafficChangesRes.degraded ||
-      trafficAnomaliesRes.degraded;
+      trafficAnomaliesRes.degraded ||
+      reportRes.degraded;
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -1023,6 +1064,41 @@ const refresh = async () => {
         score: 88
       }
     ];
+    reportOverview.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      summary: {
+        minutes: selectedMinutes.value,
+        bytes: summary.value.bytes,
+        packets: summary.value.packets,
+        utilization: summary.value.utilization,
+        asset_count: assetRisks.value.length,
+        critical_assets: assetRisks.value.filter((row) => row.risk_level === 'critical').length,
+        open_incidents: securityIncidents.value.filter((row) => row.status === 'open').length,
+        critical_incidents: securityIncidents.value.filter((row) => row.severity === 'critical').length,
+        anomaly_count: trafficAnomalies.value.length,
+        critical_anomalies: trafficAnomalies.value.filter((row) => row.severity === 'critical').length,
+        exposed_services: serviceExposure.value.length,
+        high_risk_services: serviceExposure.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length,
+        external_access: externalAccess.value.length,
+        external_session_sum: externalAccess.value.reduce((sum, row) => sum + row.session_count, 0),
+        avg_mbps: trafficAnalysis.value.baseline.avg_mbps,
+        peak_mbps: trafficAnalysis.value.baseline.peak_mbps,
+        p95_mbps: trafficAnalysis.value.baseline.p95_mbps
+      },
+      asset_risks: assetRisks.value,
+      incidents: securityIncidents.value,
+      anomalies: trafficAnomalies.value,
+      exposures: serviceExposure.value,
+      external_access: externalAccess.value,
+      top_src: topSrc.value,
+      top_ports: topPorts.value,
+      top_services: topServices.value,
+      recommendations: [
+        { level: 'critical', title: '优先处置严重资产', detail: '10.2.0.12 存在公网访问、事件和高风险服务，需要确认暴露策略' },
+        { level: 'warning', title: '补齐资产归属', detail: '未归属资产需要补充负责人和业务标签，便于后续事件流转' }
+      ]
+    };
     degraded.value = true;
   } finally {
     loading.value = false;
@@ -1217,6 +1293,34 @@ const incidentKindItems = computed(() => aggregateTopItems(securityIncidents.val
 const criticalIncidentCount = computed(() => securityIncidents.value.filter((row) => row.severity === 'critical').length);
 const openIncidentCount = computed(() => securityIncidents.value.filter((row) => row.status === 'open').length);
 const incidentTotalBytes = computed(() => securityIncidents.value.reduce((sum, row) => sum + row.bytes, 0));
+const reportAssetRiskItems = computed(() =>
+  reportOverview.value.asset_risks.map((row) => ({
+    key: `${row.ip} / ${row.name || row.role || row.environment}`,
+    bytes: row.risk_score,
+    packets: row.open_incidents
+  }))
+);
+const reportIncidentKindItems = computed(() =>
+  aggregateTopItems(reportOverview.value.incidents, (row) => incidentKindText(row.kind), (row) => row.bytes, (row) => row.packets)
+);
+const reportIncidentSeverityItems = computed(() =>
+  aggregateTopItems(reportOverview.value.incidents, (row) => severityText(row.severity), () => 1, () => 0)
+);
+const reportAnomalyItems = computed(() =>
+  reportOverview.value.anomalies
+    .map((row) => ({
+      key: `${changeDimensionText(row.dimension)} / ${row.key}`,
+      bytes: Math.abs(row.delta_bytes),
+      packets: Math.abs(row.delta_packets)
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+);
+const reportExposureRiskItems = computed(() =>
+  aggregateTopItems(reportOverview.value.exposures, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets)
+);
+const reportExternalDirectionItems = computed(() =>
+  aggregateTopItems(reportOverview.value.external_access, (row) => row.direction, (row) => row.bytes, (row) => row.packets)
+);
 const incidentContextSessionItems = computed(() => incidentContext.value.sessions.map((row) => ({ key: row.key, bytes: row.bytes, packets: row.packets })));
 const incidentContextInsightItems = computed(() =>
   incidentContext.value.insights.map((row) => ({
@@ -1846,6 +1950,66 @@ const exportSessions = () => {
     ])
   ];
   exportCSV(`nexaflow-sessions-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportReportOverview = () => {
+  const report = reportOverview.value;
+  const rows = [
+    ['类型', '对象', '级别/状态', '指标', '流量字节', '包数/会话', '摘要', '建议'],
+    ['摘要', '观察范围', rangeLabel.value, `${report.summary.avg_mbps.toFixed(2)} Mbps 平均 / ${report.summary.peak_mbps.toFixed(2)} Mbps 峰值`, String(report.summary.bytes), String(report.summary.packets), `资产 ${report.summary.asset_count} / 事件 ${report.summary.open_incidents} / 异常 ${report.summary.anomaly_count}`, ''],
+    ...report.recommendations.map((row) => ['建议', row.title, severityText(row.level), '', '', '', row.detail, row.detail]),
+    ...report.asset_risks.map((row) => [
+      '资产风险',
+      `${row.ip} ${row.name || row.business || ''}`.trim(),
+      assetRiskLevelText(row.risk_level),
+      `评分 ${row.risk_score} / 暴露 ${row.exposed_services} / 事件 ${row.open_incidents}`,
+      String(row.total_bytes),
+      String(row.total_packets),
+      row.top_finding || '',
+      row.recommended_action || ''
+    ]),
+    ...report.incidents.map((row) => [
+      '安全事件',
+      row.subject,
+      `${severityText(row.severity)} / ${alertStatusText(row.status)}`,
+      `${row.source} / ${incidentKindText(row.kind)} / 评分 ${row.score}`,
+      String(row.bytes),
+      String(row.packets),
+      row.summary,
+      row.recommended_action
+    ]),
+    ...report.anomalies.map((row) => [
+      '异常波动',
+      `${changeDimensionText(row.dimension)} / ${row.key}`,
+      severityText(row.severity),
+      `${anomalyKindText(row.kind)} / ${formatChangeRatio(row.change_ratio)} / 评分 ${row.score}`,
+      String(row.current_bytes),
+      String(row.current_packets),
+      row.summary,
+      '确认是否符合变更计划，必要时进入对象画像或检索分析'
+    ]),
+    ...report.exposures.map((row) => [
+      '服务暴露',
+      `${row.ip}:${row.port} / ${row.protocol}`,
+      serviceRiskText(row.risk),
+      `${row.service} / ${row.category} / ${row.direction}`,
+      String(row.bytes),
+      String(row.packets),
+      row.sample_flow,
+      '核对服务用途、访问来源和防火墙策略'
+    ]),
+    ...report.external_access.map((row) => [
+      '公网访问',
+      `${row.public_ip} -> ${row.internal_ip}:${row.port}`,
+      serviceRiskText(row.risk),
+      `${row.direction} / ${row.service} / ${row.category}`,
+      String(row.bytes),
+      String(row.session_count),
+      row.sample_flow,
+      '核对公网对端可信度和会话数量'
+    ])
+  ];
+  exportCSV(`nexaflow-overview-report-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportCSV = (filename: string, rows: string[][]) => {
@@ -3419,6 +3583,180 @@ const exportCSV = (filename: string, rows: string[][]) => {
                   <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved'" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
                   <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(alert.subject)">忽略</button>
                 </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'reports'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="exportReportOverview">导出报表 CSV</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / 生成时间 {{ formatTime(reportOverview.generated_at) }} / {{ reportOverview.recommendations.length.toLocaleString() }} 条建议
+          </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>总流量</span>
+              <strong>{{ formatBytes(reportOverview.summary.bytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>严重资产</span>
+              <strong>{{ reportOverview.summary.critical_assets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>开放事件</span>
+              <strong>{{ reportOverview.summary.open_incidents.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>异常波动</span>
+              <strong>{{ reportOverview.summary.anomaly_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>暴露服务</span>
+              <strong>{{ reportOverview.summary.exposed_services.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <ServerCog :size="22" />
+            <div>
+              <span>高风险服务</span>
+              <strong>{{ reportOverview.summary.high_risk_services.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Waypoints :size="22" />
+            <div>
+              <span>公网访问</span>
+              <strong>{{ reportOverview.summary.external_access.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>峰值吞吐</span>
+              <strong>{{ reportOverview.summary.peak_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="报表资产风险评分" eyebrow="Asset Risk" :items="reportAssetRiskItems" unit="count" />
+          <HorizontalBarChart title="报表异常增量" eyebrow="Anomaly Delta" :items="reportAnomalyItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="报表事件类型" eyebrow="Incident Kind" :items="reportIncidentKindItems" />
+          <HorizontalBarChart title="报表事件级别" eyebrow="Severity" :items="reportIncidentSeverityItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="报表暴露风险" eyebrow="Exposure Risk" :items="reportExposureRiskItems" />
+          <HorizontalBarChart title="报表公网方向" eyebrow="External Direction" :items="reportExternalDirectionItems" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="报表 Top 源 IP" :items="reportOverview.top_src" />
+          <TopNTable title="报表 Top 端口" :items="reportOverview.top_ports" />
+          <TopNTable title="报表 Top 服务" :items="reportOverview.top_services" />
+          <section class="table-panel report-recommendations">
+            <div class="panel-heading">
+              <h2>报表建议</h2>
+              <span>{{ reportOverview.recommendations.length.toLocaleString() }} 条</span>
+            </div>
+            <div v-if="reportOverview.recommendations.length === 0" class="empty-state">暂无报表建议</div>
+            <article v-for="item in reportOverview.recommendations" :key="`${item.level}-${item.title}`" class="report-recommendation">
+              <span class="severity-pill" :class="item.level">{{ severityText(item.level) }}</span>
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.detail }}</p>
+            </article>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table report-asset-table">
+          <div class="panel-heading">
+            <h2>报表重点资产</h2>
+            <span>{{ reportOverview.asset_risks.length.toLocaleString() }} 个资产 / {{ rangeLabel }}</span>
+          </div>
+          <div v-if="reportOverview.asset_risks.length === 0" class="empty-state">暂无资产风险数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>资产</th>
+                <th>等级</th>
+                <th>评分</th>
+                <th>负责人</th>
+                <th>暴露面</th>
+                <th>事件/异常</th>
+                <th>主要原因</th>
+                <th>建议动作</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="asset in reportOverview.asset_risks" :key="asset.ip">
+                <td>
+                  <strong>{{ asset.ip }}</strong>
+                  <span class="cell-subtle">{{ asset.name || asset.business || asset.environment || asset.role }}</span>
+                </td>
+                <td><span class="severity-pill" :class="asset.risk_level">{{ assetRiskLevelText(asset.risk_level) }}</span></td>
+                <td>{{ asset.risk_score }}</td>
+                <td>{{ asset.owner || '-' }}</td>
+                <td>{{ asset.exposed_services.toLocaleString() }} 服务 / {{ asset.external_peers.toLocaleString() }} 公网对端</td>
+                <td>{{ asset.open_incidents.toLocaleString() }} 事件 / {{ asset.anomaly_count.toLocaleString() }} 异常</td>
+                <td>{{ asset.top_finding || '-' }}</td>
+                <td>{{ asset.recommended_action }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; currentView = 'search'; runSearch()">检索</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="table-panel wide-key-table report-incident-table">
+          <div class="panel-heading">
+            <h2>报表重点事件</h2>
+            <span>{{ reportOverview.incidents.length.toLocaleString() }} 条事件 / 严重 {{ reportOverview.summary.critical_incidents.toLocaleString() }}</span>
+          </div>
+          <div v-if="reportOverview.incidents.length === 0" class="empty-state">暂无安全事件</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>类型</th>
+                <th>级别</th>
+                <th>状态</th>
+                <th>摘要</th>
+                <th>建议动作</th>
+                <th>流量</th>
+                <th>评分</th>
+                <th>最近出现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="incident in reportOverview.incidents" :key="incident.id">
+                <td :title="incident.subject">{{ incident.subject }}</td>
+                <td>{{ incidentKindText(incident.kind) }}</td>
+                <td><span class="severity-pill" :class="incident.severity">{{ severityText(incident.severity) }}</span></td>
+                <td>{{ alertStatusText(incident.status) }}</td>
+                <td>{{ incident.summary }}</td>
+                <td>{{ incident.recommended_action }}</td>
+                <td>{{ formatBytes(incident.bytes) }}</td>
+                <td>{{ incident.score }}</td>
+                <td>{{ formatTime(incident.last_seen) }}</td>
               </tr>
             </tbody>
           </table>

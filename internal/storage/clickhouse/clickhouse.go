@@ -1624,6 +1624,61 @@ func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind strin
 	return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr)
 }
 
+func (s *Store) ReportOverview(ctx context.Context, minutes, limit int) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	summary, summaryErr := s.Summary(ctx, minutes)
+	analysis, analysisErr := s.TrafficAnalysis(ctx, minutes)
+	assetRisks, assetErr := s.AssetRiskPosture(ctx, minutes, limit)
+	incidents, incidentErr := s.SecurityIncidents(ctx, minutes, limit)
+	anomalies, anomalyErr := s.TrafficAnomalies(ctx, minutes, limit)
+	exposures, exposureErr := s.ServiceExposure(ctx, minutes, limit)
+	externalRows, externalErr := s.ExternalAccess(ctx, minutes, limit)
+	topSrc, srcErr := s.TopN(ctx, "ip", "src", limit, minutes)
+	topPorts, portErr := s.TopN(ctx, "dst_port", "src", limit, minutes)
+	topServices, serviceErr := s.TopN(ctx, "service", "src", limit, minutes)
+
+	metrics := map[string]any{
+		"minutes":              minutes,
+		"bytes":                uintValue(summary["bytes"]),
+		"packets":              uintValue(summary["packets"]),
+		"utilization":          floatValue(summary["utilization"]),
+		"asset_count":          len(assetRisks),
+		"critical_assets":      countMapsByString(assetRisks, "risk_level", "critical"),
+		"open_incidents":       countMapsByString(incidents, "status", "open"),
+		"critical_incidents":   countMapsByString(incidents, "severity", "critical"),
+		"anomaly_count":        len(anomalies),
+		"critical_anomalies":   countMapsByString(anomalies, "severity", "critical"),
+		"exposed_services":     len(exposures),
+		"high_risk_services":   countHighRiskRows(exposures),
+		"external_access":      len(externalRows),
+		"external_session_sum": sumIntMaps(externalRows, "session_count"),
+		"avg_mbps":             floatValue(mapValue(analysis, "baseline", "avg_mbps")),
+		"peak_mbps":            floatValue(mapValue(analysis, "baseline", "peak_mbps")),
+		"p95_mbps":             floatValue(mapValue(analysis, "baseline", "p95_mbps")),
+	}
+	report := map[string]any{
+		"generated_at":    time.Now().Unix(),
+		"minutes":         minutes,
+		"summary":         metrics,
+		"asset_risks":     assetRisks,
+		"incidents":       incidents,
+		"anomalies":       anomalies,
+		"exposures":       exposures,
+		"external_access": externalRows,
+		"top_src":         topSrc,
+		"top_ports":       topPorts,
+		"top_services":    topServices,
+		"recommendations": reportRecommendations(metrics, assetRisks, incidents, anomalies, exposures),
+	}
+	err := firstErr(summaryErr, analysisErr, assetErr, incidentErr, anomalyErr, exposureErr, externalErr, srcErr, portErr, serviceErr)
+	if err != nil && len(assetRisks) == 0 && len(incidents) == 0 {
+		return demoReportOverview(minutes), err
+	}
+	return report, err
+}
+
 func (s *Store) ipStats(ctx context.Context, ip string, minutes int) (map[string]model.TopItem, error) {
 	q := fmt.Sprintf(`SELECT direction AS key, sum(bytes) AS bytes, sum(packets) AS packets
 FROM %s.ip_traffic_5s
@@ -2699,6 +2754,49 @@ func demoTrafficAnomalies() []map[string]any {
 	}
 }
 
+func demoReportOverview(minutes int) map[string]any {
+	now := time.Now().Unix()
+	assetRisks := demoAssetRiskPosture()
+	incidents := demoSecurityIncidents(now)
+	anomalies := demoTrafficAnomalies()
+	exposures := demoServiceExposure()
+	return map[string]any{
+		"generated_at": now,
+		"minutes":      minutes,
+		"summary": map[string]any{
+			"minutes":              minutes,
+			"bytes":                uint64(158000000),
+			"packets":              uint64(98000),
+			"utilization":          0.08,
+			"asset_count":          len(assetRisks),
+			"critical_assets":      1,
+			"open_incidents":       len(incidents),
+			"critical_incidents":   1,
+			"anomaly_count":        len(anomalies),
+			"critical_anomalies":   1,
+			"exposed_services":     len(exposures),
+			"high_risk_services":   1,
+			"external_access":      2,
+			"external_session_sum": int64(48),
+			"avg_mbps":             7.68,
+			"peak_mbps":            25.6,
+			"p95_mbps":             19.2,
+		},
+		"asset_risks":     assetRisks,
+		"incidents":       incidents,
+		"anomalies":       anomalies,
+		"exposures":       exposures,
+		"external_access": demoExternalAccess(),
+		"top_src":         []model.TopItem{{Key: "10.2.0.12", Bytes: 96000000, Packets: 42000}},
+		"top_ports":       []model.TopItem{{Key: "8081", Bytes: 36000000, Packets: 18000}},
+		"top_services":    []model.TopItem{{Key: "HTTP Alternate", Bytes: 36000000, Packets: 18000}},
+		"recommendations": []map[string]string{
+			{"level": "critical", "title": "优先处置严重资产", "detail": "10.2.0.12 存在公网访问、事件和高风险服务，需要确认暴露策略"},
+			{"level": "warning", "title": "补齐资产归属", "detail": "未归属资产需要补充负责人和业务标签，便于后续事件流转"},
+		},
+	}
+}
+
 func demoTrafficAnalysis() map[string]any {
 	return map[string]any{
 		"minutes": 15,
@@ -2999,6 +3097,73 @@ func applyIncidentStatusOverrides(items []map[string]any, overrides map[string]s
 			item["status"] = status
 		}
 	}
+}
+
+func countMapsByString(rows []map[string]any, key, value string) int64 {
+	count := int64(0)
+	for _, row := range rows {
+		if stringValue(row[key]) == value {
+			count++
+		}
+	}
+	return count
+}
+
+func countHighRiskRows(rows []map[string]any) int64 {
+	count := int64(0)
+	for _, row := range rows {
+		if riskWeight(stringValue(row["risk"])) >= riskWeight("high") {
+			count++
+		}
+	}
+	return count
+}
+
+func sumIntMaps(rows []map[string]any, key string) int64 {
+	total := int64(0)
+	for _, row := range rows {
+		total += int64Value(row[key])
+	}
+	return total
+}
+
+func mapValue(row map[string]any, key, nested string) any {
+	if row == nil {
+		return nil
+	}
+	child, ok := row[key].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return child[nested]
+}
+
+func reportRecommendations(metrics map[string]any, assetRisks, incidents, anomalies, exposures []map[string]any) []map[string]string {
+	items := []map[string]string{}
+	if int64Value(metrics["critical_assets"]) > 0 {
+		title := "优先处置严重资产"
+		detail := "存在 " + strconv.FormatInt(int64Value(metrics["critical_assets"]), 10) + " 个严重资产，优先核对公网暴露、高危服务和责任人"
+		if len(assetRisks) > 0 {
+			detail = stringValue(assetRisks[0]["ip"]) + " 风险评分最高：" + stringValue(assetRisks[0]["top_finding"])
+		}
+		items = append(items, map[string]string{"level": "critical", "title": title, "detail": detail})
+	}
+	if int64Value(metrics["critical_incidents"]) > 0 {
+		items = append(items, map[string]string{"level": "critical", "title": "处理严重事件", "detail": "事件中心存在严重事件，建议先确认、补充处置备注并跟踪恢复状态"})
+	}
+	if int64Value(metrics["high_risk_services"]) > 0 {
+		items = append(items, map[string]string{"level": "warning", "title": "收敛高风险服务", "detail": "服务暴露面存在高风险服务，检查端口用途、访问来源和白名单策略"})
+	}
+	if int64Value(metrics["critical_anomalies"]) > 0 {
+		items = append(items, map[string]string{"level": "warning", "title": "复核异常波动", "detail": "异常波动里存在严重流量变化，结合对象画像和会话追踪确认业务背景"})
+	}
+	if len(items) == 0 {
+		items = append(items, map[string]string{"level": "info", "title": "保持观察", "detail": "当前窗口未发现严重风险，建议继续观察资产风险评分和事件趋势"})
+	}
+	if len(incidents) == 0 && len(anomalies) == 0 && len(exposures) == 0 {
+		items = append(items, map[string]string{"level": "info", "title": "完善数据采集", "detail": "当前报表风险数据较少，可扩大观察窗口或确认采集接口覆盖范围"})
+	}
+	return items
 }
 
 func incidentContextSelector(subject, kind string) map[string]string {

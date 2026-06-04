@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/incident-status", s.securityIncidentStatus)
 	mux.HandleFunc("/api/v1/security/incident-timeline", s.securityIncidentTimeline)
 	mux.HandleFunc("/api/v1/security/incident-notes", s.securityIncidentNotes)
+	mux.HandleFunc("/api/v1/reports/overview", s.reportOverview)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -397,6 +398,11 @@ func (s *Server) securityIncidentNotes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"data": data})
+}
+
+func (s *Server) reportOverview(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.ReportOverview(r.Context(), queryMinutes(r), queryLimit(r, 10, 50))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {

@@ -332,6 +332,47 @@ export interface IncidentTimelineEntry {
   created_at: number;
 }
 
+export interface ReportRecommendation {
+  level: string;
+  title: string;
+  detail: string;
+}
+
+export interface ReportSummary {
+  minutes: number;
+  bytes: number;
+  packets: number;
+  utilization: number;
+  asset_count: number;
+  critical_assets: number;
+  open_incidents: number;
+  critical_incidents: number;
+  anomaly_count: number;
+  critical_anomalies: number;
+  exposed_services: number;
+  high_risk_services: number;
+  external_access: number;
+  external_session_sum: number;
+  avg_mbps: number;
+  peak_mbps: number;
+  p95_mbps: number;
+}
+
+export interface ReportOverview {
+  generated_at: number;
+  minutes: number;
+  summary: ReportSummary;
+  asset_risks: AssetRiskPosture[];
+  incidents: SecurityIncident[];
+  anomalies: TrafficAnomaly[];
+  exposures: ServiceExposure[];
+  external_access: ExternalAccess[];
+  top_src: TopItem[];
+  top_ports: TopItem[];
+  top_services: TopItem[];
+  recommendations: ReportRecommendation[];
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -552,6 +593,9 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: IncidentTimelineEntry }>;
+  },
+  async reportOverview(minutes = 15, limit = 10) {
+    return json<{ data: ReportOverview; degraded: boolean }>(`/api/v1/reports/overview?minutes=${minutes}&limit=${limit}`);
   },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);

@@ -895,6 +895,8 @@ td {
 .anomaly-table table,
 .asset-risk-table table,
 .incident-table table,
+.report-asset-table table,
+.report-incident-table table,
 .change-table table {
   table-layout: fixed;
 }
@@ -905,6 +907,11 @@ td {
 
 .incident-table table {
   min-width: 1720px;
+}
+
+.report-asset-table table,
+.report-incident-table table {
+  min-width: 1320px;
 }
 
 .anomaly-table table {
@@ -1001,6 +1008,35 @@ td {
   width: 280px;
 }
 
+.report-asset-table th:first-child,
+.report-asset-table td:first-child,
+.report-incident-table th:first-child,
+.report-incident-table td:first-child {
+  width: 18%;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.report-asset-table th:nth-child(7),
+.report-asset-table td:nth-child(7),
+.report-asset-table th:nth-child(8),
+.report-asset-table td:nth-child(8),
+.report-incident-table th:nth-child(5),
+.report-incident-table td:nth-child(5),
+.report-incident-table th:nth-child(6),
+.report-incident-table td:nth-child(6) {
+  width: 24%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+.report-asset-table th:nth-child(9),
+.report-asset-table td:nth-child(9) {
+  width: 130px;
+}
+
 .asset-risk-table th:first-child,
 .asset-risk-table td:first-child {
   width: 15%;
@@ -1064,6 +1100,34 @@ td {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+}
+
+.report-recommendations {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.report-recommendation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.report-recommendation strong,
+.report-recommendation p {
+  min-width: 0;
+}
+
+.report-recommendation p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted-strong);
+  line-height: 1.55;
 }
 
 .incident-note-editor {
