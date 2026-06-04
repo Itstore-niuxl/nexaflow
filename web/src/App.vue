@@ -44,6 +44,7 @@ import {
   type IPProfile,
   type MatrixRow,
   type NetworkInterface,
+  type ObjectRelations,
   type DirectionPoint,
   type PortProfile,
   type PortPoint,
@@ -101,6 +102,19 @@ const protocolSeries = ref<ProtocolPoint[]>([]);
 const portSeries = ref<PortPoint[]>([]);
 const directionSeries = ref<DirectionPoint[]>([]);
 const dimensionTrend = ref<DimensionPoint[]>([]);
+const emptyObjectRelations = (): ObjectRelations => ({
+  dimension: 'service',
+  key: '',
+  direction: 'src',
+  minutes: 15,
+  summary: { key: '全部对象', bytes: 0, packets: 0, related_count: 0 },
+  related_ips: [],
+  related_ports: [],
+  related_services: [],
+  related_flows: [],
+  insights: []
+});
+const objectRelations = ref<ObjectRelations>(emptyObjectRelations());
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const assets = ref<AssetRow[]>([]);
@@ -371,9 +385,13 @@ const refresh = async () => {
     if (!trendKey.value && topServices.value[0]) {
       trendKey.value = topServices.value[0].key;
     }
-    const trendRes = await api.dimensionTimeseries(trendDimension.value, trendKey.value.trim(), minutes, trendDirection.value, 5);
+    const [trendRes, relationRes] = await Promise.all([
+      api.dimensionTimeseries(trendDimension.value, trendKey.value.trim(), minutes, trendDirection.value, 5),
+      api.objectRelations(trendDimension.value, trendKey.value.trim(), minutes, trendDirection.value, 8)
+    ]);
     dimensionTrend.value = trendRes.data;
-    nextDegraded = nextDegraded || trendRes.degraded;
+    objectRelations.value = relationRes.data;
+    nextDegraded = nextDegraded || trendRes.degraded || relationRes.degraded;
     if (collectorRes.data[0]) {
       selectedMode.value = collectorRes.data[0].mode;
       selectedIface.value = collectorRes.data[0].iface ?? selectedIface.value;
@@ -547,6 +565,24 @@ const refresh = async () => {
       { ts: now - 60, dimension: 'service', key: 'HTTPS', bytes: 24000000, packets: 9300 },
       { ts: now, dimension: 'service', key: 'HTTPS', bytes: 42000000, packets: 14000 }
     ];
+    objectRelations.value = {
+      dimension: 'service',
+      key: 'HTTPS',
+      direction: 'src',
+      minutes: selectedMinutes.value,
+      summary: { key: 'HTTPS', bytes: 88000000, packets: 48000, related_count: 3 },
+      related_ips: [
+        { key: '172.20.2.10', bytes: 52000000, packets: 18000 },
+        { key: '10.10.1.42', bytes: 42000000, packets: 14000 }
+      ],
+      related_ports: [{ key: '443/tcp', bytes: 88000000, packets: 48000 }],
+      related_services: [{ key: 'HTTPS', bytes: 88000000, packets: 48000 }],
+      related_flows: [
+        { key: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp', bytes: 42000000, packets: 14000 },
+        { key: '10.10.1.77:53192 -> 172.20.2.81:443 / tcp', bytes: 18000000, packets: 7200 }
+      ],
+      insights: []
+    };
     searchResults.value = [
       { kind: 'flow', key: `${searchTerm.value}:53210 -> 172.20.2.10:443 / tcp`, bytes: 42000000, packets: 14000 },
       { kind: 'pair', key: `${searchTerm.value} -> 172.20.2.10`, bytes: 52000000, packets: 18000 }
@@ -839,6 +875,14 @@ const insightKindItems = computed(() => aggregateTopItems(securityInsights.value
 const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
 const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
 const searchResultItems = computed(() => aggregateTopItems(searchResults.value, (row) => `${row.kind}: ${row.key}`, (row) => row.bytes, (row) => row.packets));
+const relationTitle = computed(() => `${trendDimensionLabel.value}关联 / ${objectRelations.value.key || trendKey.value.trim() || 'Top 对象'}`);
+const relationInsightItems = computed(() =>
+  objectRelations.value.insights.map((row) => ({
+    key: `${severityText(row.severity)} / ${insightKindText(row.kind)} / ${row.subject}`,
+    bytes: row.bytes,
+    packets: row.packets
+  }))
+);
 const alertFlowSharePercent = computed({
   get: () => Math.round(alertConfig.value.flow_share * 100),
   set: (value: number) => {
@@ -1050,15 +1094,19 @@ const runSearch = async () => {
 const loadDimensionTrend = async () => {
   loading.value = true;
   try {
-    const result = await api.dimensionTimeseries(
-      trendDimension.value,
-      trendKey.value.trim(),
-      selectedMinutes.value,
-      trendDirection.value,
-      5
-    );
-    dimensionTrend.value = result.data;
-    degraded.value = result.degraded;
+    const [trendResult, relationResult] = await Promise.all([
+      api.dimensionTimeseries(
+        trendDimension.value,
+        trendKey.value.trim(),
+        selectedMinutes.value,
+        trendDirection.value,
+        5
+      ),
+      api.objectRelations(trendDimension.value, trendKey.value.trim(), selectedMinutes.value, trendDirection.value, 8)
+    ]);
+    dimensionTrend.value = trendResult.data;
+    objectRelations.value = relationResult.data;
+    degraded.value = trendResult.degraded || relationResult.degraded;
   } finally {
     loading.value = false;
   }
@@ -1510,6 +1558,45 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" @click="loadDimensionTrend">查看趋势</button>
         </section>
         <DimensionTrendChart :title="trendTitle" :points="dimensionTrend" />
+        <section class="metrics-grid relation-metrics">
+          <article class="metric">
+            <Route :size="22" />
+            <div>
+              <span>关联对象</span>
+              <strong>{{ relationTitle }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>对象流量</span>
+              <strong>{{ formatBytes(objectRelations.summary.bytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <ListOrdered :size="22" />
+            <div>
+              <span>对象包数</span>
+              <strong>{{ objectRelations.summary.packets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>风险线索</span>
+              <strong>{{ objectRelations.insights.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="关联 IP" eyebrow="Related IP" :items="objectRelations.related_ips" />
+          <HorizontalBarChart title="关联端口" eyebrow="Related Port" :items="objectRelations.related_ports" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="关联服务" :items="objectRelations.related_services" />
+          <TopNTable title="关联会话" :items="objectRelations.related_flows" />
+          <TopNTable title="关联风险线索" :items="relationInsightItems" />
+        </section>
         <section class="command-grid">
           <HorizontalBarChart title="应用服务排行" eyebrow="Service Ranking" :items="topServices" />
           <HorizontalBarChart title="服务风险流量" eyebrow="Service Risk" :items="topServiceRisks" />
@@ -2144,6 +2231,15 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
         <HorizontalBarChart :title="selectedTopNTitle" eyebrow="TopN Chart" :items="selectedTopN" />
         <DimensionTrendChart :title="trendTitle" :points="dimensionTrend" />
+        <section class="command-grid">
+          <HorizontalBarChart title="关联 IP" eyebrow="Related IP" :items="objectRelations.related_ips" />
+          <HorizontalBarChart title="关联端口" eyebrow="Related Port" :items="objectRelations.related_ports" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <TopNTable title="关联服务" :items="objectRelations.related_services" />
+          <TopNTable title="关联会话" :items="objectRelations.related_flows" />
+          <TopNTable title="关联风险线索" :items="relationInsightItems" />
+        </section>
         <TopNTable :title="selectedTopNTitle" :items="selectedTopN" />
       </template>
 

@@ -699,6 +699,166 @@ FORMAT JSON`, s.database, minutes, escape(dimension), whereKey)
 	return parsed.Data, nil
 }
 
+func (s *Store) ObjectRelations(ctx context.Context, dimension, key, direction string, minutes, limit int) (map[string]any, error) {
+	dimension = strings.TrimSpace(dimension)
+	key = strings.TrimSpace(key)
+	direction = strings.TrimSpace(direction)
+	if dimension == "" {
+		dimension = "service"
+	}
+	if limit <= 0 {
+		limit = 8
+	}
+	summary, summaryErr := s.objectRelationSummary(ctx, dimension, key, direction, minutes)
+	flows, flowErr := s.objectRelationFlows(ctx, dimension, key, minutes, limit)
+	relatedIPs, relatedPorts, relatedServices := aggregateFlowRelations(dimension, key, flows, limit)
+	insights, insightErr := s.relatedSecurityInsights(ctx, dimension, key, minutes, limit)
+	summary["related_count"] = len(flows)
+	return map[string]any{
+		"dimension":        dimension,
+		"key":              key,
+		"direction":        direction,
+		"minutes":          minutes,
+		"summary":          summary,
+		"related_ips":      relatedIPs,
+		"related_ports":    relatedPorts,
+		"related_services": relatedServices,
+		"related_flows":    flows,
+		"insights":         insights,
+	}, firstErr(summaryErr, flowErr, insightErr)
+}
+
+func (s *Store) objectRelationSummary(ctx context.Context, dimension, key, direction string, minutes int) (map[string]any, error) {
+	label := key
+	if label == "" {
+		label = "全部对象"
+	}
+	var q string
+	if dimension == "ip" {
+		where := ""
+		if key != "" {
+			where += " AND ip = '" + escape(key) + "'"
+		}
+		if direction == "src" || direction == "dst" {
+			where += " AND direction = '" + escape(direction) + "'"
+		}
+		q = fmt.Sprintf(`SELECT '%s' AS key, sum(bytes) AS bytes, sum(packets) AS packets
+FROM %s.ip_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE%s
+FORMAT JSON`, escape(label), s.database, minutes, where)
+	} else {
+		where := ""
+		if key != "" {
+			where = " AND dim_key = '" + escape(key) + "'"
+		}
+		q = fmt.Sprintf(`SELECT '%s' AS key, sum(bytes) AS bytes, sum(packets) AS packets
+FROM %s.dimension_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE AND dimension = '%s'%s
+FORMAT JSON`, escape(label), s.database, minutes, escape(dimension), where)
+	}
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return relationSummary(label, 0, 0), err
+	}
+	var parsed struct {
+		Data []model.TopItem `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return relationSummary(label, 0, 0), err
+	}
+	if len(parsed.Data) == 0 {
+		return relationSummary(label, 0, 0), nil
+	}
+	return relationSummary(label, parsed.Data[0].Bytes, parsed.Data[0].Packets), nil
+}
+
+func (s *Store) objectRelationFlows(ctx context.Context, dimension, key string, minutes, limit int) ([]model.TopItem, error) {
+	if key == "" {
+		return s.TopN(ctx, "flow", "src", limit, minutes)
+	}
+	switch dimension {
+	case "ip":
+		return s.dimensionLike(ctx, "flow", key, minutes, limit)
+	case "flow":
+		return s.dimensionLike(ctx, "flow", key, minutes, limit)
+	case "pair":
+		left, right := splitPair(key)
+		candidates, err := s.dimensionLike(ctx, "flow", left, minutes, limit*4)
+		if err != nil {
+			return nil, err
+		}
+		filtered := make([]model.TopItem, 0, limit)
+		for _, flow := range candidates {
+			if right == "" || strings.Contains(flow.Key, right) {
+				filtered = append(filtered, flow)
+			}
+			if len(filtered) >= limit {
+				break
+			}
+		}
+		return filtered, nil
+	case "dst_port":
+		return s.dimensionLike(ctx, "flow", ":"+key+" /", minutes, limit)
+	case "protocol":
+		return s.dimensionLike(ctx, "flow", " / "+key, minutes, limit)
+	case "service", "service_category", "service_risk":
+		return s.flowsForServiceSelector(ctx, dimension, key, minutes, limit)
+	default:
+		return []model.TopItem{}, nil
+	}
+}
+
+func (s *Store) flowsForServiceSelector(ctx context.Context, dimension, key string, minutes, limit int) ([]model.TopItem, error) {
+	ports := portsForServiceSelector(dimension, key)
+	merged := map[string]model.TopItem{}
+	var first error
+	for _, port := range ports {
+		rows, err := s.dimensionLike(ctx, "flow", ":"+port+" /", minutes, limit)
+		if err != nil && first == nil {
+			first = err
+		}
+		for _, row := range rows {
+			parsed, ok := parseFlowKey(row.Key)
+			if !ok || parsed.DstPort != port {
+				continue
+			}
+			addTopItem(merged, row.Key, row.Bytes, row.Packets)
+		}
+	}
+	return sortedTopItems(merged, limit), first
+}
+
+func (s *Store) relatedSecurityInsights(ctx context.Context, dimension, key string, minutes, limit int) ([]map[string]any, error) {
+	items, err := s.SecurityInsights(ctx, minutes, max(limit*5, 30))
+	if key == "" {
+		if len(items) > limit {
+			items = items[:limit]
+		}
+		return items, err
+	}
+	markers := []string{key, dimension + ":" + key}
+	if dimension == "dst_port" {
+		markers = append(markers, ":"+key+" ", ":"+key+" /")
+	}
+	if dimension == "protocol" {
+		markers = append(markers, " / "+key)
+	}
+	filtered := make([]map[string]any, 0, limit)
+	for _, item := range items {
+		text := stringValue(item["subject"]) + " " + stringValue(item["summary"])
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(text, marker) {
+				filtered = append(filtered, item)
+				break
+			}
+		}
+		if len(filtered) >= limit {
+			break
+		}
+	}
+	return filtered, err
+}
+
 func (s *Store) Search(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
 	if q == "" {
 		return []map[string]any{}, nil
@@ -1827,6 +1987,69 @@ func addNode(nodes map[string]map[string]any, ip string, bytes, packets uint64) 
 	nodes[ip] = node
 }
 
+func relationSummary(key string, bytes, packets uint64) map[string]any {
+	return map[string]any{
+		"key":           key,
+		"bytes":         bytes,
+		"packets":       packets,
+		"related_count": 0,
+	}
+}
+
+func aggregateFlowRelations(dimension, key string, flows []model.TopItem, limit int) ([]model.TopItem, []model.TopItem, []model.TopItem) {
+	ips := map[string]model.TopItem{}
+	ports := map[string]model.TopItem{}
+	services := map[string]model.TopItem{}
+	for _, flow := range flows {
+		parsed, ok := parseFlowKey(flow.Key)
+		if !ok {
+			continue
+		}
+		if dimension == "ip" && key != "" {
+			if parsed.SrcIP == key {
+				addTopItem(ips, parsed.DstIP, flow.Bytes, flow.Packets)
+			} else if parsed.DstIP == key {
+				addTopItem(ips, parsed.SrcIP, flow.Bytes, flow.Packets)
+			}
+		} else {
+			addTopItem(ips, parsed.SrcIP, flow.Bytes, flow.Packets)
+			addTopItem(ips, parsed.DstIP, flow.Bytes, flow.Packets)
+		}
+		service := identifyService(parsed.DstPort, parsed.Proto)
+		addTopItem(ports, parsed.DstPort+"/"+parsed.Proto, flow.Bytes, flow.Packets)
+		addTopItem(services, service.Name, flow.Bytes, flow.Packets)
+	}
+	return sortedTopItems(ips, limit), sortedTopItems(ports, limit), sortedTopItems(services, limit)
+}
+
+func addTopItem(items map[string]model.TopItem, key string, bytes, packets uint64) {
+	if key == "" {
+		return
+	}
+	item := items[key]
+	item.Key = key
+	item.Bytes += bytes
+	item.Packets += packets
+	items[key] = item
+}
+
+func sortedTopItems(items map[string]model.TopItem, limit int) []model.TopItem {
+	rows := make([]model.TopItem, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, item)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Bytes == rows[j].Bytes {
+			return rows[i].Key < rows[j].Key
+		}
+		return rows[i].Bytes > rows[j].Bytes
+	})
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
 func stringValue(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -2128,6 +2351,28 @@ func identifyService(port, proto string) serviceInfo {
 func isKnownServicePort(port string) bool {
 	_, ok := knownServices()[port]
 	return ok
+}
+
+func portsForServiceSelector(dimension, key string) []string {
+	ports := make([]string, 0)
+	for port, service := range knownServices() {
+		switch dimension {
+		case "service":
+			if strings.EqualFold(service.Name, key) {
+				ports = append(ports, port)
+			}
+		case "service_category":
+			if service.Category == key {
+				ports = append(ports, port)
+			}
+		case "service_risk":
+			if service.Risk == key {
+				ports = append(ports, port)
+			}
+		}
+	}
+	sort.Strings(ports)
+	return ports
 }
 
 func knownServices() map[string]serviceInfo {

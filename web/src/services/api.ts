@@ -214,6 +214,26 @@ export interface SecurityInsight {
   score: number;
 }
 
+export interface ObjectRelationSummary {
+  key: string;
+  bytes: number;
+  packets: number;
+  related_count: number;
+}
+
+export interface ObjectRelations {
+  dimension: string;
+  key: string;
+  direction: string;
+  minutes: number;
+  summary: ObjectRelationSummary;
+  related_ips: TopItem[];
+  related_ports: TopItem[];
+  related_services: TopItem[];
+  related_flows: TopItem[];
+  insights: SecurityInsight[];
+}
+
 export interface TrafficBaseline {
   windows: number;
   avg_bytes: number;
@@ -318,6 +338,11 @@ export const api = {
   async dimensionTimeseries(dimension = 'service', key = '', minutes = 15, direction = 'src', limit = 5) {
     return json<{ data: DimensionPoint[]; degraded: boolean }>(
       `/api/v1/traffic/dimension-timeseries?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}&direction=${encodeURIComponent(direction)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async objectRelations(dimension = 'service', key = '', minutes = 15, direction = 'src', limit = 8) {
+    return json<{ data: ObjectRelations; degraded: boolean }>(
+      `/api/v1/traffic/object-relations?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}&direction=${encodeURIComponent(direction)}&minutes=${minutes}&limit=${limit}`
     );
   },
   async search(q: string, minutes = 15, limit = 50) {

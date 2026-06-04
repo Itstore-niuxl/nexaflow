@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/port-timeseries", s.portTimeseries)
 	mux.HandleFunc("/api/v1/traffic/direction-timeseries", s.directionTimeseries)
 	mux.HandleFunc("/api/v1/traffic/dimension-timeseries", s.dimensionTimeseries)
+	mux.HandleFunc("/api/v1/traffic/object-relations", s.objectRelations)
 	mux.HandleFunc("/api/v1/traffic/search", s.search)
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
@@ -199,6 +200,18 @@ func (s *Server) dimensionTimeseries(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(q.Get("key"))
 	direction := strings.TrimSpace(q.Get("direction"))
 	data, err := s.store.DimensionTimeseries(r.Context(), dimension, key, direction, queryMinutes(r), queryLimit(r, 5, 20))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) objectRelations(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	dimension := strings.TrimSpace(q.Get("dimension"))
+	if dimension == "" {
+		dimension = "service"
+	}
+	key := strings.TrimSpace(q.Get("key"))
+	direction := strings.TrimSpace(q.Get("direction"))
+	data, err := s.store.ObjectRelations(r.Context(), dimension, key, direction, queryMinutes(r), queryLimit(r, 8, 30))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
