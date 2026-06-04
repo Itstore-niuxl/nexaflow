@@ -103,6 +103,9 @@ const selectedMode = ref('live_pcap');
 const selectedIface = ref('eth0');
 const selectedFilter = ref('ip or ip6');
 const whitelistSubject = ref('');
+const exposureSearch = ref('');
+const exposureRiskFilter = ref('all');
+const exposureCategoryFilter = ref('all');
 let timer: number | undefined;
 
 const navItems = [
@@ -551,6 +554,49 @@ const exposedServiceCount = computed(() => serviceExposure.value.length);
 const highRiskServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
 const unknownServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'observe').length);
 const exposureTotalBytes = computed(() => serviceExposure.value.reduce((sum, row) => sum + row.bytes, 0));
+const serviceRiskRank: Record<string, number> = {
+  critical: 5,
+  high: 4,
+  medium: 3,
+  low: 2,
+  observe: 1
+};
+const exposureRiskOptions = [
+  { value: 'all', label: '全部风险' },
+  { value: 'critical', label: '严重' },
+  { value: 'high', label: '高' },
+  { value: 'medium', label: '中' },
+  { value: 'low', label: '低' },
+  { value: 'observe', label: '观察' }
+];
+const exposureCategoryOptions = computed(() => {
+  const categories = Array.from(new Set(serviceExposure.value.map((row) => row.category).filter(Boolean))).sort();
+  return [{ value: 'all', label: '全部类别' }, ...categories.map((category) => ({ value: category, label: category }))];
+});
+const filteredServiceExposure = computed(() => {
+  const keyword = exposureSearch.value.trim().toLowerCase();
+  return serviceExposure.value
+    .filter((row) => {
+      if (exposureRiskFilter.value !== 'all' && row.risk !== exposureRiskFilter.value) return false;
+      if (exposureCategoryFilter.value !== 'all' && row.category !== exposureCategoryFilter.value) return false;
+      if (!keyword) return true;
+      return [
+        row.ip,
+        row.port,
+        row.protocol,
+        row.service,
+        row.category,
+        row.sample_client,
+        row.sample_flow
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(keyword);
+    })
+    .sort((a, b) => (serviceRiskRank[b.risk] ?? 0) - (serviceRiskRank[a.risk] ?? 0) || b.bytes - a.bytes);
+});
+const exposureFilteredCount = computed(() => filteredServiceExposure.value.length);
+const exposureFilteredBytes = computed(() => filteredServiceExposure.value.reduce((sum, row) => sum + row.bytes, 0));
 const assetTotalBytes = computed(() => assets.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const activeAssetCount = computed(() => assets.value.length);
 const serviceAssetCount = computed(() => assets.value.filter((row) => row.role === '服务端').length);
@@ -700,6 +746,15 @@ const serviceRiskText = (risk: string) => {
   return labels[risk] ?? risk;
 };
 
+const exposureSubject = (row: ServiceExposure) => `dst_port:${row.port}`;
+
+const exposureObject = (row: ServiceExposure) => `${row.ip}:${row.port} / ${row.protocol}`;
+
+const isExposureSilenced = (row: ServiceExposure) => {
+  const subject = exposureSubject(row);
+  return Boolean(alertConfig.value.silenced_subjects?.includes(subject));
+};
+
 const formatTime = (ts: number) => {
   if (!ts) return '-';
   return new Date(ts * 1000).toLocaleString();
@@ -806,6 +861,51 @@ const removeSilence = async (subject: string) => {
   } finally {
     handlingAlert.value = false;
   }
+};
+
+const openExposureIP = async (row: ServiceExposure) => {
+  profileIP.value = row.ip;
+  currentView.value = 'profile';
+  await loadProfile();
+};
+
+const openExposurePort = async (row: ServiceExposure) => {
+  profilePort.value = row.port;
+  currentView.value = 'port';
+  await loadPortProfile();
+};
+
+const searchExposureFlow = async (row: ServiceExposure) => {
+  searchTerm.value = row.sample_flow || `${row.ip}:${row.port}`;
+  currentView.value = 'search';
+  await runSearch();
+};
+
+const resetExposureFilters = () => {
+  exposureSearch.value = '';
+  exposureRiskFilter.value = 'all';
+  exposureCategoryFilter.value = 'all';
+};
+
+const exportServiceExposure = () => {
+  const rows = [
+    ['服务对象', 'IP', '端口', '协议', '服务', '类别', '风险', '客户端数', '流量字节', '包数', '样例客户端', '样例会话'],
+    ...filteredServiceExposure.value.map((row) => [
+      exposureObject(row),
+      row.ip,
+      row.port,
+      row.protocol,
+      row.service,
+      row.category,
+      serviceRiskText(row.risk),
+      String(row.client_count),
+      String(row.bytes),
+      String(row.packets),
+      row.sample_client,
+      row.sample_flow
+    ])
+  ];
+  exportCSV(`nexaflow-service-exposure-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportWindows = () => {
@@ -1255,6 +1355,29 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <section class="toolbar-panel exposure-toolbar">
+          <label class="filter-field">
+            <span>服务搜索</span>
+            <input v-model="exposureSearch" placeholder="搜索 IP、端口、服务、类别或会话" />
+          </label>
+          <label>
+            <span>风险级别</span>
+            <select v-model="exposureRiskFilter">
+              <option v-for="option in exposureRiskOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label>
+            <span>服务类别</span>
+            <select v-model="exposureCategoryFilter">
+              <option v-for="option in exposureCategoryOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <button type="button" @click="resetExposureFilters">重置</button>
+          <button class="command-button" type="button" @click="exportServiceExposure">导出结果</button>
+          <div class="toolbar-summary">
+            匹配 {{ exposureFilteredCount.toLocaleString() }} 项 / {{ formatBytes(exposureFilteredBytes) }}
+          </div>
+        </section>
         <section class="table-panel wide-key-table exposure-table">
           <h2>服务暴露面</h2>
           <table>
@@ -1268,11 +1391,12 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <th>流量</th>
                 <th>包数</th>
                 <th>样例会话</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in serviceExposure" :key="`${row.ip}-${row.port}-${row.protocol}`">
-                <td>{{ row.ip }}:{{ row.port }} / {{ row.protocol }}</td>
+              <tr v-for="row in filteredServiceExposure" :key="`${row.ip}-${row.port}-${row.protocol}`">
+                <td>{{ exposureObject(row) }}</td>
                 <td>{{ row.service }}</td>
                 <td>{{ row.category }}</td>
                 <td>
@@ -1282,9 +1406,25 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatBytes(row.bytes) }}</td>
                 <td>{{ row.packets.toLocaleString() }}</td>
                 <td>{{ row.sample_flow }}</td>
+                <td>
+                  <div class="row-actions">
+                    <button class="inline-button" type="button" @click="openExposureIP(row)">IP</button>
+                    <button class="inline-button" type="button" @click="openExposurePort(row)">端口</button>
+                    <button class="inline-button" type="button" @click="searchExposureFlow(row)">检索</button>
+                    <button
+                      class="inline-button"
+                      type="button"
+                      :disabled="handlingAlert || isExposureSilenced(row)"
+                      @click="silenceSubject(exposureSubject(row))"
+                    >
+                      {{ isExposureSilenced(row) ? '已忽略' : '忽略端口' }}
+                    </button>
+                  </div>
+                </td>
               </tr>
             </tbody>
           </table>
+          <div v-if="!filteredServiceExposure.length" class="empty-state">暂无匹配的服务暴露数据</div>
         </section>
       </template>
 

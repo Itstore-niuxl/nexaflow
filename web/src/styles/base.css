@@ -350,6 +350,14 @@ h2 {
   color: #dff9ff;
 }
 
+.toolbar-summary {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  color: #8ea3bd;
+  font-size: 13px;
+}
+
 .toolbar-panel button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
@@ -360,6 +368,10 @@ h2 {
 }
 
 .profile-toolbar {
+  align-items: end;
+}
+
+.exposure-toolbar {
   align-items: end;
 }
 
@@ -393,6 +405,17 @@ h2 {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.row-actions .inline-button {
+  min-width: 52px;
 }
 
 .muted-text {
@@ -652,10 +675,15 @@ th {
 
 .exposure-table th:nth-child(8),
 .exposure-table td:nth-child(8) {
-  width: 28%;
+  width: 24%;
   white-space: normal;
   word-break: break-word;
   text-align: left;
+}
+
+.exposure-table th:nth-child(9),
+.exposure-table td:nth-child(9) {
+  width: 180px;
 }
 
 .change-table table {
