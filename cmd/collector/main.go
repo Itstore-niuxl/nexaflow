@@ -10,6 +10,7 @@ import (
 
 	"nexaflow/internal/aggregate"
 	"nexaflow/internal/capture/mock"
+	"nexaflow/internal/capture/pcap"
 	"nexaflow/internal/capture/raw"
 	"nexaflow/internal/config"
 	"nexaflow/internal/model"
@@ -88,7 +89,7 @@ func runCaptureManager(ctx context.Context, path string, fallback config.Capture
 			return
 		case <-ticker.C:
 			next := config.LoadRuntime(path, fallback)
-			if next.Mode != active.Mode || next.Iface != active.Iface || next.SourceID != active.SourceID || next.BPFFilter != active.BPFFilter {
+			if next.Mode != active.Mode || next.Iface != active.Iface || next.SourceID != active.SourceID || next.BPFFilter != active.BPFFilter || next.PcapFile != active.PcapFile || next.ReplaySpeed != active.ReplaySpeed {
 				start(next)
 			}
 		}
@@ -102,6 +103,10 @@ func runCapture(ctx context.Context, runtime config.CaptureRuntime, packets chan
 	case "live_pcap":
 		if err := raw.NewLive(runtime.SourceID, runtime.Iface, runtime.BPFFilter).Run(ctx, packets); err != nil && ctx.Err() == nil {
 			log.Printf("live capture stopped: %v", err)
+		}
+	case "pcap_replay":
+		if err := pcap.New(runtime.SourceID, runtime.Iface, runtime.PcapFile, runtime.ReplaySpeed, runtime.BPFFilter).Run(ctx, packets); err != nil && ctx.Err() == nil {
+			log.Printf("pcap replay stopped: %v", err)
 		}
 	default:
 		log.Printf("mode %q is not implemented, falling back to mock", runtime.Mode)

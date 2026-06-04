@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"nexaflow/internal/config"
+	"nexaflow/internal/model"
 	"nexaflow/internal/storage/clickhouse"
 )
 
@@ -26,6 +28,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/readyz", s.health)
+	mux.HandleFunc("/metrics", s.metrics)
 	mux.HandleFunc("/api/v1/dashboard/summary", s.summary)
 	mux.HandleFunc("/api/v1/traffic/topn", s.topn)
 	mux.HandleFunc("/api/v1/traffic/timeseries", s.timeseries)
@@ -57,6 +60,38 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"status": "ok"})
+}
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	statusData, statusErr := s.store.Status(r.Context())
+	summary, summaryErr := s.store.Summary(r.Context(), 5)
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	dbOK := 1
+	if statusErr != nil || summaryErr != nil {
+		dbOK = 0
+	}
+	collectorOnline := 0
+	if collectorStatus(statusData) == "online" {
+		collectorOnline = 1
+	}
+	_, _ = w.Write([]byte("# HELP nexaflow_database_ok ClickHouse query health.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_database_ok gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_database_ok " + strconv.Itoa(dbOK) + "\n"))
+	_, _ = w.Write([]byte("# HELP nexaflow_collector_online Collector recent-window health.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_collector_online gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_collector_online " + strconv.Itoa(collectorOnline) + "\n"))
+	_, _ = w.Write([]byte("# HELP nexaflow_latest_window_timestamp_seconds Latest collector window timestamp.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_latest_window_timestamp_seconds gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_latest_window_timestamp_seconds " + strconv.FormatInt(int64Value(statusData["latest_window_ts"]), 10) + "\n"))
+	_, _ = w.Write([]byte("# HELP nexaflow_windows_24h_total Number of 5-second windows in the last 24 hours.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_windows_24h_total gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_windows_24h_total " + strconv.FormatInt(int64Value(statusData["windows_24h"]), 10) + "\n"))
+	_, _ = w.Write([]byte("# HELP nexaflow_recent_bytes_total Recent traffic bytes over five minutes.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_recent_bytes_total gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_recent_bytes_total " + strconv.FormatInt(int64Value(summary["bytes"]), 10) + "\n"))
+	_, _ = w.Write([]byte("# HELP nexaflow_recent_packets_total Recent traffic packets over five minutes.\n"))
+	_, _ = w.Write([]byte("# TYPE nexaflow_recent_packets_total gauge\n"))
+	_, _ = w.Write([]byte("nexaflow_recent_packets_total " + strconv.FormatInt(int64Value(summary["packets"]), 10) + "\n"))
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
@@ -209,17 +244,21 @@ func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
-func (s *Server) collectors(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	statusData, _ := s.store.Status(r.Context())
+	status := collectorStatus(statusData)
 	writeJSON(w, map[string]any{
 		"data": []map[string]any{{
-			"id":         s.config.CollectorID,
-			"source_id":  runtime.SourceID,
-			"status":     "online",
-			"mode":       runtime.Mode,
-			"iface":      runtime.Iface,
-			"bpf_filter": runtime.BPFFilter,
-			"updated_at": runtime.UpdatedAt,
+			"id":           s.config.CollectorID,
+			"source_id":    runtime.SourceID,
+			"status":       status,
+			"mode":         runtime.Mode,
+			"iface":        runtime.Iface,
+			"bpf_filter":   runtime.BPFFilter,
+			"pcap_file":    runtime.PcapFile,
+			"replay_speed": runtime.ReplaySpeed,
+			"updated_at":   runtime.UpdatedAt,
 		}},
 	})
 }
@@ -247,6 +286,12 @@ func (s *Server) collectorConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.BPFFilter == "" {
 		body.BPFFilter = current.BPFFilter
+	}
+	if body.PcapFile == "" {
+		body.PcapFile = current.PcapFile
+	}
+	if body.ReplaySpeed <= 0 {
+		body.ReplaySpeed = current.ReplaySpeed
 	}
 	if alertsEmpty(body.Alerts) {
 		body.Alerts = current.Alerts
@@ -290,6 +335,13 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data, err := s.store.Alerts(r.Context(), limit, queryMinutes(r))
+	statusData, _ := s.store.Status(r.Context())
+	if alert := collectorHealthAlert(s.config.CollectorID, statusData); alert.ID != "" {
+		data = append([]model.AlertEvent{alert}, data...)
+		if len(data) > limit {
+			data = data[:limit]
+		}
+	}
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -373,14 +425,18 @@ func (s *Server) alertSilences(w http.ResponseWriter, r *http.Request) {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	data, err := s.store.Status(r.Context())
+	status := collectorStatus(data)
 	data["collector"] = map[string]any{
-		"id":         s.config.CollectorID,
-		"source_id":  runtime.SourceID,
-		"mode":       runtime.Mode,
-		"iface":      runtime.Iface,
-		"bpf_filter": runtime.BPFFilter,
-		"alerts":     runtime.Alerts,
-		"updated_at": runtime.UpdatedAt,
+		"id":           s.config.CollectorID,
+		"source_id":    runtime.SourceID,
+		"status":       status,
+		"mode":         runtime.Mode,
+		"iface":        runtime.Iface,
+		"bpf_filter":   runtime.BPFFilter,
+		"pcap_file":    runtime.PcapFile,
+		"replay_speed": runtime.ReplaySpeed,
+		"alerts":       runtime.Alerts,
+		"updated_at":   runtime.UpdatedAt,
 	}
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
@@ -393,7 +449,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -476,6 +532,49 @@ func stringValue(v any) string {
 		return s
 	}
 	return ""
+}
+
+func int64Value(v any) int64 {
+	switch value := v.(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case uint64:
+		return int64(value)
+	case float64:
+		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func collectorStatus(status map[string]any) string {
+	latest := int64Value(status["latest_window_ts"])
+	if latest == 0 || time.Now().Unix()-latest > 30 {
+		return "offline"
+	}
+	return "online"
+}
+
+func collectorHealthAlert(collectorID string, status map[string]any) model.AlertEvent {
+	if collectorStatus(status) == "online" {
+		return model.AlertEvent{}
+	}
+	now := time.Now().Unix()
+	lastSeen := int64Value(status["latest_window_ts"])
+	if lastSeen == 0 {
+		lastSeen = now
+	}
+	return model.AlertEvent{
+		ID:        "collector-offline-" + collectorID,
+		Severity:  "critical",
+		Status:    "open",
+		Subject:   collectorID,
+		Summary:   "Collector 超过 30 秒未产生新采集窗口",
+		FirstSeen: lastSeen,
+		LastSeen:  now,
+	}
 }
 
 func alertsEmpty(alerts config.Alerts) bool {

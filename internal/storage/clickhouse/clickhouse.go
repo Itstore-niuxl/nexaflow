@@ -77,6 +77,84 @@ ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (source_id, dimension, ts, dim_key)
 TTL ts + INTERVAL 7 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.link_traffic_1m
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    bytes UInt64,
+    packets UInt64,
+    drops UInt64,
+    utilization Float64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, iface, ts)
+TTL ts + INTERVAL 30 DAY`,
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS ` + s.database + `.mv_link_traffic_1m
+TO ` + s.database + `.link_traffic_1m
+AS SELECT
+    toStartOfMinute(ts) AS ts,
+    source_id,
+    iface,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    sum(drops) AS drops,
+    max(utilization) AS utilization
+FROM ` + s.database + `.link_traffic_5s
+GROUP BY ts, source_id, iface`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.ip_traffic_1m
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    ip String,
+    direction LowCardinality(String),
+    bytes UInt64,
+    packets UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, direction, ts, ip)
+TTL ts + INTERVAL 30 DAY`,
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS ` + s.database + `.mv_ip_traffic_1m
+TO ` + s.database + `.ip_traffic_1m
+AS SELECT
+    toStartOfMinute(ts) AS ts,
+    source_id,
+    iface,
+    ip,
+    direction,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets
+FROM ` + s.database + `.ip_traffic_5s
+GROUP BY ts, source_id, iface, ip, direction`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.dimension_traffic_1m
+(
+    ts DateTime,
+    source_id LowCardinality(String),
+    iface LowCardinality(String),
+    dimension LowCardinality(String),
+    dim_key String,
+    bytes UInt64,
+    packets UInt64
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (source_id, dimension, ts, dim_key)
+TTL ts + INTERVAL 30 DAY`,
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS ` + s.database + `.mv_dimension_traffic_1m
+TO ` + s.database + `.dimension_traffic_1m
+AS SELECT
+    toStartOfMinute(ts) AS ts,
+    source_id,
+    iface,
+    dimension,
+    dim_key,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets
+FROM ` + s.database + `.dimension_traffic_5s
+GROUP BY ts, source_id, iface, dimension, dim_key`,
 		`CREATE TABLE IF NOT EXISTS ` + s.database + `.alert_events
 (
     id String,

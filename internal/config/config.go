@@ -21,17 +21,21 @@ type Config struct {
 	Database      string
 	BandwidthMbps uint64
 	BPFFilter     string
+	PcapFile      string
+	ReplaySpeed   float64
 	RuntimePath   string
 	HostNetPath   string
 }
 
 type CaptureRuntime struct {
-	Mode      string `json:"mode"`
-	Iface     string `json:"iface"`
-	SourceID  string `json:"source_id"`
-	BPFFilter string `json:"bpf_filter"`
-	Alerts    Alerts `json:"alerts"`
-	UpdatedAt int64  `json:"updated_at"`
+	Mode        string  `json:"mode"`
+	Iface       string  `json:"iface"`
+	SourceID    string  `json:"source_id"`
+	BPFFilter   string  `json:"bpf_filter"`
+	PcapFile    string  `json:"pcap_file"`
+	ReplaySpeed float64 `json:"replay_speed"`
+	Alerts      Alerts  `json:"alerts"`
+	UpdatedAt   int64   `json:"updated_at"`
 }
 
 type Alerts struct {
@@ -55,6 +59,8 @@ func Load() Config {
 		Database:      env("NEXAFLOW_CLICKHOUSE_DB", "nexaflow"),
 		BandwidthMbps: envUint64("NEXAFLOW_BANDWIDTH_MBPS", 1000),
 		BPFFilter:     env("NEXAFLOW_BPF_FILTER", "ip or ip6"),
+		PcapFile:      env("NEXAFLOW_PCAP_FILE", "/var/lib/nexaflow/replay.pcap"),
+		ReplaySpeed:   envFloat64("NEXAFLOW_REPLAY_SPEED", 1),
 		RuntimePath:   env("NEXAFLOW_RUNTIME_CONFIG", "/var/lib/nexaflow/collector_config.json"),
 		HostNetPath:   env("NEXAFLOW_HOST_NET_PATH", "/host/sys/class/net"),
 	}
@@ -68,8 +74,10 @@ func Load() Config {
 	flag.StringVar(&cfg.ClickHouseURL, "clickhouse-url", cfg.ClickHouseURL, "ClickHouse HTTP URL")
 	flag.StringVar(&cfg.Database, "clickhouse-db", cfg.Database, "ClickHouse database")
 	flag.StringVar(&cfg.BPFFilter, "bpf-filter", cfg.BPFFilter, "BPF filter for live pcap mode")
+	flag.StringVar(&cfg.PcapFile, "pcap-file", cfg.PcapFile, "pcap file for pcap_replay mode")
 	flag.StringVar(&cfg.RuntimePath, "runtime-config", cfg.RuntimePath, "collector runtime config path")
 	flag.Uint64Var(&cfg.BandwidthMbps, "bandwidth-mbps", cfg.BandwidthMbps, "link bandwidth in Mbps")
+	flag.Float64Var(&cfg.ReplaySpeed, "replay-speed", cfg.ReplaySpeed, "pcap replay speed multiplier")
 	flag.Parse()
 
 	return cfg
@@ -81,12 +89,14 @@ func DefaultRuntime(cfg Config) CaptureRuntime {
 		sourceID = cfg.Mode + "-" + cfg.Iface
 	}
 	return CaptureRuntime{
-		Mode:      cfg.Mode,
-		Iface:     cfg.Iface,
-		SourceID:  sourceID,
-		BPFFilter: cfg.BPFFilter,
-		Alerts:    defaultAlerts(),
-		UpdatedAt: time.Now().Unix(),
+		Mode:        cfg.Mode,
+		Iface:       cfg.Iface,
+		SourceID:    sourceID,
+		BPFFilter:   cfg.BPFFilter,
+		PcapFile:    cfg.PcapFile,
+		ReplaySpeed: cfg.ReplaySpeed,
+		Alerts:      defaultAlerts(),
+		UpdatedAt:   time.Now().Unix(),
 	}
 }
 
@@ -131,6 +141,12 @@ func normalizeRuntime(runtime CaptureRuntime) CaptureRuntime {
 	}
 	if runtime.BPFFilter == "" {
 		runtime.BPFFilter = "ip or ip6"
+	}
+	if runtime.PcapFile == "" {
+		runtime.PcapFile = "/var/lib/nexaflow/replay.pcap"
+	}
+	if runtime.ReplaySpeed <= 0 {
+		runtime.ReplaySpeed = 1
 	}
 	runtime.Alerts = normalizeAlerts(runtime.Alerts)
 	return runtime
@@ -208,6 +224,15 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 func envUint64(key string, fallback uint64) uint64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envFloat64(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
 			return n
 		}
 	}

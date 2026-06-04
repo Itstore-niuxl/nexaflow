@@ -23,6 +23,8 @@ export interface Collector {
   mode: string;
   iface?: string;
   bpf_filter?: string;
+  pcap_file?: string;
+  replay_speed?: number;
   updated_at?: number;
 }
 
@@ -47,6 +49,8 @@ export interface CollectorConfig {
   iface: string;
   source_id: string;
   bpf_filter: string;
+  pcap_file?: string;
+  replay_speed?: number;
   updated_at?: number;
 }
 

@@ -106,6 +106,8 @@ const profilePort = ref('8081');
 const selectedMode = ref('live_pcap');
 const selectedIface = ref('eth0');
 const selectedFilter = ref('ip or ip6');
+const selectedPcapFile = ref('/var/lib/nexaflow/replay.pcap');
+const selectedReplaySpeed = ref(1);
 const whitelistSubject = ref('');
 const exposureSearch = ref('');
 const exposureRiskFilter = ref('all');
@@ -286,6 +288,8 @@ const refresh = async () => {
       selectedMode.value = collectorRes.data[0].mode;
       selectedIface.value = collectorRes.data[0].iface ?? selectedIface.value;
       selectedFilter.value = collectorRes.data[0].bpf_filter ?? selectedFilter.value;
+      selectedPcapFile.value = collectorRes.data[0].pcap_file ?? selectedPcapFile.value;
+      selectedReplaySpeed.value = collectorRes.data[0].replay_speed ?? selectedReplaySpeed.value;
     }
     degraded.value = nextDegraded;
   } catch {
@@ -805,7 +809,9 @@ const applyCaptureConfig = async () => {
       mode: selectedMode.value,
       iface: selectedIface.value,
       source_id: `${selectedMode.value}-${selectedIface.value}`,
-      bpf_filter: selectedFilter.value.trim() || 'ip or ip6'
+      bpf_filter: selectedFilter.value.trim() || 'ip or ip6',
+      pcap_file: selectedPcapFile.value.trim() || '/var/lib/nexaflow/replay.pcap',
+      replay_speed: selectedReplaySpeed.value || 1
     };
     await api.updateCollectorConfig(config);
     await refresh();
@@ -1946,6 +1952,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <span>采集模式</span>
             <select v-model="selectedMode">
               <option value="live_pcap">网卡采集</option>
+              <option value="pcap_replay">PCAP 回放</option>
               <option value="mock">模拟流量</option>
             </select>
           </label>
@@ -1960,6 +1967,14 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <label class="filter-field">
             <span>采集过滤</span>
             <input v-model="selectedFilter" placeholder="ip or ip6 / tcp / port 443 / host 1.1.1.1" />
+          </label>
+          <label class="filter-field">
+            <span>PCAP 文件</span>
+            <input v-model="selectedPcapFile" placeholder="/var/lib/nexaflow/replay.pcap" />
+          </label>
+          <label>
+            <span>回放倍率</span>
+            <input v-model.number="selectedReplaySpeed" type="number" min="0.1" step="0.1" />
           </label>
           <button type="button" :disabled="switching" @click="applyCaptureConfig">
             {{ switching ? '切换中...' : '应用采集配置' }}
@@ -1990,6 +2005,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div><span>采集网卡</span><strong>{{ collector.iface ?? '-' }}</strong></div>
               <div><span>采集模式</span><strong>{{ modeText(collector.mode) }}</strong></div>
               <div><span>采集过滤</span><strong>{{ collector.bpf_filter ?? '-' }}</strong></div>
+              <div><span>PCAP 文件</span><strong>{{ collector.pcap_file ?? '-' }}</strong></div>
+              <div><span>回放倍率</span><strong>{{ collector.replay_speed ?? 1 }}x</strong></div>
               <div><span>配置更新时间</span><strong>{{ formatTime(collector.updated_at ?? 0) }}</strong></div>
               <div><span>窗口大小</span><strong>5 秒</strong></div>
               <div><span>数据链路</span><strong>Redis / ClickHouse</strong></div>

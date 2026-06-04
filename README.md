@@ -3,17 +3,19 @@
 NexaFlow is a v0.1 traffic analysis PoC focused on the core path:
 
 ```text
-mock packets -> 5s aggregation -> Redis / ClickHouse -> Go API -> Vue dashboard
+mock / pcap replay / live NIC -> 5s aggregation -> Redis / ClickHouse -> Go API -> Vue console
 ```
 
 ## Current Scope
 
-- Go collector with mock traffic generation.
+- Go collector with mock traffic generation, classic pcap replay, and Linux live NIC capture.
 - 5 second window aggregation.
+- 1 minute ClickHouse rollup tables and materialized views.
 - ClickHouse writes through HTTP.
 - Redis realtime TopN writes through RESP.
-- Go API for summary, timeseries, TopN, health.
-- Vue 3 dashboard.
+- Go API for summary, timeseries, TopN, profiles, assets, alerts, health, and `/metrics`.
+- Vue 3 console with live monitoring, traffic analysis, service exposure, asset inventory, alerts, search, history, and collector controls.
+- Collector online/offline health is inferred from the latest 5 second window.
 
 ## Local Development
 
@@ -42,9 +44,9 @@ npm run dev
 The Ubuntu validation server is driven from local scripts:
 
 ```bash
-./scripts/sync_to_server.sh
-./scripts/server_compose.sh up --build -d
-./scripts/list_server_interfaces.sh
+NEXAFLOW_REMOTE_HOST=<ubuntu-ip> ./scripts/sync_to_server.sh
+NEXAFLOW_REMOTE_HOST=<ubuntu-ip> ./scripts/server_compose.sh up --build -d
+NEXAFLOW_REMOTE_HOST=<ubuntu-ip> ./scripts/list_server_interfaces.sh
 ```
 
 The web console can switch the collector mode and interface from the `采集器` page. The same operation is available from the command line:
@@ -55,3 +57,23 @@ The web console can switch the collector mode and interface from the `采集器`
 ```
 
 The current live mode uses Linux `AF_PACKET` raw socket capture and writes 5-second windows to ClickHouse.
+
+PCAP replay expects a classic Ethernet `.pcap` file inside the runtime volume, for example:
+
+```bash
+scp sample.pcap ubuntu@<ubuntu-ip>:/home/ubuntu/nexaflow/runtime/replay.pcap
+```
+
+Then switch the collector from the Web `采集器` page or post:
+
+```bash
+curl -X POST http://<ubuntu-ip>:8081/api/v1/collectors/config \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"pcap_replay","iface":"replay0","source_id":"pcap-replay0","bpf_filter":"ip or ip6","pcap_file":"/var/lib/nexaflow/replay.pcap","replay_speed":5}'
+```
+
+Prometheus-style metrics are available at:
+
+```text
+http://<ubuntu-ip>:8081/metrics
+```
