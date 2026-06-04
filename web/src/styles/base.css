@@ -907,6 +907,8 @@ td {
 .data-quality-table table,
 .data-gap-table table,
 .capacity-growth-table table,
+.service-analytics-table table,
+.service-port-table table,
 .change-table table {
   table-layout: fixed;
 }
@@ -942,6 +944,14 @@ td {
 
 .capacity-growth-table table {
   min-width: 1080px;
+}
+
+.service-analytics-table table {
+  min-width: 1480px;
+}
+
+.service-port-table table {
+  min-width: 1120px;
 }
 
 .anomaly-table table {
@@ -1115,6 +1125,21 @@ td {
   white-space: normal;
   word-break: break-word;
   text-align: left;
+}
+
+.service-analytics-table th:nth-child(10),
+.service-analytics-table td:nth-child(10),
+.service-port-table th:nth-child(8),
+.service-port-table td:nth-child(8) {
+  width: 24%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+.service-analytics-table th:nth-child(11),
+.service-analytics-table td:nth-child(11) {
+  width: 180px;
 }
 
 .asset-risk-table th:first-child,

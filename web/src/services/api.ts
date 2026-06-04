@@ -228,6 +228,55 @@ export interface ServiceExposure {
   sample_flow: string;
 }
 
+export interface ServiceAnalyticsSummary {
+  service_count: number;
+  category_count: number;
+  high_risk_services: number;
+  total_bytes: number;
+  total_packets: number;
+  top_service: string;
+  top_risk: string;
+}
+
+export interface ServiceAnalyticsPort {
+  service: string;
+  port: string;
+  protocol: string;
+  category: string;
+  risk: string;
+  bytes: number;
+  packets: number;
+  sample_flow: string;
+  last_seen: number;
+}
+
+export interface ServiceAnalyticsDetail {
+  service: string;
+  category: string;
+  risk: string;
+  bytes: number;
+  packets: number;
+  client_count: number;
+  server_count: number;
+  session_count: number;
+  top_port: string;
+  sample_flow: string;
+  first_seen: number;
+  last_seen: number;
+}
+
+export interface ServiceAnalytics {
+  generated_at: number;
+  minutes: number;
+  summary: ServiceAnalyticsSummary;
+  services: TopItem[];
+  categories: TopItem[];
+  risks: TopItem[];
+  growth: TrafficChange[];
+  ports: ServiceAnalyticsPort[];
+  details: ServiceAnalyticsDetail[];
+}
+
 export interface ExternalAccess {
   public_ip: string;
   internal_ip: string;
@@ -634,6 +683,9 @@ export const api = {
   },
   async serviceMap(minutes = 15, limit = 50) {
     return json<{ data: ServiceMap; degraded: boolean }>(`/api/v1/traffic/service-map?minutes=${minutes}&limit=${limit}`);
+  },
+  async serviceAnalytics(minutes = 15, limit = 12) {
+    return json<{ data: ServiceAnalytics; degraded: boolean }>(`/api/v1/traffic/service-analytics?minutes=${minutes}&limit=${limit}`);
   },
   async serviceExposure(minutes = 15, limit = 50) {
     return json<{ data: ServiceExposure[]; degraded: boolean }>(

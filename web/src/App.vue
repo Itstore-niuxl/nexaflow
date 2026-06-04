@@ -62,6 +62,7 @@ import {
   type SecurityIncident,
   type SecurityIncidentContext,
   type IncidentTimelineEntry,
+  type ServiceAnalytics,
   type ServiceExposure,
   type ServiceMap,
   type SessionRow,
@@ -136,6 +137,26 @@ const portProfile = ref<PortProfile>({ port: '8081', minutes: 15, bytes: 0, pack
 const historyWindows = ref<WindowRow[]>([]);
 const matrixRows = ref<MatrixRow[]>([]);
 const serviceMap = ref<ServiceMap>({ nodes: [], links: [] });
+const emptyServiceAnalytics = (): ServiceAnalytics => ({
+  generated_at: 0,
+  minutes: 15,
+  summary: {
+    service_count: 0,
+    category_count: 0,
+    high_risk_services: 0,
+    total_bytes: 0,
+    total_packets: 0,
+    top_service: '-',
+    top_risk: '-'
+  },
+  services: [],
+  categories: [],
+  risks: [],
+  growth: [],
+  ports: [],
+  details: []
+});
+const serviceAnalytics = ref<ServiceAnalytics>(emptyServiceAnalytics());
 const serviceExposure = ref<ServiceExposure[]>([]);
 const externalAccess = ref<ExternalAccess[]>([]);
 const protocolSeries = ref<ProtocolPoint[]>([]);
@@ -310,6 +331,7 @@ const navGroups = [
     items: [
       { id: 'analysis', label: '流向分析', icon: Route },
       { id: 'anomalies', label: '异常波动', icon: AlertTriangle },
+      { id: 'service-analytics', label: '应用分析', icon: ServerCog },
       { id: 'topology', label: '服务拓扑', icon: Network },
       { id: 'topn', label: 'TopN 分析', icon: ListOrdered },
       { id: 'sessions', label: '会话追踪', icon: Waypoints },
@@ -349,6 +371,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
+  'service-analytics': { title: '应用分析', subtitle: '按应用服务聚合类别、风险、增长、端口和会话样例' },
   topology: { title: '服务拓扑', subtitle: '基于主机对流量构建节点和链路视图' },
   exposure: { title: '服务暴露', subtitle: '识别目的 IP 上的服务端口、协议、服务类型和风险级别' },
   external: { title: '公网访问', subtitle: '聚合公网对端、内部资产、访问方向、服务端口和风险' },
@@ -413,6 +436,7 @@ const refresh = async () => {
       alertConfigRes,
       matrixRes,
       serviceMapRes,
+      serviceAnalyticsRes,
       serviceExposureRes,
       externalAccessRes,
       protocolSeriesRes,
@@ -454,6 +478,7 @@ const refresh = async () => {
       api.alertConfig(),
       api.matrix(minutes, 80),
       api.serviceMap(minutes, 80),
+      api.serviceAnalytics(minutes, 12),
       api.serviceExposure(minutes, 120),
       api.externalAccess(minutes, 160),
       api.protocolTimeseries(minutes),
@@ -496,6 +521,7 @@ const refresh = async () => {
     detectionRules.value = alertConfigRes.data.detection_rules ?? [];
     matrixRows.value = matrixRes.data;
     serviceMap.value = serviceMapRes.data;
+    serviceAnalytics.value = serviceAnalyticsRes.data;
     serviceExposure.value = serviceExposureRes.data;
     externalAccess.value = externalAccessRes.data;
     protocolSeries.value = protocolSeriesRes.data;
@@ -529,6 +555,7 @@ const refresh = async () => {
       windowsRes.degraded ||
       matrixRes.degraded ||
       serviceMapRes.degraded ||
+      serviceAnalyticsRes.degraded ||
       serviceExposureRes.degraded ||
       externalAccessRes.degraded ||
       protocolSeriesRes.degraded ||
@@ -766,6 +793,111 @@ const refresh = async () => {
         { ip: '172.20.2.10', bytes: 52000000, packets: 18000 }
       ],
       links: matrixRows.value
+    };
+    serviceAnalytics.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      summary: {
+        service_count: 3,
+        category_count: 3,
+        high_risk_services: 1,
+        total_bytes: 111000000,
+        total_packets: 67200,
+        top_service: 'HTTPS',
+        top_risk: 'low'
+      },
+      services: [
+        { key: 'HTTPS', bytes: 88000000, packets: 48000 },
+        { key: 'SSH', bytes: 18000000, packets: 7200 },
+        { key: 'DNS', bytes: 5000000, packets: 12000 }
+      ],
+      categories: [
+        { key: 'Web', bytes: 88000000, packets: 48000 },
+        { key: '远程管理', bytes: 18000000, packets: 7200 },
+        { key: '基础网络', bytes: 5000000, packets: 12000 }
+      ],
+      risks: [
+        { key: 'low', bytes: 93000000, packets: 60000 },
+        { key: 'high', bytes: 18000000, packets: 7200 }
+      ],
+      growth: [
+        {
+          dimension: 'service',
+          key: 'HTTPS',
+          current_bytes: 88000000,
+          previous_bytes: 52000000,
+          delta_bytes: 36000000,
+          current_packets: 48000,
+          previous_packets: 31000,
+          delta_packets: 17000,
+          change_ratio: 0.69
+        },
+        {
+          dimension: 'service',
+          key: 'SSH',
+          current_bytes: 18000000,
+          previous_bytes: 0,
+          delta_bytes: 18000000,
+          current_packets: 7200,
+          previous_packets: 0,
+          delta_packets: 7200,
+          change_ratio: 0
+        }
+      ],
+      ports: [
+        {
+          service: 'HTTPS',
+          port: '443',
+          protocol: 'tcp',
+          category: 'Web',
+          risk: 'low',
+          bytes: 88000000,
+          packets: 48000,
+          sample_flow: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp',
+          last_seen: now
+        },
+        {
+          service: 'SSH',
+          port: '22',
+          protocol: 'tcp',
+          category: '远程管理',
+          risk: 'high',
+          bytes: 18000000,
+          packets: 7200,
+          sample_flow: '10.10.1.77:53192 -> 172.20.2.81:22 / tcp',
+          last_seen: now - 10
+        }
+      ],
+      details: [
+        {
+          service: 'HTTPS',
+          category: 'Web',
+          risk: 'low',
+          bytes: 88000000,
+          packets: 48000,
+          client_count: 7,
+          server_count: 3,
+          session_count: 14,
+          top_port: '443/tcp',
+          sample_flow: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp',
+          first_seen: now - selectedMinutes.value * 60,
+          last_seen: now
+        },
+        {
+          service: 'SSH',
+          category: '远程管理',
+          risk: 'high',
+          bytes: 18000000,
+          packets: 7200,
+          client_count: 2,
+          server_count: 1,
+          session_count: 3,
+          top_port: '22/tcp',
+          sample_flow: '10.10.1.77:53192 -> 172.20.2.81:22 / tcp',
+          first_seen: now - 600,
+          last_seen: now - 10
+        }
+      ]
     };
     serviceExposure.value = [
       {
@@ -1399,6 +1531,17 @@ const profileTotalPackets = computed(() => ipProfile.value.inbound_packets + ipP
 const topologyTotalBytes = computed(() => matrixRows.value.reduce((sum, row) => sum + row.bytes, 0));
 const topologyNodeCount = computed(() => serviceMap.value.nodes.length);
 const topTopologyLink = computed(() => matrixRows.value[0]);
+const serviceAnalyticsGrowthItems = computed(() =>
+  serviceAnalytics.value.growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
+);
+const serviceAnalyticsPortItems = computed(() =>
+  serviceAnalytics.value.ports.map((row) => ({ key: `${row.service} / ${row.port}`, bytes: row.bytes, packets: row.packets }))
+);
+const serviceAnalyticsHighRiskItems = computed(() =>
+  serviceAnalytics.value.details
+    .filter((row) => serviceRiskRank[row.risk] >= serviceRiskRank.high)
+    .map((row) => ({ key: row.service, bytes: row.bytes, packets: row.packets }))
+);
 const exposedServiceCount = computed(() => serviceExposure.value.length);
 const highRiskServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
 const unknownServiceCount = computed(() => serviceExposure.value.filter((row) => row.risk === 'observe').length);
@@ -2194,6 +2337,26 @@ const saveAssetMetadata = async () => {
   }
 };
 
+const openServiceTrend = async (service: string) => {
+  trendDimension.value = 'service';
+  trendKey.value = service;
+  trendDirection.value = 'src';
+  currentView.value = 'traffic';
+  await loadDimensionTrend();
+};
+
+const openServicePort = async (port: string) => {
+  profilePort.value = port;
+  currentView.value = 'port';
+  await loadPortProfile();
+};
+
+const searchServiceFlow = async (flow: string, fallback: string) => {
+  searchTerm.value = flow || fallback;
+  currentView.value = 'search';
+  await runSearch();
+};
+
 const openExposureIP = async (row: ServiceExposure) => {
   profileIP.value = row.ip;
   currentView.value = 'profile';
@@ -2257,6 +2420,55 @@ const exportServiceExposure = () => {
     ])
   ];
   exportCSV(`nexaflow-service-exposure-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportServiceAnalytics = () => {
+  const rows = [
+    ['类型', '服务', '类别', '风险', '端口', '客户端数', '服务端数', '会话数', '流量字节', '包数', '样例会话', '最近出现'],
+    ...serviceAnalytics.value.details.map((row) => [
+      '服务详情',
+      row.service,
+      row.category,
+      serviceRiskText(row.risk),
+      row.top_port,
+      String(row.client_count),
+      String(row.server_count),
+      String(row.session_count),
+      String(row.bytes),
+      String(row.packets),
+      row.sample_flow,
+      formatTime(row.last_seen)
+    ]),
+    ...serviceAnalytics.value.ports.map((row) => [
+      '服务端口',
+      row.service,
+      row.category,
+      serviceRiskText(row.risk),
+      `${row.port}/${row.protocol}`,
+      '',
+      '',
+      '',
+      String(row.bytes),
+      String(row.packets),
+      row.sample_flow,
+      formatTime(row.last_seen)
+    ]),
+    ...serviceAnalytics.value.growth.map((row) => [
+      '服务增长',
+      row.key,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      String(row.delta_bytes),
+      String(row.delta_packets),
+      `当前 ${row.current_bytes} / 上一周期 ${row.previous_bytes} / 变化率 ${formatChangeRatio(row.change_ratio)}`,
+      ''
+    ])
+  ];
+  exportCSV(`nexaflow-service-analytics-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportExternalAccess = () => {
@@ -3312,6 +3524,135 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
                 <td>{{ formatChangeRatio(row.change_ratio) }}</td>
                 <td>{{ row.score }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'service-analytics'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="exportServiceAnalytics">导出应用分析</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / 生成时间 {{ formatTime(serviceAnalytics.generated_at) }} / {{ formatBytes(serviceAnalytics.summary.total_bytes) }}
+          </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <ServerCog :size="22" />
+            <div>
+              <span>识别服务</span>
+              <strong>{{ serviceAnalytics.summary.service_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>服务类别</span>
+              <strong>{{ serviceAnalytics.summary.category_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>高风险服务</span>
+              <strong>{{ serviceAnalytics.summary.high_risk_services.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>主导服务</span>
+              <strong>{{ serviceAnalytics.summary.top_service }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="应用服务排行" eyebrow="Service Ranking" :items="serviceAnalytics.services" />
+          <HorizontalBarChart title="服务增长排行" eyebrow="Service Growth" :items="serviceAnalyticsGrowthItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="服务类别分布" eyebrow="Category Mix" :items="serviceAnalytics.categories" />
+          <HorizontalBarChart title="服务风险分布" eyebrow="Risk Mix" :items="serviceAnalytics.risks" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="服务端口排行" eyebrow="Service Port" :items="serviceAnalyticsPortItems" />
+          <HorizontalBarChart title="高风险服务" eyebrow="High Risk" :items="serviceAnalyticsHighRiskItems" />
+        </section>
+        <section class="table-panel wide-key-table service-analytics-table">
+          <div class="panel-heading">
+            <h2>应用服务详情</h2>
+            <span>{{ serviceAnalytics.details.length.toLocaleString() }} 个服务 / {{ rangeLabel }}</span>
+          </div>
+          <div v-if="serviceAnalytics.details.length === 0" class="empty-state">暂无应用服务数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>服务</th>
+                <th>类别/风险</th>
+                <th>客户端</th>
+                <th>服务端</th>
+                <th>会话</th>
+                <th>主端口</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>最近出现</th>
+                <th>样例会话</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in serviceAnalytics.details" :key="row.service">
+                <td><strong>{{ row.service }}</strong></td>
+                <td>
+                  {{ row.category }}
+                  <span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span>
+                </td>
+                <td>{{ row.client_count.toLocaleString() }}</td>
+                <td>{{ row.server_count.toLocaleString() }}</td>
+                <td>{{ row.session_count.toLocaleString() }}</td>
+                <td>{{ row.top_port }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ formatTime(row.last_seen) }}</td>
+                <td>{{ row.sample_flow }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="openServiceTrend(row.service)">趋势</button>
+                  <button class="inline-button" type="button" @click="openServicePort(row.top_port.split('/')[0])">端口</button>
+                  <button class="inline-button" type="button" @click="searchServiceFlow(row.sample_flow, row.service)">检索</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="table-panel wide-key-table service-port-table">
+          <div class="panel-heading">
+            <h2>服务端口明细</h2>
+            <span>{{ serviceAnalytics.ports.length.toLocaleString() }} 个端口</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>服务</th>
+                <th>端口</th>
+                <th>类别</th>
+                <th>风险</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>最近出现</th>
+                <th>样例会话</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in serviceAnalytics.ports" :key="`${row.service}-${row.port}-${row.protocol}`">
+                <td>{{ row.service }}</td>
+                <td>{{ row.port }} / {{ row.protocol }}</td>
+                <td>{{ row.category }}</td>
+                <td><span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span></td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ formatTime(row.last_seen) }}</td>
+                <td>{{ row.sample_flow }}</td>
               </tr>
             </tbody>
           </table>

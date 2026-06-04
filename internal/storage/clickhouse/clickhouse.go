@@ -737,6 +737,35 @@ func (s *Store) ServiceMap(ctx context.Context, minutes, limit int) (map[string]
 	return map[string]any{"nodes": nodeRows, "links": links}, nil
 }
 
+func (s *Store) ServiceAnalytics(ctx context.Context, minutes, limit int) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 12
+	}
+	services, serviceErr := s.TopN(ctx, "service", "src", limit, minutes)
+	categories, categoryErr := s.TopN(ctx, "service_category", "src", limit, minutes)
+	risks, riskErr := s.TopN(ctx, "service_risk", "src", limit, minutes)
+	growth, growthErr := s.dimensionChanges(ctx, "service", "service", "src", minutes, limit)
+	flows, flowErr := s.Sessions(ctx, "", minutes, limit*8)
+	servicePorts, details := serviceAnalyticsFromSessions(flows, limit)
+	summary := serviceAnalyticsSummary(services, categories, risks, details)
+	data := map[string]any{
+		"generated_at": time.Now().Unix(),
+		"minutes":      minutes,
+		"summary":      summary,
+		"services":     services,
+		"categories":   categories,
+		"risks":        risks,
+		"growth":       capacityGrowthRows(growth, limit),
+		"ports":        servicePorts,
+		"details":      details,
+	}
+	err := firstErr(serviceErr, categoryErr, riskErr, growthErr, flowErr)
+	if err != nil && len(services) == 0 && len(details) == 0 {
+		return demoServiceAnalytics(minutes), err
+	}
+	return data, err
+}
+
 func (s *Store) ProtocolTimeseries(ctx context.Context, minutes int) ([]map[string]any, error) {
 	q := fmt.Sprintf(`SELECT
     toUnixTimestamp(ts) AS ts,
@@ -2761,6 +2790,53 @@ func demoServiceExposure() []map[string]any {
 	}
 }
 
+func demoServiceAnalytics(minutes int) map[string]any {
+	now := time.Now().Unix()
+	services := []model.TopItem{
+		{Key: "HTTPS", Bytes: 88000000, Packets: 48000},
+		{Key: "SSH", Bytes: 18000000, Packets: 7200},
+		{Key: "DNS", Bytes: 5000000, Packets: 12000},
+	}
+	categories := []model.TopItem{
+		{Key: "Web", Bytes: 88000000, Packets: 48000},
+		{Key: "远程管理", Bytes: 18000000, Packets: 7200},
+		{Key: "基础网络", Bytes: 5000000, Packets: 12000},
+	}
+	risks := []model.TopItem{
+		{Key: "low", Bytes: 93000000, Packets: 60000},
+		{Key: "high", Bytes: 18000000, Packets: 7200},
+	}
+	details := []map[string]any{
+		{"service": "HTTPS", "category": "Web", "risk": "low", "bytes": uint64(88000000), "packets": uint64(48000), "client_count": uint64(7), "server_count": uint64(3), "session_count": uint64(14), "top_port": "443/tcp", "sample_flow": "10.10.1.42:53210 -> 172.20.2.10:443 / tcp", "first_seen": now - int64(minutes*60), "last_seen": now},
+		{"service": "SSH", "category": "远程管理", "risk": "high", "bytes": uint64(18000000), "packets": uint64(7200), "client_count": uint64(2), "server_count": uint64(1), "session_count": uint64(3), "top_port": "22/tcp", "sample_flow": "10.10.1.77:53192 -> 172.20.2.81:22 / tcp", "first_seen": now - 600, "last_seen": now - 10},
+	}
+	return map[string]any{
+		"generated_at": now,
+		"minutes":      minutes,
+		"summary": map[string]any{
+			"service_count":      len(services),
+			"category_count":     len(categories),
+			"high_risk_services": int64(1),
+			"total_bytes":        uint64(111000000),
+			"total_packets":      uint64(67200),
+			"top_service":        "HTTPS",
+			"top_risk":           "low",
+		},
+		"services":   services,
+		"categories": categories,
+		"risks":      risks,
+		"growth": []map[string]any{
+			{"dimension": "service", "key": "HTTPS", "current_bytes": uint64(88000000), "previous_bytes": uint64(52000000), "delta_bytes": int64(36000000), "current_packets": uint64(48000), "previous_packets": uint64(31000), "delta_packets": int64(17000), "change_ratio": 0.69},
+			{"dimension": "service", "key": "SSH", "current_bytes": uint64(18000000), "previous_bytes": uint64(0), "delta_bytes": int64(18000000), "current_packets": uint64(7200), "previous_packets": uint64(0), "delta_packets": int64(7200), "change_ratio": 0},
+		},
+		"ports": []map[string]any{
+			{"service": "HTTPS", "port": "443", "protocol": "tcp", "category": "Web", "risk": "low", "bytes": uint64(88000000), "packets": uint64(48000), "sample_flow": "10.10.1.42:53210 -> 172.20.2.10:443 / tcp", "last_seen": now},
+			{"service": "SSH", "port": "22", "protocol": "tcp", "category": "远程管理", "risk": "high", "bytes": uint64(18000000), "packets": uint64(7200), "sample_flow": "10.10.1.77:53192 -> 172.20.2.81:22 / tcp", "last_seen": now - 10},
+		},
+		"details": details,
+	}
+}
+
 func demoAssets() []map[string]any {
 	now := time.Now().Unix()
 	return []map[string]any{
@@ -3235,6 +3311,150 @@ func addTopItem(items map[string]model.TopItem, key string, bytes, packets uint6
 	item.Bytes += bytes
 	item.Packets += packets
 	items[key] = item
+}
+
+func serviceAnalyticsFromSessions(sessions []map[string]any, limit int) ([]map[string]any, []map[string]any) {
+	ports := map[string]map[string]any{}
+	details := map[string]map[string]any{}
+	clients := map[string]map[string]bool{}
+	servers := map[string]map[string]bool{}
+	for _, session := range sessions {
+		parsed, ok := parseFlowKey(stringValue(session["key"]))
+		if !ok {
+			continue
+		}
+		service := identifyService(parsed.DstPort, parsed.Proto)
+		bytes := uintValue(session["bytes"])
+		packets := uintValue(session["packets"])
+		portKey := service.Name + "|" + parsed.DstPort + "|" + parsed.Proto
+		portRow := ports[portKey]
+		if portRow == nil {
+			portRow = map[string]any{
+				"service":     service.Name,
+				"port":        parsed.DstPort,
+				"protocol":    parsed.Proto,
+				"category":    service.Category,
+				"risk":        service.Risk,
+				"bytes":       uint64(0),
+				"packets":     uint64(0),
+				"sample_flow": stringValue(session["key"]),
+			}
+		}
+		portRow["bytes"] = uintValue(portRow["bytes"]) + bytes
+		portRow["packets"] = uintValue(portRow["packets"]) + packets
+		if int64Value(session["last_seen"]) >= int64Value(portRow["last_seen"]) {
+			portRow["last_seen"] = int64Value(session["last_seen"])
+			portRow["sample_flow"] = stringValue(session["key"])
+		}
+		ports[portKey] = portRow
+
+		detail := details[service.Name]
+		if detail == nil {
+			detail = map[string]any{
+				"service":       service.Name,
+				"category":      service.Category,
+				"risk":          service.Risk,
+				"bytes":         uint64(0),
+				"packets":       uint64(0),
+				"client_count":  uint64(0),
+				"server_count":  uint64(0),
+				"session_count": uint64(0),
+				"top_port":      parsed.DstPort + "/" + parsed.Proto,
+				"sample_flow":   stringValue(session["key"]),
+				"first_seen":    int64Value(session["first_seen"]),
+				"last_seen":     int64Value(session["last_seen"]),
+			}
+			clients[service.Name] = map[string]bool{}
+			servers[service.Name] = map[string]bool{}
+		}
+		detail["bytes"] = uintValue(detail["bytes"]) + bytes
+		detail["packets"] = uintValue(detail["packets"]) + packets
+		detail["session_count"] = uintValue(detail["session_count"]) + 1
+		clients[service.Name][parsed.SrcIP] = true
+		servers[service.Name][parsed.DstIP] = true
+		detail["client_count"] = uint64(len(clients[service.Name]))
+		detail["server_count"] = uint64(len(servers[service.Name]))
+		if first := int64Value(session["first_seen"]); first > 0 && (int64Value(detail["first_seen"]) == 0 || first < int64Value(detail["first_seen"])) {
+			detail["first_seen"] = first
+		}
+		if last := int64Value(session["last_seen"]); last >= int64Value(detail["last_seen"]) {
+			detail["last_seen"] = last
+			detail["sample_flow"] = stringValue(session["key"])
+			detail["top_port"] = parsed.DstPort + "/" + parsed.Proto
+		}
+		details[service.Name] = detail
+	}
+	return sortedMapRows(ports, limit, func(row map[string]any) int {
+			if riskWeight(stringValue(row["risk"])) != 0 {
+				return riskWeight(stringValue(row["risk"])) * 1_000_000_000
+			}
+			return 0
+		}), sortedMapRows(details, limit, func(row map[string]any) int {
+			return riskWeight(stringValue(row["risk"])) * 1_000_000_000
+		})
+}
+
+func serviceAnalyticsSummary(services, categories, risks []model.TopItem, details []map[string]any) map[string]any {
+	totalBytes := uint64(0)
+	totalPackets := uint64(0)
+	for _, service := range services {
+		totalBytes += service.Bytes
+		totalPackets += service.Packets
+	}
+	highRiskServices := int64(0)
+	for _, detail := range details {
+		if riskWeight(stringValue(detail["risk"])) >= riskWeight("high") {
+			highRiskServices++
+		}
+	}
+	return map[string]any{
+		"service_count":      len(services),
+		"category_count":     len(uniqueTopKeys(categories)),
+		"high_risk_services": highRiskServices,
+		"total_bytes":        totalBytes,
+		"total_packets":      totalPackets,
+		"top_service":        topItemKey(services),
+		"top_risk":           topItemKey(risks),
+	}
+}
+
+func sortedMapRows(rows map[string]map[string]any, limit int, priority func(map[string]any) int) []map[string]any {
+	items := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, row)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if priority(items[i]) != priority(items[j]) {
+			return priority(items[i]) > priority(items[j])
+		}
+		if uintValue(items[i]["bytes"]) != uintValue(items[j]["bytes"]) {
+			return uintValue(items[i]["bytes"]) > uintValue(items[j]["bytes"])
+		}
+		return stringValue(items[i]["service"]) < stringValue(items[j]["service"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+func uniqueTopKeys(items []model.TopItem) []string {
+	keys := []string{}
+	seen := map[string]bool{}
+	for _, item := range items {
+		if !seen[item.Key] {
+			keys = append(keys, item.Key)
+			seen[item.Key] = true
+		}
+	}
+	return keys
+}
+
+func topItemKey(items []model.TopItem) string {
+	if len(items) == 0 {
+		return "-"
+	}
+	return items[0].Key
 }
 
 func incidentFromAlert(alert model.AlertEvent) map[string]any {

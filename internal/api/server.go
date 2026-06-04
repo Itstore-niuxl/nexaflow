@@ -38,6 +38,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/windows", s.windows)
 	mux.HandleFunc("/api/v1/traffic/matrix", s.matrix)
 	mux.HandleFunc("/api/v1/traffic/service-map", s.serviceMap)
+	mux.HandleFunc("/api/v1/traffic/service-analytics", s.serviceAnalytics)
 	mux.HandleFunc("/api/v1/traffic/service-exposure", s.serviceExposure)
 	mux.HandleFunc("/api/v1/traffic/external-access", s.externalAccess)
 	mux.HandleFunc("/api/v1/traffic/protocol-timeseries", s.protocolTimeseries)
@@ -183,6 +184,11 @@ func (s *Server) matrix(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serviceMap(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.ServiceMap(r.Context(), queryMinutes(r), queryLimit(r, 50, 500))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) serviceAnalytics(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.ServiceAnalytics(r.Context(), queryMinutes(r), queryLimit(r, 12, 50))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
