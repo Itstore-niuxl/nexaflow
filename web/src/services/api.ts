@@ -243,6 +243,31 @@ export interface AssetMetadata {
   metadata_updated_at?: number;
 }
 
+export interface AssetRiskPosture {
+  ip: string;
+  name: string;
+  owner: string;
+  business: string;
+  environment: string;
+  criticality: string;
+  role: string;
+  risk_score: number;
+  risk_level: string;
+  total_bytes: number;
+  total_packets: number;
+  external_bytes: number;
+  external_peers: number;
+  external_sessions: number;
+  exposed_services: number;
+  high_risk_services: number;
+  open_incidents: number;
+  critical_incidents: number;
+  anomaly_count: number;
+  top_finding: string;
+  recommended_action: string;
+  last_seen: number;
+}
+
 export interface SecurityInsight {
   kind: string;
   severity: string;
@@ -461,6 +486,9 @@ export const api = {
   },
   async assets(minutes = 15, limit = 50) {
     return json<{ data: AssetRow[]; degraded: boolean }>(`/api/v1/assets?minutes=${minutes}&limit=${limit}`);
+  },
+  async assetRiskPosture(minutes = 15, limit = 80) {
+    return json<{ data: AssetRiskPosture[]; degraded: boolean }>(`/api/v1/assets/risk-posture?minutes=${minutes}&limit=${limit}`);
   },
   async updateAssetMetadata(metadata: AssetMetadata) {
     const response = await fetch('/api/v1/assets/metadata', {

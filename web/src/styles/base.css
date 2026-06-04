@@ -893,9 +893,14 @@ td {
 .session-table table,
 .external-table table,
 .anomaly-table table,
+.asset-risk-table table,
 .incident-table table,
 .change-table table {
   table-layout: fixed;
+}
+
+.asset-risk-table table {
+  min-width: 1680px;
 }
 
 .incident-table table {
@@ -994,6 +999,29 @@ td {
 .incident-table th:nth-child(11),
 .incident-table td:nth-child(11) {
   width: 190px;
+}
+
+.asset-risk-table th:first-child,
+.asset-risk-table td:first-child {
+  width: 15%;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.asset-risk-table th:nth-child(10),
+.asset-risk-table td:nth-child(10),
+.asset-risk-table th:nth-child(11),
+.asset-risk-table td:nth-child(11) {
+  width: 20%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+.asset-risk-table th:nth-child(13),
+.asset-risk-table td:nth-child(13) {
+  width: 170px;
 }
 
 .incident-context-panel {

@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/anomalies", s.trafficAnomalies)
 	mux.HandleFunc("/api/v1/assets", s.assets)
 	mux.HandleFunc("/api/v1/assets/metadata", s.assetMetadata)
+	mux.HandleFunc("/api/v1/assets/risk-posture", s.assetRiskPosture)
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
 	mux.HandleFunc("/api/v1/security/incidents", s.securityIncidents)
 	mux.HandleFunc("/api/v1/security/incident-context", s.securityIncidentContext)
@@ -282,6 +283,13 @@ func (s *Server) assetMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"data": data})
+}
+
+func (s *Server) assetRiskPosture(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.AssetRiskPosture(r.Context(), queryMinutes(r), queryLimit(r, 50, 300))
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "ip")
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
 func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {

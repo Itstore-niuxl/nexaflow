@@ -37,6 +37,7 @@ import {
   type AlertConfig,
   type AlertEvent,
   type AssetMetadata,
+  type AssetRiskPosture,
   type AssetRow,
   type Collector,
   type CollectorConfig,
@@ -137,6 +138,7 @@ const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
 const assets = ref<AssetRow[]>([]);
+const assetRisks = ref<AssetRiskPosture[]>([]);
 const assetEditor = ref<AssetMetadata | null>(null);
 const assetTagsText = ref('');
 const securityInsights = ref<SecurityInsight[]>([]);
@@ -220,6 +222,7 @@ const navGroups = [
       { id: 'exposure', label: '服务暴露', icon: ServerCog },
       { id: 'external', label: '公网访问', icon: RadioTower },
       { id: 'assets', label: '资产发现', icon: HardDrive },
+      { id: 'asset-risk', label: '资产风险', icon: Shield },
       { id: 'security', label: '风险线索', icon: Shield },
       { id: 'incidents', label: '事件中心', icon: Shield },
       { id: 'alerts', label: '告警中心', icon: AlertTriangle }
@@ -245,6 +248,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   exposure: { title: '服务暴露', subtitle: '识别目的 IP 上的服务端口、协议、服务类型和风险级别' },
   external: { title: '公网访问', subtitle: '聚合公网对端、内部资产、访问方向、服务端口和风险' },
   assets: { title: '资产发现', subtitle: '按活跃 IP 聚合收发流量、角色和最近出现时间' },
+  'asset-risk': { title: '资产风险', subtitle: '按资产聚合暴露面、异常、事件和公网访问，给出处置优先级' },
   security: { title: '风险线索', subtitle: '从重流量会话、敏感端口和主机扇出中提取排查线索' },
   incidents: { title: '事件中心', subtitle: '汇总阈值告警、风险线索和异常波动，形成统一处置事件流' },
   profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
@@ -308,6 +312,7 @@ const refresh = async () => {
       directionSeriesRes,
       sessionsRes,
       assetsRes,
+      assetRiskRes,
       securityRes,
       incidentRes,
       trafficAnalysisRes,
@@ -344,6 +349,7 @@ const refresh = async () => {
       api.directionTimeseries(minutes),
       api.sessions(sessionSearch.value.trim(), minutes, 120),
       api.assets(minutes, 100),
+      api.assetRiskPosture(minutes, 120),
       api.securityInsights(minutes, 100),
       api.securityIncidents(minutes, 120),
       api.trafficAnalysis(minutes),
@@ -380,6 +386,7 @@ const refresh = async () => {
     directionSeries.value = directionSeriesRes.data;
     sessions.value = sessionsRes.data;
     assets.value = assetsRes.data;
+    assetRisks.value = assetRiskRes.data;
     securityInsights.value = securityRes.data;
     securityIncidents.value = incidentRes.data;
     trafficAnalysis.value = trafficAnalysisRes.data;
@@ -408,6 +415,7 @@ const refresh = async () => {
       directionSeriesRes.degraded ||
       sessionsRes.degraded ||
       assetsRes.degraded ||
+      assetRiskRes.degraded ||
       securityRes.degraded ||
       incidentRes.degraded ||
       trafficAnalysisRes.degraded ||
@@ -758,6 +766,56 @@ const refresh = async () => {
         last_seen: now
       }
     ];
+    assetRisks.value = [
+      {
+        ip: '10.2.0.12',
+        name: '示例 Web 服务',
+        owner: '平台团队',
+        business: 'NexaFlow',
+        environment: '测试',
+        criticality: 'high',
+        role: '服务端',
+        risk_score: 86,
+        risk_level: 'critical',
+        total_bytes: 96000000,
+        total_packets: 42000,
+        external_bytes: 36000000,
+        external_peers: 2,
+        external_sessions: 44,
+        exposed_services: 3,
+        high_risk_services: 1,
+        open_incidents: 2,
+        critical_incidents: 1,
+        anomaly_count: 1,
+        top_finding: '事件：公网对端在 15 分钟内对内部资产单端口建立 40 条会话',
+        recommended_action: '优先核对公网暴露和高危服务，确认访问来源、负责人和白名单策略',
+        last_seen: now
+      },
+      {
+        ip: '10.10.1.42',
+        name: '',
+        owner: '',
+        business: '',
+        environment: '未分类',
+        criticality: 'normal',
+        role: '外联源',
+        risk_score: 58,
+        risk_level: 'high',
+        total_bytes: 80000000,
+        total_packets: 25000,
+        external_bytes: 12000000,
+        external_peers: 4,
+        external_sessions: 12,
+        exposed_services: 0,
+        high_risk_services: 0,
+        open_incidents: 1,
+        critical_incidents: 0,
+        anomaly_count: 0,
+        top_finding: '事件：单会话占近 15 分钟总流量 32.0%',
+        recommended_action: '检查资产归属和流量用途，补齐负责人、业务标签和白名单判断',
+        last_seen: now
+      }
+    ];
     securityInsights.value = [
       {
         kind: 'heavy_flow',
@@ -1049,6 +1107,10 @@ const activeAssetCount = computed(() => assets.value.length);
 const annotatedAssetCount = computed(() =>
   assets.value.filter((row) => row.name || row.owner || row.business || row.tags.length > 0 || row.note).length
 );
+const criticalAssetRiskCount = computed(() => assetRisks.value.filter((row) => row.risk_level === 'critical').length);
+const unownedAssetRiskCount = computed(() => assetRisks.value.filter((row) => !row.owner).length);
+const exposedAssetRiskCount = computed(() => assetRisks.value.filter((row) => row.exposed_services > 0 || row.external_peers > 0).length);
+const assetRiskTotalBytes = computed(() => assetRisks.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const criticalInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'critical').length);
 const warningInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'warning').length);
 const dominantProtocol = computed(() => trafficAnalysis.value.protocol_mix[0]);
@@ -1117,6 +1179,10 @@ const externalDirectionItems = computed(() => aggregateTopItems(externalAccess.v
 const externalRiskItems = computed(() => aggregateTopItems(externalAccess.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
 const assetRoleItems = computed(() => aggregateTopItems(assets.value, (row) => row.role, (row) => row.total_bytes, (row) => row.total_packets));
 const assetCriticalityItems = computed(() => aggregateTopItems(assets.value, (row) => criticalityText(row.criticality), (row) => row.total_bytes, (row) => row.total_packets));
+const assetRiskScoreItems = computed(() => assetRisks.value.map((row) => ({ key: `${row.ip} / ${row.name || row.role}`, bytes: row.risk_score, packets: row.open_incidents })));
+const assetRiskLevelItems = computed(() => aggregateTopItems(assetRisks.value, (row) => assetRiskLevelText(row.risk_level), () => 1, () => 0));
+const assetRiskFindingItems = computed(() => aggregateTopItems(assetRisks.value, (row) => row.top_finding || '无显著风险', (row) => row.risk_score, (row) => row.open_incidents));
+const assetRiskExposureItems = computed(() => aggregateTopItems(assetRisks.value, (row) => row.ip, (row) => row.external_bytes, (row) => row.external_sessions));
 const insightKindItems = computed(() => aggregateTopItems(securityInsights.value, (row) => insightKindText(row.kind), (row) => row.bytes, (row) => row.packets));
 const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
 const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
@@ -1314,6 +1380,16 @@ const serviceRiskText = (risk: string) => {
     observe: '观察'
   };
   return labels[risk] ?? risk;
+};
+
+const assetRiskLevelText = (level: string) => {
+  const labels: Record<string, string> = {
+    critical: '严重',
+    high: '高',
+    warning: '警告',
+    low: '低'
+  };
+  return labels[level] ?? level;
 };
 
 const criticalityText = (value: string) => {
@@ -2647,6 +2723,97 @@ const exportCSV = (filename: string, rows: string[][]) => {
                     <button class="inline-button" type="button" @click="editAsset(asset)">编辑</button>
                     <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
                   </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'asset-risk'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重资产</span>
+              <strong>{{ criticalAssetRiskCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>暴露资产</span>
+              <strong>{{ exposedAssetRiskCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <HardDrive :size="22" />
+            <div>
+              <span>未归属资产</span>
+              <strong>{{ unownedAssetRiskCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>资产流量</span>
+              <strong>{{ formatBytes(assetRiskTotalBytes) }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="资产风险评分" eyebrow="Risk Score" :items="assetRiskScoreItems" unit="count" />
+          <HorizontalBarChart title="资产风险等级" eyebrow="Risk Level" :items="assetRiskLevelItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="公网暴露流量" eyebrow="External Exposure" :items="assetRiskExposureItems" />
+          <HorizontalBarChart title="主要风险原因" eyebrow="Top Finding" :items="assetRiskFindingItems" unit="count" />
+        </section>
+        <section class="table-panel wide-key-table asset-risk-table">
+          <div class="panel-heading">
+            <h2>资产风险态势</h2>
+            <span>{{ assetRisks.length.toLocaleString() }} 个资产 / {{ rangeLabel }}</span>
+          </div>
+          <div v-if="assetRisks.length === 0" class="empty-state">暂无资产风险数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>资产</th>
+                <th>等级</th>
+                <th>评分</th>
+                <th>负责人</th>
+                <th>角色</th>
+                <th>暴露服务</th>
+                <th>公网对端</th>
+                <th>事件</th>
+                <th>异常</th>
+                <th>主要原因</th>
+                <th>建议动作</th>
+                <th>最近出现</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="asset in assetRisks" :key="asset.ip">
+                <td>
+                  <strong>{{ asset.ip }}</strong>
+                  <span class="cell-subtle">{{ asset.name || asset.business || asset.environment }}</span>
+                </td>
+                <td><span class="severity-pill" :class="asset.risk_level">{{ assetRiskLevelText(asset.risk_level) }}</span></td>
+                <td>{{ asset.risk_score }}</td>
+                <td>{{ asset.owner || '-' }}</td>
+                <td>{{ asset.role || '-' }}</td>
+                <td>{{ asset.exposed_services.toLocaleString() }} / 高危 {{ asset.high_risk_services.toLocaleString() }}</td>
+                <td>{{ asset.external_peers.toLocaleString() }} / {{ asset.external_sessions.toLocaleString() }} 会话</td>
+                <td>{{ asset.open_incidents.toLocaleString() }} / 严重 {{ asset.critical_incidents.toLocaleString() }}</td>
+                <td>{{ asset.anomaly_count.toLocaleString() }}</td>
+                <td>{{ asset.top_finding || '-' }}</td>
+                <td>{{ asset.recommended_action }}</td>
+                <td>{{ formatTime(asset.last_seen) }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; currentView = 'search'; runSearch()">检索</button>
+                  <button class="inline-button" type="button" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
                 </td>
               </tr>
             </tbody>

@@ -1172,6 +1172,114 @@ FORMAT JSON`, s.database, minutes, limit)
 	return parsed.Data, nil
 }
 
+func (s *Store) AssetRiskPosture(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	assets, assetErr := s.Assets(ctx, minutes, max(limit, 100))
+	exposures, exposureErr := s.ServiceExposure(ctx, minutes, max(limit*3, 120))
+	externalRows, externalErr := s.ExternalAccess(ctx, minutes, max(limit*3, 160))
+	incidents, incidentErr := s.SecurityIncidents(ctx, minutes, max(limit*3, 120))
+	anomalies, anomalyErr := s.TrafficAnomalies(ctx, minutes, max(limit*3, 120))
+
+	rows := map[string]map[string]any{}
+	for _, asset := range assets {
+		ip := stringValue(asset["ip"])
+		if ip == "" {
+			continue
+		}
+		row := ensureAssetRiskRow(rows, ip)
+		row["name"] = stringValue(asset["name"])
+		row["owner"] = stringValue(asset["owner"])
+		row["business"] = stringValue(asset["business"])
+		row["environment"] = stringValue(asset["environment"])
+		row["criticality"] = stringValue(asset["criticality"])
+		row["role"] = stringValue(asset["role"])
+		row["total_bytes"] = uintValue(asset["total_bytes"])
+		row["total_packets"] = uintValue(asset["total_packets"])
+		row["last_seen"] = int64Value(asset["last_seen"])
+		addAssetRiskScore(row, criticalityRiskScore(stringValue(asset["criticality"])), "资产重要性："+assetCriticalityLabel(stringValue(asset["criticality"])))
+	}
+	for _, exposure := range exposures {
+		ip := stringValue(exposure["ip"])
+		if ip == "" {
+			continue
+		}
+		row := ensureAssetRiskRow(rows, ip)
+		row["exposed_services"] = int64Value(row["exposed_services"]) + 1
+		if riskWeight(stringValue(exposure["risk"])) >= riskWeight("high") {
+			row["high_risk_services"] = int64Value(row["high_risk_services"]) + 1
+		}
+		row["external_bytes"] = uintValue(row["external_bytes"]) + uintValue(exposure["bytes"])
+		addAssetRiskScore(row, serviceExposureRiskScore(stringValue(exposure["risk"])), "服务暴露："+stringValue(exposure["service"])+" / "+stringValue(exposure["port"]))
+	}
+	publicPeers := map[string]map[string]bool{}
+	for _, access := range externalRows {
+		ip := stringValue(access["internal_ip"])
+		if ip == "" {
+			continue
+		}
+		row := ensureAssetRiskRow(rows, ip)
+		row["external_sessions"] = int64Value(row["external_sessions"]) + int64Value(access["session_count"])
+		row["external_bytes"] = uintValue(row["external_bytes"]) + uintValue(access["bytes"])
+		if publicPeers[ip] == nil {
+			publicPeers[ip] = map[string]bool{}
+		}
+		publicPeers[ip][stringValue(access["public_ip"])] = true
+		addAssetRiskScore(row, externalAccessRiskScore(stringValue(access["risk"]), stringValue(access["direction"])), "公网访问："+stringValue(access["direction"])+" / "+stringValue(access["service"]))
+	}
+	for ip, peers := range publicPeers {
+		rows[ip]["external_peers"] = int64(len(peers))
+	}
+	for _, incident := range incidents {
+		ip := firstIPInText(stringValue(incident["subject"]))
+		if ip == "" {
+			continue
+		}
+		row := ensureAssetRiskRow(rows, ip)
+		row["open_incidents"] = int64Value(row["open_incidents"]) + 1
+		if stringValue(incident["severity"]) == "critical" {
+			row["critical_incidents"] = int64Value(row["critical_incidents"]) + 1
+		}
+		addAssetRiskScore(row, incidentRiskScore(stringValue(incident["severity"]), int64Value(incident["score"])), "事件："+stringValue(incident["summary"]))
+	}
+	for _, anomaly := range anomalies {
+		dimension := stringValue(anomaly["dimension"])
+		if dimension != "src_ip" && dimension != "dst_ip" {
+			continue
+		}
+		ip := stringValue(anomaly["key"])
+		if ip == "" {
+			continue
+		}
+		row := ensureAssetRiskRow(rows, ip)
+		row["anomaly_count"] = int64Value(row["anomaly_count"]) + 1
+		addAssetRiskScore(row, anomalyRiskScore(stringValue(anomaly["severity"]), int64Value(anomaly["score"])), "异常："+stringValue(anomaly["summary"]))
+	}
+	result := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		score := min(int64Value(row["risk_score"]), int64(100))
+		row["risk_score"] = score
+		row["risk_level"] = assetRiskLevel(score)
+		row["recommended_action"] = assetRiskAction(row)
+		if stringValue(row["top_finding"]) == "" {
+			row["top_finding"] = "近期活跃资产，暂无显著风险信号"
+		}
+		result = append(result, row)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if int64Value(result[i]["risk_score"]) != int64Value(result[j]["risk_score"]) {
+			return int64Value(result[i]["risk_score"]) > int64Value(result[j]["risk_score"])
+		}
+		return uintValue(result[i]["total_bytes"]) > uintValue(result[j]["total_bytes"])
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	err := firstErr(assetErr, exposureErr, externalErr, incidentErr, anomalyErr)
+	if len(result) == 0 && err != nil {
+		return demoAssetRiskPosture(), err
+	}
+	return result, err
+}
+
 func (s *Store) AssetMetadata(ctx context.Context, ip string) (map[string]map[string]any, error) {
 	where := ""
 	if strings.TrimSpace(ip) != "" {
@@ -2255,6 +2363,62 @@ func demoAssets() []map[string]any {
 	}
 }
 
+func demoAssetRiskPosture() []map[string]any {
+	now := time.Now().Unix()
+	return []map[string]any{
+		{
+			"ip":                 "10.2.0.12",
+			"name":               "示例 Web 服务",
+			"owner":              "平台团队",
+			"business":           "NexaFlow",
+			"environment":        "测试",
+			"criticality":        "high",
+			"role":               "服务端",
+			"risk_score":         int64(86),
+			"risk_level":         "critical",
+			"total_bytes":        uint64(96000000),
+			"total_packets":      uint64(42000),
+			"external_bytes":     uint64(36000000),
+			"external_peers":     int64(2),
+			"external_sessions":  int64(44),
+			"exposed_services":   int64(3),
+			"high_risk_services": int64(1),
+			"open_incidents":     int64(2),
+			"critical_incidents": int64(1),
+			"anomaly_count":      int64(1),
+			"top_finding":        "事件：公网对端在 15 分钟内对内部资产单端口建立 40 条会话",
+			"recommended_action": "优先核对公网暴露和高危服务，确认访问来源、负责人和白名单策略",
+			"last_seen":          now,
+			"top_finding_score":  int64(86),
+		},
+		{
+			"ip":                 "10.10.1.42",
+			"name":               "",
+			"owner":              "",
+			"business":           "",
+			"environment":        "未分类",
+			"criticality":        "normal",
+			"role":               "外联源",
+			"risk_score":         int64(58),
+			"risk_level":         "warning",
+			"total_bytes":        uint64(80000000),
+			"total_packets":      uint64(25000),
+			"external_bytes":     uint64(12000000),
+			"external_peers":     int64(4),
+			"external_sessions":  int64(12),
+			"exposed_services":   int64(0),
+			"high_risk_services": int64(0),
+			"open_incidents":     int64(1),
+			"critical_incidents": int64(0),
+			"anomaly_count":      int64(0),
+			"top_finding":        "事件：单会话占近 15 分钟总流量 32.0%",
+			"recommended_action": "检查资产归属和流量用途，补齐负责人、业务标签和白名单判断",
+			"last_seen":          now,
+			"top_finding_score":  int64(58),
+		},
+	}
+}
+
 func demoExternalAccess() []map[string]any {
 	now := time.Now().Unix()
 	return []map[string]any{
@@ -3109,6 +3273,157 @@ func stringValue(v any) string {
 		return s
 	}
 	return ""
+}
+
+func ensureAssetRiskRow(rows map[string]map[string]any, ip string) map[string]any {
+	row := rows[ip]
+	if row != nil {
+		return row
+	}
+	row = map[string]any{
+		"ip":                 ip,
+		"name":               "",
+		"owner":              "",
+		"business":           "",
+		"environment":        "未分类",
+		"criticality":        "normal",
+		"role":               "未知",
+		"risk_score":         int64(0),
+		"risk_level":         "low",
+		"total_bytes":        uint64(0),
+		"total_packets":      uint64(0),
+		"external_bytes":     uint64(0),
+		"external_peers":     int64(0),
+		"external_sessions":  int64(0),
+		"exposed_services":   int64(0),
+		"high_risk_services": int64(0),
+		"open_incidents":     int64(0),
+		"critical_incidents": int64(0),
+		"anomaly_count":      int64(0),
+		"top_finding":        "",
+		"top_finding_score":  int64(0),
+		"recommended_action": "",
+		"last_seen":          int64(0),
+	}
+	rows[ip] = row
+	return row
+}
+
+func addAssetRiskScore(row map[string]any, score int64, finding string) {
+	if score <= 0 {
+		return
+	}
+	row["risk_score"] = int64Value(row["risk_score"]) + score
+	if score >= int64Value(row["top_finding_score"]) && strings.TrimSpace(finding) != "" {
+		row["top_finding_score"] = score
+		row["top_finding"] = finding
+	}
+}
+
+func criticalityRiskScore(criticality string) int64 {
+	switch criticality {
+	case "critical":
+		return 18
+	case "high":
+		return 12
+	case "low":
+		return 2
+	default:
+		return 5
+	}
+}
+
+func assetCriticalityLabel(criticality string) string {
+	switch criticality {
+	case "critical":
+		return "核心"
+	case "high":
+		return "高"
+	case "low":
+		return "低"
+	default:
+		return "普通"
+	}
+}
+
+func serviceExposureRiskScore(risk string) int64 {
+	switch risk {
+	case "critical":
+		return 30
+	case "high":
+		return 22
+	case "medium":
+		return 14
+	case "observe":
+		return 10
+	default:
+		return 5
+	}
+}
+
+func externalAccessRiskScore(risk, direction string) int64 {
+	score := serviceExposureRiskScore(risk) / 2
+	if strings.Contains(direction, "入站") {
+		score += 12
+	} else if strings.Contains(direction, "出站") {
+		score += 7
+	}
+	return score
+}
+
+func incidentRiskScore(severity string, score int64) int64 {
+	base := int64(12)
+	if severity == "critical" {
+		base = 28
+	} else if severity == "warning" {
+		base = 18
+	}
+	if score > 0 {
+		return max(base, min(score/3, int64(35)))
+	}
+	return base
+}
+
+func anomalyRiskScore(severity string, score int64) int64 {
+	base := int64(10)
+	if severity == "critical" {
+		base = 24
+	} else if severity == "warning" {
+		base = 15
+	}
+	if score > 0 {
+		return max(base, min(score/4, int64(28)))
+	}
+	return base
+}
+
+func assetRiskLevel(score int64) string {
+	switch {
+	case score >= 80:
+		return "critical"
+	case score >= 50:
+		return "high"
+	case score >= 25:
+		return "warning"
+	default:
+		return "low"
+	}
+}
+
+func assetRiskAction(row map[string]any) string {
+	if int64Value(row["critical_incidents"]) > 0 || stringValue(row["risk_level"]) == "critical" {
+		return "优先核对公网暴露、高危服务和严重事件，确认负责人、访问来源和处置窗口"
+	}
+	if int64Value(row["high_risk_services"]) > 0 || int64Value(row["exposed_services"]) > 0 {
+		return "检查服务暴露面、端口用途和访问策略，补齐资产负责人和业务标签"
+	}
+	if int64Value(row["anomaly_count"]) > 0 {
+		return "复核异常波动来源，查看对象画像、关联会话和近期变更记录"
+	}
+	if stringValue(row["owner"]) == "" {
+		return "补齐资产负责人、业务归属和环境标签，建立后续告警归属"
+	}
+	return "持续观察资产流量基线和事件变化"
 }
 
 func mergeAssetMetadata(row, metadata map[string]any) {
