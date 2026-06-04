@@ -1,8 +1,36 @@
 <script setup lang="ts">
-import { Activity, AlertTriangle, Database, Gauge, RadioTower, RefreshCw } from '@lucide/vue';
+import {
+  Activity,
+  AlertTriangle,
+  ChartNoAxesCombined,
+  CircleGauge,
+  Database,
+  Gauge,
+  HardDrive,
+  History,
+  LayoutDashboard,
+  ListOrdered,
+  MonitorDot,
+  Network,
+  Radar,
+  RadioTower,
+  RefreshCw,
+  Route,
+  Search,
+  ServerCog,
+  Settings2,
+  Shield,
+  Waypoints
+} from '@lucide/vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import DashboardChart from './components/DashboardChart.vue';
+import FlowMatrixChart from './components/FlowMatrixChart.vue';
+import HealthGaugePanel from './components/HealthGaugePanel.vue';
+import HorizontalBarChart from './components/HorizontalBarChart.vue';
+import LiveFlowMap from './components/LiveFlowMap.vue';
 import TopNTable from './components/TopNTable.vue';
+import TrafficCompositionPanel from './components/TrafficCompositionPanel.vue';
+import TrafficHeatmap from './components/TrafficHeatmap.vue';
 import {
   api,
   type AlertConfig,
@@ -114,26 +142,46 @@ const exposureRiskFilter = ref('all');
 const exposureCategoryFilter = ref('all');
 let timer: number | undefined;
 
-const navItems = [
-  { id: 'dashboard', label: '总览大屏' },
-  { id: 'realtime', label: '实时监控' },
-  { id: 'traffic', label: '流量剖析' },
-  { id: 'analysis', label: '流向分析' },
-  { id: 'topology', label: '服务拓扑' },
-  { id: 'exposure', label: '服务暴露' },
-  { id: 'assets', label: '资产发现' },
-  { id: 'security', label: '风险线索' },
-  { id: 'profile', label: '对象画像' },
-  { id: 'port', label: '端口画像' },
-  { id: 'topn', label: 'TopN 分析' },
-  { id: 'alerts', label: '告警中心' },
-  { id: 'search', label: '检索分析' },
-  { id: 'history', label: '历史回放' },
-  { id: 'collectors', label: '采集器' }
+const navGroups = [
+  {
+    title: '监控',
+    items: [
+      { id: 'dashboard', label: '总览大屏', icon: LayoutDashboard },
+      { id: 'realtime', label: '实时监控', icon: MonitorDot },
+      { id: 'traffic', label: '流量剖析', icon: ChartNoAxesCombined }
+    ]
+  },
+  {
+    title: '分析',
+    items: [
+      { id: 'analysis', label: '流向分析', icon: Route },
+      { id: 'topology', label: '服务拓扑', icon: Network },
+      { id: 'topn', label: 'TopN 分析', icon: ListOrdered },
+      { id: 'profile', label: '对象画像', icon: Radar },
+      { id: 'port', label: '端口画像', icon: CircleGauge }
+    ]
+  },
+  {
+    title: '治理',
+    items: [
+      { id: 'exposure', label: '服务暴露', icon: ServerCog },
+      { id: 'assets', label: '资产发现', icon: HardDrive },
+      { id: 'security', label: '风险线索', icon: Shield },
+      { id: 'alerts', label: '告警中心', icon: AlertTriangle }
+    ]
+  },
+  {
+    title: '工具',
+    items: [
+      { id: 'search', label: '检索分析', icon: Search },
+      { id: 'history', label: '历史回放', icon: History },
+      { id: 'collectors', label: '采集器', icon: Settings2 }
+    ]
+  }
 ];
 
 const viewMeta: Record<string, { title: string; subtitle: string }> = {
-  dashboard: { title: '流量总览', subtitle: 'v0.1 模拟流量分析链路' },
+  dashboard: { title: '流量总览', subtitle: '近实时流量、采集健康和关键对象排行' },
   realtime: { title: '实时监控', subtitle: '采集窗口、吞吐、包速率和采集器健康状态' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
@@ -151,7 +199,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
 };
 
 const pageTitle = computed(() => viewMeta[currentView.value]?.title ?? '流量总览');
-const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? 'v0.1 模拟流量分析链路');
+const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? '近实时流量、采集健康和关键对象排行');
 const rangeSeconds = computed(() => selectedMinutes.value * 60);
 const rangeLabel = computed(() => {
   if (selectedMinutes.value >= 1440) return '24 小时';
@@ -572,6 +620,7 @@ const formatBytes = (value: number) => {
 const formatRate = (bytes: number, seconds = rangeSeconds.value) => `${((bytes * 8) / seconds / 1000 / 1000).toFixed(2)} Mbps`;
 
 const pps = computed(() => Math.round(summary.value.packets / rangeSeconds.value));
+const onlineCollectorCount = computed(() => collectors.value.filter((collector) => collector.status === 'online').length);
 
 const profileTotalBytes = computed(() => ipProfile.value.inbound_bytes + ipProfile.value.outbound_bytes);
 const profileTotalPackets = computed(() => ipProfile.value.inbound_packets + ipProfile.value.outbound_packets);
@@ -668,6 +717,30 @@ const protocolSummary = computed(() => {
   }
   return Array.from(grouped.values()).sort((a, b) => b.bytes - a.bytes);
 });
+const aggregateTopItems = <T,>(rows: T[], keyOf: (row: T) => string, bytesOf: (row: T) => number, packetsOf: (row: T) => number) => {
+  const grouped = new Map<string, TopItem>();
+  for (const row of rows) {
+    const key = keyOf(row) || '-';
+    const current = grouped.get(key) ?? { key, bytes: 0, packets: 0 };
+    current.bytes += bytesOf(row);
+    current.packets += packetsOf(row);
+    grouped.set(key, current);
+  }
+  return Array.from(grouped.values()).sort((a, b) => b.bytes - a.bytes);
+};
+const trafficChangeItems = computed(() =>
+  trafficChanges.value
+    .map((row) => ({ key: `${changeDimensionText(row.dimension)} / ${row.key}`, bytes: Math.abs(row.delta_bytes), packets: Math.abs(row.delta_packets) }))
+    .sort((a, b) => b.bytes - a.bytes)
+);
+const exposureRiskItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
+const exposureCategoryItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => row.category, (row) => row.bytes, (row) => row.packets));
+const assetRoleItems = computed(() => aggregateTopItems(assets.value, (row) => row.role, (row) => row.total_bytes, (row) => row.total_packets));
+const assetCriticalityItems = computed(() => aggregateTopItems(assets.value, (row) => criticalityText(row.criticality), (row) => row.total_bytes, (row) => row.total_packets));
+const insightKindItems = computed(() => aggregateTopItems(securityInsights.value, (row) => insightKindText(row.kind), (row) => row.bytes, (row) => row.packets));
+const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
+const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
+const searchResultItems = computed(() => aggregateTopItems(searchResults.value, (row) => `${row.kind}: ${row.key}`, (row) => row.bytes, (row) => row.packets));
 const alertFlowSharePercent = computed({
   get: () => Math.round(alertConfig.value.flow_share * 100),
   set: (value: number) => {
@@ -800,6 +873,11 @@ const isExposureSilenced = (row: ServiceExposure) => {
 const formatTime = (ts: number) => {
   if (!ts) return '-';
   return new Date(ts * 1000).toLocaleString();
+};
+
+const setView = (view: string) => {
+  currentView.value = view;
+  window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
 };
 
 const applyCaptureConfig = async () => {
@@ -1028,20 +1106,36 @@ const exportCSV = (filename: string, rows: string[][]) => {
   <main class="app-shell">
     <aside class="sidebar">
       <div class="brand">
-        <RadioTower :size="24" />
-        <span>NexaFlow</span>
+        <div class="brand-mark">
+          <RadioTower :size="22" />
+        </div>
+        <div>
+          <span>NexaFlow</span>
+          <small>流量分析控制台</small>
+        </div>
       </div>
       <nav>
-        <button
-          v-for="item in navItems"
-          :key="item.id"
-          type="button"
-          :class="{ active: currentView === item.id }"
-          @click="currentView = item.id"
-        >
-          {{ item.label }}
-        </button>
+        <section v-for="group in navGroups" :key="group.title" class="nav-group">
+          <p>{{ group.title }}</p>
+          <button
+            v-for="item in group.items"
+            :key="item.id"
+            type="button"
+            :class="{ active: currentView === item.id }"
+            @click="setView(item.id)"
+          >
+            <component :is="item.icon" :size="17" />
+            <span>{{ item.label }}</span>
+          </button>
+        </section>
       </nav>
+      <div class="sidebar-status">
+        <span class="status-dot" :class="{ offline: systemStatus.database !== 'ok' }"></span>
+        <div>
+          <strong>{{ systemStatus.database === 'ok' ? '系统正常' : '系统降级' }}</strong>
+          <small>{{ onlineCollectorCount }} / {{ collectors.length }} 采集器在线</small>
+        </div>
+      </div>
     </aside>
 
     <section class="workspace">
@@ -1051,6 +1145,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <p>{{ pageSubtitle }}</p>
         </div>
         <div class="topbar-actions">
+          <div class="status-chip" :class="{ warning: degraded }">
+            <span class="status-dot" :class="{ offline: degraded }"></span>
+            {{ degraded ? '降级数据' : '实时数据' }}
+          </div>
           <label class="range-control">
             <span>时间范围</span>
             <select v-model="selectedMinutes" @change="refresh">
@@ -1062,6 +1160,25 @@ const exportCSV = (filename: string, rows: string[][]) => {
           </button>
         </div>
       </header>
+
+      <section class="status-strip">
+        <div>
+          <span>数据库</span>
+          <strong>{{ systemStatus.database === 'ok' ? '正常' : systemStatus.database }}</strong>
+        </div>
+        <div>
+          <span>最近窗口</span>
+          <strong>{{ formatTime(systemStatus.latest_window_ts) }}</strong>
+        </div>
+        <div>
+          <span>采集器</span>
+          <strong>{{ onlineCollectorCount }} / {{ collectors.length || 0 }}</strong>
+        </div>
+        <div>
+          <span>活跃资产</span>
+          <strong>{{ activeAssetCount.toLocaleString() }}</strong>
+        </div>
+      </section>
 
       <div v-if="degraded" class="notice">
         <AlertTriangle :size="18" />
@@ -1100,6 +1217,20 @@ const exportCSV = (filename: string, rows: string[][]) => {
       </section>
 
       <template v-if="currentView === 'dashboard'">
+        <section class="command-grid">
+          <LiveFlowMap :nodes="serviceMap.nodes" :links="matrixRows" />
+          <HealthGaugePanel :utilization="summary.utilization" :pps="pps" :online="onlineCollectorCount" :total="collectors.length" />
+        </section>
+        <section class="command-grid">
+          <TrafficCompositionPanel
+            :protocols="topProtocols"
+            :ports="topPorts"
+            :directions="trafficAnalysis.directions"
+            :packet-sizes="trafficAnalysis.packet_sizes"
+          />
+          <TrafficHeatmap :points="series" />
+        </section>
+
         <section class="main-grid">
           <DashboardChart class="chart-panel" :points="series" />
           <section class="collector-panel">
@@ -1124,6 +1255,16 @@ const exportCSV = (filename: string, rows: string[][]) => {
       </template>
 
       <template v-else-if="currentView === 'realtime'">
+        <section class="command-grid realtime-grid">
+          <TrafficHeatmap :points="series" />
+          <TrafficCompositionPanel
+            :protocols="protocolSummary"
+            :ports="portTrendSummary"
+            :directions="directionTrendSummary"
+            :packet-sizes="topPacketLens"
+          />
+        </section>
+
         <section class="main-grid">
           <DashboardChart class="chart-panel" :points="series" />
           <section class="collector-panel">
@@ -1213,6 +1354,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ trafficAnalysis.baseline.burst_ratio.toFixed(2) }}x</strong>
             </div>
           </article>
+        </section>
+        <section class="command-grid">
+          <TrafficHeatmap :points="series" />
+          <HorizontalBarChart title="变化对象排行" eyebrow="Change Ranking" :items="trafficChangeItems" />
         </section>
         <section class="main-grid">
           <section class="collector-panel">
@@ -1322,6 +1467,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
       </template>
 
       <template v-else-if="currentView === 'analysis'">
+        <section class="command-grid">
+          <FlowMatrixChart :rows="matrixRows" />
+          <HorizontalBarChart title="目的端口流量" eyebrow="Port Ranking" :items="topPorts" />
+        </section>
         <section class="tables-grid analysis-grid">
           <TopNTable title="主机对排行" :items="topPairs" />
           <TopNTable title="会话排行" :items="topFlows" />
@@ -1360,6 +1509,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ matrixRows.length.toLocaleString() }}</strong>
             </div>
           </article>
+        </section>
+        <section class="command-grid">
+          <LiveFlowMap :nodes="serviceMap.nodes" :links="matrixRows" />
+          <FlowMatrixChart :rows="matrixRows" />
         </section>
         <section class="tables-grid analysis-grid">
           <section class="table-panel">
@@ -1435,6 +1588,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ formatBytes(exposureTotalBytes) }}</strong>
             </div>
           </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="风险级别流量" eyebrow="Risk Mix" :items="exposureRiskItems" />
+          <HorizontalBarChart title="服务类别流量" eyebrow="Service Category" :items="exposureCategoryItems" />
         </section>
         <section class="toolbar-panel exposure-toolbar">
           <label class="filter-field">
@@ -1543,6 +1700,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ rangeLabel }}</strong>
             </div>
           </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="资产角色流量" eyebrow="Asset Role" :items="assetRoleItems" />
+          <HorizontalBarChart title="重要性流量" eyebrow="Criticality" :items="assetCriticalityItems" />
         </section>
         <section v-if="assetEditor" class="table-panel asset-editor">
           <div class="panel-heading">
@@ -1667,6 +1828,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="线索类型流量" eyebrow="Insight Type" :items="insightKindItems" />
+          <HorizontalBarChart title="告警级别分布" eyebrow="Alert Severity" :items="alertSeverityItems" unit="count" />
+        </section>
         <section class="table-panel wide-key-table risk-table">
           <h2>风险线索</h2>
           <div v-if="securityInsights.length === 0" class="empty-state">暂无风险线索</div>
@@ -1741,6 +1906,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <section class="command-grid">
+          <HorizontalBarChart :title="`${ipProfile.ip} 主机对流量`" eyebrow="IP Pair Flow" :items="ipProfile.top_pairs" />
+          <HorizontalBarChart :title="`${ipProfile.ip} 会话流量`" eyebrow="IP Session Flow" :items="ipProfile.top_flows" />
+        </section>
         <section class="tables-grid analysis-grid">
           <TopNTable :title="`${ipProfile.ip} 主机对`" :items="ipProfile.top_pairs" />
           <TopNTable :title="`${ipProfile.ip} 会话`" :items="ipProfile.top_flows" />
@@ -1785,6 +1954,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <HorizontalBarChart :title="`目的端口 ${portProfile.port} 会话排行`" eyebrow="Port Sessions" :items="portProfile.flows" />
         <TopNTable :title="`目的端口 ${portProfile.port} 关联会话`" :items="portProfile.flows" />
       </template>
 
@@ -1799,6 +1969,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" :class="{ active: activeTopN === 'flow' }" @click="activeTopN = 'flow'">会话</button>
           <button type="button" class="command-button" @click="exportSelectedTopN">导出 CSV</button>
         </section>
+        <HorizontalBarChart :title="selectedTopNTitle" eyebrow="TopN Chart" :items="selectedTopN" />
         <TopNTable :title="selectedTopNTitle" :items="selectedTopN" />
       </template>
 
@@ -1823,6 +1994,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" :disabled="savingAlerts" @click="saveAlertConfig">
             {{ savingAlerts ? '保存中...' : '保存阈值' }}
           </button>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="告警级别分布" eyebrow="Severity" :items="alertSeverityItems" unit="count" />
+          <HorizontalBarChart title="处理状态分布" eyebrow="Status" :items="alertStatusItems" unit="count" />
         </section>
         <section class="table-panel whitelist-panel">
           <div class="panel-heading">
@@ -1890,6 +2065,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
           </label>
           <button type="button" @click="runSearch">检索</button>
         </section>
+        <HorizontalBarChart title="检索结果流量" eyebrow="Search Result" :items="searchResultItems" />
         <section class="table-panel">
           <h2>检索结果</h2>
           <table>
@@ -1916,6 +2092,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
       <template v-else-if="currentView === 'history'">
         <section class="toolbar-panel">
           <button type="button" class="command-button" @click="exportWindows">导出窗口 CSV</button>
+        </section>
+        <section class="command-grid">
+          <TrafficHeatmap :points="series" />
+          <DashboardChart class="chart-panel" :points="series" />
         </section>
         <section class="table-panel">
           <h2>历史窗口</h2>
@@ -1979,6 +2159,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" :disabled="switching" @click="applyCaptureConfig">
             {{ switching ? '切换中...' : '应用采集配置' }}
           </button>
+        </section>
+        <section class="command-grid">
+          <HealthGaugePanel :utilization="summary.utilization" :pps="pps" :online="onlineCollectorCount" :total="collectors.length" />
+          <TrafficHeatmap :points="series" />
         </section>
         <section class="collector-grid">
           <article class="collector-card">

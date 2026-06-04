@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { TopItem } from '../services/api';
 
-defineProps<{ title: string; items: TopItem[] }>();
+const props = defineProps<{ title: string; items: TopItem[] }>();
+
+const maxBytes = computed(() => Math.max(...props.items.map((item) => item.bytes), 1));
+const barWidth = (value: number) => `${Math.max(6, Math.round((value / maxBytes.value) * 100))}%`;
 
 const formatBytes = (value: number) => {
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`;
@@ -24,7 +28,12 @@ const formatBytes = (value: number) => {
       </thead>
       <tbody>
         <tr v-for="item in items" :key="item.key">
-          <td :title="item.key">{{ item.key }}</td>
+          <td :title="item.key">
+            <div class="topn-object">
+              <span class="topn-key">{{ item.key }}</span>
+              <span class="topn-bar"><span :style="{ width: barWidth(item.bytes) }"></span></span>
+            </div>
+          </td>
           <td>{{ formatBytes(item.bytes) }}</td>
           <td>{{ item.packets.toLocaleString() }}</td>
         </tr>

@@ -16,13 +16,13 @@ const render = () => {
     xAxis: {
       type: 'category',
       data: props.points.map((point) => new Date(point.ts * 1000).toLocaleTimeString()),
-      axisLine: { lineStyle: { color: '#304057' } },
-      axisLabel: { color: '#8ea3bd' }
+      axisLine: { lineStyle: { color: '#c7d1dd' } },
+      axisLabel: { color: '#67768a' }
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#8ea3bd' },
-      splitLine: { lineStyle: { color: '#1e2a3d' } }
+      axisLabel: { color: '#67768a' },
+      splitLine: { lineStyle: { color: '#e5eaf0' } }
     },
     series: [
       {
@@ -30,8 +30,8 @@ const render = () => {
         type: 'line',
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 3, color: '#22d3ee' },
-        areaStyle: { color: 'rgba(34, 211, 238, 0.14)' },
+        lineStyle: { width: 3, color: '#2563eb' },
+        areaStyle: { color: 'rgba(37, 99, 235, 0.14)' },
         data: props.points.map((point) => Number(((point.bytes * 8) / 60 / 1000 / 1000).toFixed(2)))
       }
     ]
