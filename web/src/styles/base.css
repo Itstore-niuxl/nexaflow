@@ -892,8 +892,13 @@ td {
 .exposure-table table,
 .session-table table,
 .external-table table,
+.anomaly-table table,
 .change-table table {
   table-layout: fixed;
+}
+
+.anomaly-table table {
+  min-width: 1180px;
 }
 
 .external-table table {

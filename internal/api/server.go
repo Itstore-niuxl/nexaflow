@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/search", s.search)
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
+	mux.HandleFunc("/api/v1/traffic/anomalies", s.trafficAnomalies)
 	mux.HandleFunc("/api/v1/assets", s.assets)
 	mux.HandleFunc("/api/v1/assets/metadata", s.assetMetadata)
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
@@ -241,6 +242,11 @@ func (s *Server) trafficAnalysis(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) trafficChanges(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.TrafficChanges(r.Context(), queryMinutes(r), queryLimit(r, 30, 100))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) trafficAnomalies(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.TrafficAnomalies(r.Context(), queryMinutes(r), queryLimit(r, 30, 100))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 

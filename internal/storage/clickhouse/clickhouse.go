@@ -971,6 +971,42 @@ func (s *Store) TrafficChanges(ctx context.Context, minutes, limit int) ([]map[s
 	return changes, firstErr(srcErr, dstErr, portErr, protoErr)
 }
 
+func (s *Store) TrafficAnomalies(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	linkRows, linkErr := s.linkAnomalies(ctx, minutes)
+	srcChanges, srcErr := s.dimensionChanges(ctx, "src_ip", "ip", "src", minutes, limit)
+	dstChanges, dstErr := s.dimensionChanges(ctx, "dst_ip", "ip", "dst", minutes, limit)
+	portChanges, portErr := s.dimensionChanges(ctx, "dst_port", "dst_port", "src", minutes, limit)
+	protoChanges, protoErr := s.dimensionChanges(ctx, "protocol", "protocol", "src", minutes, limit)
+	serviceChanges, serviceErr := s.dimensionChanges(ctx, "service", "service", "src", minutes, limit)
+
+	items := make([]map[string]any, 0, len(linkRows)+len(srcChanges)+len(dstChanges)+len(portChanges)+len(protoChanges)+len(serviceChanges))
+	items = append(items, linkRows...)
+	for _, rows := range [][]map[string]any{srcChanges, dstChanges, portChanges, protoChanges, serviceChanges} {
+		for _, row := range rows {
+			if anomaly, ok := anomalyFromChange(row, minutes); ok {
+				items = append(items, anomaly)
+			}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if insightWeight(stringValue(items[i]["severity"])) != insightWeight(stringValue(items[j]["severity"])) {
+			return insightWeight(stringValue(items[i]["severity"])) > insightWeight(stringValue(items[j]["severity"]))
+		}
+		if int64Value(items[i]["score"]) != int64Value(items[j]["score"]) {
+			return int64Value(items[i]["score"]) > int64Value(items[j]["score"])
+		}
+		return int64Value(items[i]["delta_bytes"]) > int64Value(items[j]["delta_bytes"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	err := firstErr(linkErr, srcErr, dstErr, portErr, protoErr, serviceErr)
+	if len(items) == 0 && err != nil {
+		return demoTrafficAnomalies(), err
+	}
+	return items, err
+}
+
 func (s *Store) ServiceExposure(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
 	flows, err := s.TopN(ctx, "flow", "src", limit*5, minutes)
 	if err != nil {
@@ -1404,6 +1440,59 @@ FORMAT JSON`, s.database, endMinutesAgo, startMinutesAgo, escape(dimension), lim
 		return nil, err
 	}
 	return parsed.Data, nil
+}
+
+func (s *Store) linkAnomalies(ctx context.Context, minutes int) ([]map[string]any, error) {
+	current, currentErr := s.linkWindowTotal(ctx, 0, minutes)
+	previous, previousErr := s.linkWindowTotal(ctx, minutes, minutes*2)
+	deltaBytes := int64(current.Bytes) - int64(previous.Bytes)
+	ratioValue := changeRatio(current.Bytes, previous.Bytes)
+	if deltaBytes <= 0 || (current.Bytes < 5*1024*1024 && ratioValue < 1.5) {
+		return []map[string]any{}, firstErr(currentErr, previousErr)
+	}
+	severity := "warning"
+	score := 65
+	if ratioValue >= 2 || current.Bytes >= previous.Bytes+100*1024*1024 {
+		severity = "critical"
+		score = 88
+	}
+	return []map[string]any{{
+		"kind":             "link_burst",
+		"dimension":        "link",
+		"key":              "链路总流量",
+		"severity":         severity,
+		"summary":          fmt.Sprintf("近 %d 分钟链路总流量较上一周期增长 %s", minutes, formatChangeRatioText(ratioValue)),
+		"current_bytes":    current.Bytes,
+		"baseline_bytes":   previous.Bytes,
+		"delta_bytes":      deltaBytes,
+		"current_packets":  current.Packets,
+		"baseline_packets": previous.Packets,
+		"delta_packets":    int64(current.Packets) - int64(previous.Packets),
+		"change_ratio":     ratioValue,
+		"score":            score,
+	}}, firstErr(currentErr, previousErr)
+}
+
+func (s *Store) linkWindowTotal(ctx context.Context, startMinutesAgo, endMinutesAgo int) (model.TopItem, error) {
+	q := fmt.Sprintf(`SELECT 'link' AS key, ifNull(sum(bytes), 0) AS bytes, ifNull(sum(packets), 0) AS packets
+FROM %s.link_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+    AND ts < now() - INTERVAL %d MINUTE
+FORMAT JSON`, s.database, endMinutesAgo, startMinutesAgo)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return model.TopItem{Key: "link"}, err
+	}
+	var parsed struct {
+		Data []model.TopItem `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return model.TopItem{Key: "link"}, err
+	}
+	if len(parsed.Data) == 0 {
+		return model.TopItem{Key: "link"}, nil
+	}
+	return parsed.Data[0], nil
 }
 
 func (s *Store) trafficBaseline(ctx context.Context, minutes int) (map[string]any, error) {
@@ -2162,6 +2251,41 @@ func demoSecurityInsights() []map[string]any {
 	}
 }
 
+func demoTrafficAnomalies() []map[string]any {
+	return []map[string]any{
+		{
+			"kind":             "link_burst",
+			"dimension":        "link",
+			"key":              "链路总流量",
+			"severity":         "warning",
+			"summary":          "近 15 分钟链路总流量较上一周期增长 +85.0%",
+			"current_bytes":    uint64(158000000),
+			"baseline_bytes":   uint64(85000000),
+			"delta_bytes":      int64(73000000),
+			"current_packets":  uint64(98000),
+			"baseline_packets": uint64(54000),
+			"delta_packets":    int64(44000),
+			"change_ratio":     0.85,
+			"score":            72,
+		},
+		{
+			"kind":             "new_dimension",
+			"dimension":        "service",
+			"key":              "SSH",
+			"severity":         "critical",
+			"summary":          "应用服务 SSH 近 15 分钟新出现流量 18.00 MB",
+			"current_bytes":    uint64(18000000),
+			"baseline_bytes":   uint64(0),
+			"delta_bytes":      int64(18000000),
+			"current_packets":  uint64(7200),
+			"baseline_packets": uint64(0),
+			"delta_packets":    int64(7200),
+			"change_ratio":     999.0,
+			"score":            88,
+		},
+	}
+}
+
 func demoTrafficAnalysis() map[string]any {
 	return map[string]any{
 		"minutes": 15,
@@ -2303,6 +2427,99 @@ func addTopItem(items map[string]model.TopItem, key string, bytes, packets uint6
 	item.Bytes += bytes
 	item.Packets += packets
 	items[key] = item
+}
+
+func anomalyFromChange(row map[string]any, minutes int) (map[string]any, bool) {
+	currentBytes := uintValue(row["current_bytes"])
+	previousBytes := uintValue(row["previous_bytes"])
+	deltaBytes := int64Value(row["delta_bytes"])
+	ratioValue := floatValue(row["change_ratio"])
+	if deltaBytes <= 0 {
+		return nil, false
+	}
+	if previousBytes > 0 && ratioValue < 0.8 && deltaBytes < int64(10*1024*1024) {
+		return nil, false
+	}
+	if previousBytes == 0 && currentBytes < 2*1024*1024 {
+		return nil, false
+	}
+	severity := "warning"
+	score := 60
+	kind := "dimension_growth"
+	if previousBytes == 0 {
+		kind = "new_dimension"
+		score = 72
+	} else {
+		score = min(60+int(ratioValue*12), 95)
+	}
+	if ratioValue >= 2 || currentBytes >= previousBytes+50*1024*1024 {
+		severity = "critical"
+		score = max(score, 85)
+	}
+	dimension := stringValue(row["dimension"])
+	key := stringValue(row["key"])
+	summary := fmt.Sprintf("%s %s 近 %d 分钟流量较上一周期增长 %s", anomalyDimensionText(dimension), key, minutes, formatChangeRatioText(ratioValue))
+	if previousBytes == 0 {
+		summary = fmt.Sprintf("%s %s 近 %d 分钟新出现流量 %s", anomalyDimensionText(dimension), key, minutes, formatBytesText(currentBytes))
+	}
+	return map[string]any{
+		"kind":             kind,
+		"dimension":        dimension,
+		"key":              key,
+		"severity":         severity,
+		"summary":          summary,
+		"current_bytes":    currentBytes,
+		"baseline_bytes":   previousBytes,
+		"delta_bytes":      deltaBytes,
+		"current_packets":  uintValue(row["current_packets"]),
+		"baseline_packets": uintValue(row["previous_packets"]),
+		"delta_packets":    int64Value(row["delta_packets"]),
+		"change_ratio":     ratioValue,
+		"score":            score,
+	}, true
+}
+
+func anomalyDimensionText(dimension string) string {
+	switch dimension {
+	case "src_ip":
+		return "源 IP"
+	case "dst_ip":
+		return "目的 IP"
+	case "dst_port":
+		return "目的端口"
+	case "protocol":
+		return "协议"
+	case "service":
+		return "应用服务"
+	case "link":
+		return "链路"
+	default:
+		return dimension
+	}
+}
+
+func formatChangeRatioText(value float64) string {
+	if value >= 999 {
+		return "新增"
+	}
+	sign := "+"
+	if value < 0 {
+		sign = ""
+	}
+	return fmt.Sprintf("%s%.1f%%", sign, value*100)
+}
+
+func formatBytesText(value uint64) string {
+	switch {
+	case value >= 1024*1024*1024:
+		return fmt.Sprintf("%.2f GB", float64(value)/float64(1024*1024*1024))
+	case value >= 1024*1024:
+		return fmt.Sprintf("%.2f MB", float64(value)/float64(1024*1024))
+	case value >= 1024:
+		return fmt.Sprintf("%.2f KB", float64(value)/float64(1024))
+	default:
+		return fmt.Sprintf("%d B", value)
+	}
 }
 
 func sortedTopItems(items map[string]model.TopItem, limit int) []model.TopItem {

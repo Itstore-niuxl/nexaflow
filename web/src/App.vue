@@ -59,6 +59,7 @@ import {
   type Summary,
   type SystemStatus,
   type TrafficAnalysis,
+  type TrafficAnomaly,
   type TrafficChange,
   type TopItem,
   type WindowRow
@@ -126,6 +127,7 @@ const assetEditor = ref<AssetMetadata | null>(null);
 const assetTagsText = ref('');
 const securityInsights = ref<SecurityInsight[]>([]);
 const trafficChanges = ref<TrafficChange[]>([]);
+const trafficAnomalies = ref<TrafficAnomaly[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
   minutes: 15,
   baseline: {
@@ -186,6 +188,7 @@ const navGroups = [
     title: '分析',
     items: [
       { id: 'analysis', label: '流向分析', icon: Route },
+      { id: 'anomalies', label: '异常波动', icon: AlertTriangle },
       { id: 'topology', label: '服务拓扑', icon: Network },
       { id: 'topn', label: 'TopN 分析', icon: ListOrdered },
       { id: 'sessions', label: '会话追踪', icon: Waypoints },
@@ -218,6 +221,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   realtime: { title: '实时监控', subtitle: '采集窗口、吞吐、包速率和采集器健康状态' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
+  anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
   topology: { title: '服务拓扑', subtitle: '基于主机对流量构建节点和链路视图' },
   exposure: { title: '服务暴露', subtitle: '识别目的 IP 上的服务端口、协议、服务类型和风险级别' },
   external: { title: '公网访问', subtitle: '聚合公网对端、内部资产、访问方向、服务端口和风险' },
@@ -286,7 +290,8 @@ const refresh = async () => {
       assetsRes,
       securityRes,
       trafficAnalysisRes,
-      trafficChangesRes
+      trafficChangesRes,
+      trafficAnomaliesRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -320,7 +325,8 @@ const refresh = async () => {
       api.assets(minutes, 100),
       api.securityInsights(minutes, 100),
       api.trafficAnalysis(minutes),
-      api.trafficChanges(minutes, 30)
+      api.trafficChanges(minutes, 30),
+      api.trafficAnomalies(minutes, 40)
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -355,6 +361,7 @@ const refresh = async () => {
     securityInsights.value = securityRes.data;
     trafficAnalysis.value = trafficAnalysisRes.data;
     trafficChanges.value = trafficChangesRes.data;
+    trafficAnomalies.value = trafficAnomaliesRes.data;
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -380,7 +387,8 @@ const refresh = async () => {
       assetsRes.degraded ||
       securityRes.degraded ||
       trafficAnalysisRes.degraded ||
-      trafficChangesRes.degraded;
+      trafficChangesRes.degraded ||
+      trafficAnomaliesRes.degraded;
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -815,6 +823,38 @@ const refresh = async () => {
         change_ratio: 0.69
       }
     ];
+    trafficAnomalies.value = [
+      {
+        kind: 'link_burst',
+        dimension: 'link',
+        key: '链路总流量',
+        severity: 'warning',
+        summary: '近 15 分钟链路总流量较上一周期增长 +85.0%',
+        current_bytes: 158000000,
+        baseline_bytes: 85000000,
+        delta_bytes: 73000000,
+        current_packets: 98000,
+        baseline_packets: 54000,
+        delta_packets: 44000,
+        change_ratio: 0.85,
+        score: 72
+      },
+      {
+        kind: 'new_dimension',
+        dimension: 'service',
+        key: 'SSH',
+        severity: 'critical',
+        summary: '应用服务 SSH 近 15 分钟新出现流量 18.00 MB',
+        current_bytes: 18000000,
+        baseline_bytes: 0,
+        delta_bytes: 18000000,
+        current_packets: 7200,
+        baseline_packets: 0,
+        delta_packets: 7200,
+        change_ratio: 999,
+        score: 88
+      }
+    ];
     degraded.value = true;
   } finally {
     loading.value = false;
@@ -975,6 +1015,14 @@ const trafficChangeItems = computed(() =>
     .map((row) => ({ key: `${changeDimensionText(row.dimension)} / ${row.key}`, bytes: Math.abs(row.delta_bytes), packets: Math.abs(row.delta_packets) }))
     .sort((a, b) => b.bytes - a.bytes)
 );
+const anomalyDeltaItems = computed(() =>
+  trafficAnomalies.value
+    .map((row) => ({ key: `${changeDimensionText(row.dimension)} / ${row.key}`, bytes: Math.abs(row.delta_bytes), packets: Math.abs(row.delta_packets) }))
+    .sort((a, b) => b.bytes - a.bytes)
+);
+const anomalyKindItems = computed(() => aggregateTopItems(trafficAnomalies.value, (row) => anomalyKindText(row.kind), (row) => Math.abs(row.delta_bytes), (row) => Math.abs(row.delta_packets)));
+const anomalySeverityItems = computed(() => aggregateTopItems(trafficAnomalies.value, (row) => severityText(row.severity), () => 1, () => 0));
+const criticalAnomalyCount = computed(() => trafficAnomalies.value.filter((row) => row.severity === 'critical').length);
 const exposureRiskItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
 const exposureCategoryItems = computed(() => aggregateTopItems(serviceExposure.value, (row) => row.category, (row) => row.bytes, (row) => row.packets));
 const externalPublicItems = computed(() => aggregateTopItems(externalAccess.value, (row) => row.public_ip, (row) => row.bytes, (row) => row.packets));
@@ -1080,12 +1128,23 @@ const severityText = (severity: string) => {
 
 const changeDimensionText = (dimension: string) => {
   const labels: Record<string, string> = {
+    link: '链路',
     src_ip: '源 IP',
     dst_ip: '目的 IP',
     dst_port: '目的端口',
-    protocol: '协议'
+    protocol: '协议',
+    service: '应用服务'
   };
   return labels[dimension] ?? dimension;
+};
+
+const anomalyKindText = (kind: string) => {
+  const labels: Record<string, string> = {
+    link_burst: '链路突增',
+    dimension_growth: '对象突增',
+    new_dimension: '新增对象'
+  };
+  return labels[kind] ?? kind;
 };
 
 const formatChangeRatio = (value: number) => {
@@ -1947,6 +2006,79 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TopNTable title="会话排行" :items="topFlows" />
           <TopNTable title="目的端口排行" :items="topPorts" />
           <TopNTable title="协议排行" :items="topProtocols" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'anomalies'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重异常</span>
+              <strong>{{ criticalAnomalyCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>异常对象</span>
+              <strong>{{ trafficAnomalies.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>最大增量</span>
+              <strong>{{ anomalyDeltaItems[0] ? formatBytes(anomalyDeltaItems[0].bytes) : '0 B' }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <History :size="22" />
+            <div>
+              <span>对比周期</span>
+              <strong>{{ rangeLabel }} / 上一周期</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="异常增量排行" eyebrow="Anomaly Delta" :items="anomalyDeltaItems" />
+          <HorizontalBarChart title="异常类型分布" eyebrow="Anomaly Type" :items="anomalyKindItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="异常级别分布" eyebrow="Severity" :items="anomalySeverityItems" unit="count" />
+          <HorizontalBarChart title="变化对象排行" eyebrow="Change Ranking" :items="trafficChangeItems" />
+        </section>
+        <section class="table-panel wide-key-table anomaly-table">
+          <h2>异常波动明细</h2>
+          <div v-if="trafficAnomalies.length === 0" class="empty-state">暂无异常波动</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>类型</th>
+                <th>级别</th>
+                <th>摘要</th>
+                <th>当前流量</th>
+                <th>基线流量</th>
+                <th>增量</th>
+                <th>变化率</th>
+                <th>评分</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in trafficAnomalies" :key="`${row.kind}-${row.dimension}-${row.key}`">
+                <td>{{ row.key }}</td>
+                <td>{{ anomalyKindText(row.kind) }} / {{ changeDimensionText(row.dimension) }}</td>
+                <td><span class="severity-pill" :class="row.severity">{{ severityText(row.severity) }}</span></td>
+                <td>{{ row.summary }}</td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.baseline_bytes) }}</td>
+                <td>{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
+                <td>{{ formatChangeRatio(row.change_ratio) }}</td>
+                <td>{{ row.score }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
       </template>
 

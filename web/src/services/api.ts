@@ -309,6 +309,22 @@ export interface TrafficChange {
   change_ratio: number;
 }
 
+export interface TrafficAnomaly {
+  kind: string;
+  dimension: string;
+  key: string;
+  severity: string;
+  summary: string;
+  current_bytes: number;
+  baseline_bytes: number;
+  delta_bytes: number;
+  current_packets: number;
+  baseline_packets: number;
+  delta_packets: number;
+  change_ratio: number;
+  score: number;
+}
+
 const json = async <T>(url: string): Promise<T> => {
   const response = await fetch(url);
   if (!response.ok) {
@@ -423,6 +439,9 @@ export const api = {
   },
   async trafficChanges(minutes = 15, limit = 30) {
     return json<{ data: TrafficChange[]; degraded: boolean }>(`/api/v1/traffic/changes?minutes=${minutes}&limit=${limit}`);
+  },
+  async trafficAnomalies(minutes = 15, limit = 30) {
+    return json<{ data: TrafficAnomaly[]; degraded: boolean }>(`/api/v1/traffic/anomalies?minutes=${minutes}&limit=${limit}`);
   },
   async alertConfig() {
     return json<{ data: AlertConfig }>('/api/v1/alerts/config');
