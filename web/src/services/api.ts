@@ -25,6 +25,7 @@ export interface Collector {
   bpf_filter?: string;
   pcap_file?: string;
   replay_speed?: number;
+  session_topn?: number;
   updated_at?: number;
 }
 
@@ -51,6 +52,7 @@ export interface CollectorConfig {
   bpf_filter: string;
   pcap_file?: string;
   replay_speed?: number;
+  session_topn?: number;
   updated_at?: number;
 }
 

@@ -512,6 +512,7 @@ func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
 			"bpf_filter":   runtime.BPFFilter,
 			"pcap_file":    runtime.PcapFile,
 			"replay_speed": runtime.ReplaySpeed,
+			"session_topn": runtime.SessionTopN,
 			"updated_at":   runtime.UpdatedAt,
 		}},
 	})
@@ -546,6 +547,9 @@ func (s *Server) collectorConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ReplaySpeed <= 0 {
 		body.ReplaySpeed = current.ReplaySpeed
+	}
+	if body.SessionTopN <= 0 {
+		body.SessionTopN = current.SessionTopN
 	}
 	if alertsEmpty(body.Alerts) {
 		body.Alerts = current.Alerts
@@ -689,6 +693,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"bpf_filter":   runtime.BPFFilter,
 		"pcap_file":    runtime.PcapFile,
 		"replay_speed": runtime.ReplaySpeed,
+		"session_topn": runtime.SessionTopN,
 		"alerts":       runtime.Alerts,
 		"updated_at":   runtime.UpdatedAt,
 	}

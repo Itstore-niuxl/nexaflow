@@ -40,9 +40,13 @@ func main() {
 		log.Printf("runtime config init failed: %v", err)
 	}
 	go runCaptureManager(ctx, cfg.RuntimePath, defaultRuntime, packets)
-	go aggregate.New(cfg.Window, cfg.BandwidthMbps, func() config.Alerts {
+	aggregator := aggregate.New(cfg.Window, cfg.BandwidthMbps, func() config.Alerts {
 		return config.LoadRuntime(cfg.RuntimePath, defaultRuntime).Alerts
-	}).Run(packets, windows)
+	})
+	aggregator.SessionLimit = func() int {
+		return config.LoadRuntime(cfg.RuntimePath, defaultRuntime).SessionTopN
+	}
+	go aggregator.Run(packets, windows)
 
 	captureStats := newInterfaceStatsTracker()
 	log.Printf("collector started runtime_config=%s window=%s", cfg.RuntimePath, cfg.Window)
@@ -62,7 +66,7 @@ func main() {
 			if err := redis.WriteWindow(ctx, win); err != nil {
 				log.Printf("redis write failed: %v", err)
 			}
-			log.Printf("window ts=%d bytes=%d packets=%d top_src=%d", win.Ts, win.Link.Bytes, win.Link.Packets, len(win.TopSrcIP))
+			log.Printf("window ts=%d bytes=%d packets=%d top_src=%d top_flow=%d", win.Ts, win.Link.Bytes, win.Link.Packets, len(win.TopSrcIP), len(win.TopFlow))
 		}
 	}
 }

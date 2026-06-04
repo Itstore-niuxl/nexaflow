@@ -330,6 +330,7 @@ const selectedIface = ref('eth0');
 const selectedFilter = ref('ip or ip6');
 const selectedPcapFile = ref('/var/lib/nexaflow/replay.pcap');
 const selectedReplaySpeed = ref(1);
+const selectedSessionTopN = ref(500);
 const trendDimension = ref('service');
 const trendKey = ref('');
 const trendDirection = ref('src');
@@ -635,6 +636,7 @@ const refresh = async () => {
       selectedFilter.value = collectorRes.data[0].bpf_filter ?? selectedFilter.value;
       selectedPcapFile.value = collectorRes.data[0].pcap_file ?? selectedPcapFile.value;
       selectedReplaySpeed.value = collectorRes.data[0].replay_speed ?? selectedReplaySpeed.value;
+      selectedSessionTopN.value = collectorRes.data[0].session_topn ?? selectedSessionTopN.value;
     }
     degraded.value = nextDegraded;
   } catch {
@@ -704,7 +706,7 @@ const refresh = async () => {
       { key: '10.10.1.77 -> 172.20.2.81', bytes: 21000000, packets: 8000 },
       { key: '10.10.1.18 -> 172.20.2.144', bytes: 11000000, packets: 6000 }
     ];
-    collectors.value = [{ id: 'dev-collector-01', source_id: 'dev-source-01', status: 'offline', mode: 'mock', bpf_filter: 'ip or ip6', updated_at: now }];
+    collectors.value = [{ id: 'dev-collector-01', source_id: 'dev-source-01', status: 'offline', mode: 'mock', bpf_filter: 'ip or ip6', session_topn: 500, updated_at: now }];
     interfaces.value = [{ name: 'eth0', state: 'up', type: 'interface' }];
     systemStatus.value = { database: 'degraded', latest_window_ts: now, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 };
     dataQuality.value = {
@@ -2109,7 +2111,8 @@ const applyCaptureConfig = async () => {
       source_id: `${selectedMode.value}-${selectedIface.value}`,
       bpf_filter: selectedFilter.value.trim() || 'ip or ip6',
       pcap_file: selectedPcapFile.value.trim() || '/var/lib/nexaflow/replay.pcap',
-      replay_speed: selectedReplaySpeed.value || 1
+      replay_speed: selectedReplaySpeed.value || 1,
+      session_topn: Math.max(20, Math.min(5000, Math.trunc(selectedSessionTopN.value || 500)))
     };
     await api.updateCollectorConfig(config);
     await refresh();
@@ -5349,6 +5352,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <span>回放倍率</span>
             <input v-model.number="selectedReplaySpeed" type="number" min="0.1" step="0.1" />
           </label>
+          <label>
+            <span>会话保留量</span>
+            <input v-model.number="selectedSessionTopN" type="number" min="20" max="5000" step="50" />
+          </label>
           <button type="button" :disabled="switching" @click="applyCaptureConfig">
             {{ switching ? '切换中...' : '应用采集配置' }}
           </button>
@@ -5384,6 +5391,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div><span>采集过滤</span><strong>{{ collector.bpf_filter ?? '-' }}</strong></div>
               <div><span>PCAP 文件</span><strong>{{ collector.pcap_file ?? '-' }}</strong></div>
               <div><span>回放倍率</span><strong>{{ collector.replay_speed ?? 1 }}x</strong></div>
+              <div><span>会话保留量</span><strong>{{ (collector.session_topn ?? 500).toLocaleString() }} / 窗口</strong></div>
               <div><span>配置更新时间</span><strong>{{ formatTime(collector.updated_at ?? 0) }}</strong></div>
               <div><span>窗口大小</span><strong>5 秒</strong></div>
               <div><span>数据链路</span><strong>Redis / ClickHouse</strong></div>

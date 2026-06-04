@@ -60,6 +60,7 @@ services:
       NEXAFLOW_IFACE: ${NEXAFLOW_IFACE:-eth0}
       NEXAFLOW_SOURCE_ID: ${NEXAFLOW_SOURCE_ID:-live-eth0}
       NEXAFLOW_BPF_FILTER: ${NEXAFLOW_BPF_FILTER:-ip or ip6}
+      NEXAFLOW_SESSION_TOPN: ${NEXAFLOW_SESSION_TOPN:-500}
       NEXAFLOW_RUNTIME_CONFIG: /var/lib/nexaflow/collector_config.json
     volumes:
       - ../runtime:/var/lib/nexaflow

@@ -18,6 +18,7 @@ type Config struct {
 	CollectorID   string
 	Iface         string
 	Window        time.Duration
+	SessionTopN   int
 	RedisAddr     string
 	ClickHouseURL string
 	Database      string
@@ -36,6 +37,7 @@ type CaptureRuntime struct {
 	BPFFilter   string  `json:"bpf_filter"`
 	PcapFile    string  `json:"pcap_file"`
 	ReplaySpeed float64 `json:"replay_speed"`
+	SessionTopN int     `json:"session_topn"`
 	Alerts      Alerts  `json:"alerts"`
 	UpdatedAt   int64   `json:"updated_at"`
 }
@@ -57,6 +59,7 @@ func Load() Config {
 		CollectorID:   env("NEXAFLOW_COLLECTOR_ID", "dev-collector-01"),
 		Iface:         env("NEXAFLOW_IFACE", "mock0"),
 		Window:        envDuration("NEXAFLOW_WINDOW", 5*time.Second),
+		SessionTopN:   envInt("NEXAFLOW_SESSION_TOPN", 500),
 		RedisAddr:     env("NEXAFLOW_REDIS_ADDR", "127.0.0.1:6379"),
 		ClickHouseURL: env("NEXAFLOW_CLICKHOUSE_URL", "http://127.0.0.1:8123"),
 		Database:      env("NEXAFLOW_CLICKHOUSE_DB", "nexaflow"),
@@ -73,6 +76,7 @@ func Load() Config {
 	flag.StringVar(&cfg.SourceID, "source-id", cfg.SourceID, "capture source id")
 	flag.StringVar(&cfg.CollectorID, "collector-id", cfg.CollectorID, "collector id")
 	flag.StringVar(&cfg.Iface, "interface", cfg.Iface, "capture interface name")
+	flag.IntVar(&cfg.SessionTopN, "session-topn", cfg.SessionTopN, "session and pair rows kept per aggregation window")
 	flag.StringVar(&cfg.RedisAddr, "redis-addr", cfg.RedisAddr, "Redis address")
 	flag.StringVar(&cfg.ClickHouseURL, "clickhouse-url", cfg.ClickHouseURL, "ClickHouse HTTP URL")
 	flag.StringVar(&cfg.Database, "clickhouse-db", cfg.Database, "ClickHouse database")
@@ -98,6 +102,7 @@ func DefaultRuntime(cfg Config) CaptureRuntime {
 		BPFFilter:   cfg.BPFFilter,
 		PcapFile:    cfg.PcapFile,
 		ReplaySpeed: cfg.ReplaySpeed,
+		SessionTopN: cfg.SessionTopN,
 		Alerts:      defaultAlerts(),
 		UpdatedAt:   time.Now().Unix(),
 	}
@@ -151,8 +156,22 @@ func normalizeRuntime(runtime CaptureRuntime) CaptureRuntime {
 	if runtime.ReplaySpeed <= 0 {
 		runtime.ReplaySpeed = 1
 	}
+	runtime.SessionTopN = normalizeSessionTopN(runtime.SessionTopN)
 	runtime.Alerts = normalizeAlerts(runtime.Alerts)
 	return runtime
+}
+
+func normalizeSessionTopN(limit int) int {
+	switch {
+	case limit <= 0:
+		return 500
+	case limit < 20:
+		return 20
+	case limit > 5000:
+		return 5000
+	default:
+		return limit
+	}
 }
 
 func defaultAlerts() Alerts {
@@ -306,6 +325,15 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 func envUint64(key string, fallback uint64) uint64 {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
 	}

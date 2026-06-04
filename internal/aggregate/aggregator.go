@@ -13,6 +13,8 @@ import (
 type Aggregator struct {
 	Window        time.Duration
 	BandwidthMbps uint64
+	SessionTopN   int
+	SessionLimit  func() int
 	Alerts        func() config.Alerts
 }
 
@@ -22,7 +24,7 @@ type counter struct {
 }
 
 func New(window time.Duration, bandwidthMbps uint64, alerts func() config.Alerts) *Aggregator {
-	return &Aggregator{Window: window, BandwidthMbps: bandwidthMbps, Alerts: alerts}
+	return &Aggregator{Window: window, BandwidthMbps: bandwidthMbps, SessionTopN: 500, Alerts: alerts}
 }
 
 func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResult) {
@@ -54,6 +56,7 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 			capacity := float64(a.BandwidthMbps) * 1000 * 1000 * a.Window.Seconds()
 			util = bits / capacity
 		}
+		sessionTopN := a.sessionTopN()
 		result := model.WindowResult{
 			Ts:       current,
 			SourceID: sourceID,
@@ -70,8 +73,8 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 			TopDstIP:     top(dst, 20),
 			TopDstPort:   top(ports, 20),
 			TopProtocol:  top(protos, 20),
-			TopFlow:      top(flows, 100),
-			TopPair:      top(pairs, 100),
+			TopFlow:      top(flows, sessionTopN),
+			TopPair:      top(pairs, sessionTopN),
 			TopPacketLen: top(packetLens, 20),
 			TopService:   top(services, 20),
 			TopSvcCat:    top(serviceCategories, 20),
@@ -157,6 +160,26 @@ func (a *Aggregator) alerts() config.Alerts {
 		}
 	}
 	return a.Alerts()
+}
+
+func (a *Aggregator) sessionTopN() int {
+	if a.SessionLimit != nil {
+		return normalizeTopN(a.SessionLimit())
+	}
+	return normalizeTopN(a.SessionTopN)
+}
+
+func normalizeTopN(limit int) int {
+	switch {
+	case limit <= 0:
+		return 500
+	case limit < 20:
+		return 20
+	case limit > 5000:
+		return 5000
+	default:
+		return limit
+	}
 }
 
 func add(m map[string]counter, key string, bytes uint32) {

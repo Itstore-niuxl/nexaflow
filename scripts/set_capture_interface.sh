@@ -2,13 +2,18 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <interface> [mode]"
-  echo "Example: $0 eth0 live_pcap"
+  echo "Usage: $0 <interface> [mode] [session_topn]"
+  echo "Example: $0 eth0 live_pcap 500"
   exit 1
 fi
 
 IFACE="$1"
 MODE="${2:-live_pcap}"
+SESSION_TOPN="${3:-500}"
+if [[ ! "${SESSION_TOPN}" =~ ^[0-9]+$ ]]; then
+  echo "session_topn must be an integer"
+  exit 1
+fi
 REMOTE_HOST="${NEXAFLOW_REMOTE_HOST:?Set NEXAFLOW_REMOTE_HOST to your Ubuntu server host}"
 REMOTE_USER="${NEXAFLOW_REMOTE_USER:-ubuntu}"
 REMOTE_DIR="${NEXAFLOW_REMOTE_DIR:-/home/ubuntu/nexaflow}"
@@ -23,6 +28,7 @@ NEXAFLOW_MODE=${MODE}
 NEXAFLOW_IFACE=${IFACE}
 NEXAFLOW_SOURCE_ID=${MODE}-${IFACE}
 NEXAFLOW_BPF_FILTER=ip or ip6
+NEXAFLOW_SESSION_TOPN=${SESSION_TOPN}
 EOF
   mkdir -p runtime
   cat > runtime/collector_config.json <<EOF
@@ -31,6 +37,7 @@ EOF
   "iface": "${IFACE}",
   "source_id": "${MODE}-${IFACE}",
   "bpf_filter": "ip or ip6",
+  "session_topn": ${SESSION_TOPN},
   "updated_at": $(date +%s)
 }
 EOF
@@ -41,4 +48,4 @@ EOF
   docker compose -f deploy/docker-compose.yaml ps collector api-server web
 "
 
-echo "采集模式已切换：${MODE} / ${IFACE}"
+echo "采集模式已切换：${MODE} / ${IFACE}，会话保留量：${SESSION_TOPN}"

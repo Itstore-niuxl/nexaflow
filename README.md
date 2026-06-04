@@ -9,7 +9,7 @@ mock / pcap replay / live NIC -> 5s aggregation -> Redis / ClickHouse -> Go API 
 ## Current Scope
 
 - Go collector with mock traffic generation, classic pcap replay, and Linux live NIC capture.
-- 5 second window aggregation.
+- 5 second window aggregation with configurable session and pair retention per window.
 - 1 minute ClickHouse rollup tables and materialized views.
 - ClickHouse writes through HTTP.
 - Redis realtime TopN writes through RESP.
@@ -69,7 +69,7 @@ Then switch the collector from the Web `采集器` page or post:
 ```bash
 curl -X POST http://<ubuntu-ip>:8081/api/v1/collectors/config \
   -H 'Content-Type: application/json' \
-  -d '{"mode":"pcap_replay","iface":"replay0","source_id":"pcap-replay0","bpf_filter":"ip or ip6","pcap_file":"/var/lib/nexaflow/replay.pcap","replay_speed":5}'
+  -d '{"mode":"pcap_replay","iface":"replay0","source_id":"pcap-replay0","bpf_filter":"ip or ip6","pcap_file":"/var/lib/nexaflow/replay.pcap","replay_speed":5,"session_topn":500}'
 ```
 
 Prometheus-style metrics are available at:
