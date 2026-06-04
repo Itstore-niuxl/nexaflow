@@ -893,8 +893,13 @@ td {
 .session-table table,
 .external-table table,
 .anomaly-table table,
+.incident-table table,
 .change-table table {
   table-layout: fixed;
+}
+
+.incident-table table {
+  min-width: 1540px;
 }
 
 .anomaly-table table {
@@ -966,6 +971,29 @@ td {
 .risk-table td:first-child {
   width: 28%;
   min-width: 0;
+}
+
+.incident-table th:first-child,
+.incident-table td:first-child {
+  width: 18%;
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.incident-table th:nth-child(6),
+.incident-table td:nth-child(6),
+.incident-table th:nth-child(7),
+.incident-table td:nth-child(7) {
+  width: 22%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+
+.incident-table th:nth-child(11),
+.incident-table td:nth-child(11) {
+  width: 140px;
 }
 
 .risk-table th:nth-child(4),

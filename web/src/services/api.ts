@@ -253,6 +253,23 @@ export interface SecurityInsight {
   score: number;
 }
 
+export interface SecurityIncident {
+  id: string;
+  source: string;
+  category: string;
+  kind: string;
+  severity: string;
+  status: string;
+  subject: string;
+  summary: string;
+  bytes: number;
+  packets: number;
+  score: number;
+  first_seen: number;
+  last_seen: number;
+  recommended_action: string;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -432,6 +449,11 @@ export const api = {
   async securityInsights(minutes = 15, limit = 50) {
     return json<{ data: SecurityInsight[]; degraded: boolean }>(
       `/api/v1/security/insights?minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async securityIncidents(minutes = 15, limit = 80) {
+    return json<{ data: SecurityIncident[]; degraded: boolean }>(
+      `/api/v1/security/incidents?minutes=${minutes}&limit=${limit}`
     );
   },
   async trafficAnalysis(minutes = 15) {

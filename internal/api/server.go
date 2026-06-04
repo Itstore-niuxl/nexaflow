@@ -52,6 +52,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/assets", s.assets)
 	mux.HandleFunc("/api/v1/assets/metadata", s.assetMetadata)
 	mux.HandleFunc("/api/v1/security/insights", s.securityInsights)
+	mux.HandleFunc("/api/v1/security/incidents", s.securityIncidents)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -286,6 +287,21 @@ func (s *Server) securityInsights(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.SecurityInsights(r.Context(), queryMinutes(r), queryLimit(r, 50, 200))
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) securityIncidents(w http.ResponseWriter, r *http.Request) {
+	limit := queryLimit(r, 80, 300)
+	data, err := s.store.SecurityIncidents(r.Context(), queryMinutes(r), limit)
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	data = filterSilencedMaps(data, runtime.Alerts.SilencedSubjects, "subject")
+	statusData, _ := s.store.Status(r.Context())
+	if alert := collectorHealthAlert(s.config.CollectorID, statusData); alert.ID != "" && !isSilencedSubject(alert.Subject, runtime.Alerts.SilencedSubjects) {
+		data = append([]map[string]any{collectorIncident(alert)}, data...)
+		if len(data) > limit {
+			data = data[:limit]
+		}
+	}
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -619,6 +635,25 @@ func collectorHealthAlert(collectorID string, status map[string]any) model.Alert
 		Summary:   "Collector 超过 30 秒未产生新采集窗口",
 		FirstSeen: lastSeen,
 		LastSeen:  now,
+	}
+}
+
+func collectorIncident(alert model.AlertEvent) map[string]any {
+	return map[string]any{
+		"id":                 "alert:" + alert.ID,
+		"source":             "collector",
+		"category":           "采集健康",
+		"kind":               "collector_offline",
+		"severity":           alert.Severity,
+		"status":             alert.Status,
+		"subject":            alert.Subject,
+		"summary":            alert.Summary,
+		"bytes":              uint64(0),
+		"packets":            uint64(0),
+		"score":              100,
+		"first_seen":         alert.FirstSeen,
+		"last_seen":          alert.LastSeen,
+		"recommended_action": "检查采集器容器、网卡权限和最近采集窗口写入状态",
 	}
 }
 

@@ -1304,6 +1304,42 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	return items, firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr, scanErr)
 }
 
+func (s *Store) SecurityIncidents(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	alerts, alertErr := s.Alerts(ctx, max(limit, 50), minutes)
+	insights, insightErr := s.SecurityInsights(ctx, minutes, max(limit, 50))
+	anomalies, anomalyErr := s.TrafficAnomalies(ctx, minutes, max(limit, 50))
+	now := time.Now().Unix()
+	items := make([]map[string]any, 0, len(alerts)+len(insights)+len(anomalies))
+	for _, alert := range alerts {
+		items = append(items, incidentFromAlert(alert))
+	}
+	for _, insight := range insights {
+		items = append(items, incidentFromInsight(insight, now, minutes))
+	}
+	for _, anomaly := range anomalies {
+		items = append(items, incidentFromAnomaly(anomaly, now, minutes))
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if incidentStatusWeight(stringValue(items[i]["status"])) != incidentStatusWeight(stringValue(items[j]["status"])) {
+			return incidentStatusWeight(stringValue(items[i]["status"])) > incidentStatusWeight(stringValue(items[j]["status"]))
+		}
+		if insightWeight(stringValue(items[i]["severity"])) != insightWeight(stringValue(items[j]["severity"])) {
+			return insightWeight(stringValue(items[i]["severity"])) > insightWeight(stringValue(items[j]["severity"]))
+		}
+		if int64Value(items[i]["score"]) != int64Value(items[j]["score"]) {
+			return int64Value(items[i]["score"]) > int64Value(items[j]["score"])
+		}
+		return int64Value(items[i]["last_seen"]) > int64Value(items[j]["last_seen"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	if len(items) == 0 && (alertErr != nil || insightErr != nil || anomalyErr != nil) {
+		return demoSecurityIncidents(now), firstErr(alertErr, insightErr, anomalyErr)
+	}
+	return items, firstErr(alertErr, insightErr, anomalyErr)
+}
+
 func (s *Store) ipStats(ctx context.Context, ip string, minutes int) (map[string]model.TopItem, error) {
 	q := fmt.Sprintf(`SELECT direction AS key, sum(bytes) AS bytes, sum(packets) AS packets
 FROM %s.ip_traffic_5s
@@ -2251,6 +2287,43 @@ func demoSecurityInsights() []map[string]any {
 	}
 }
 
+func demoSecurityIncidents(now int64) []map[string]any {
+	return []map[string]any{
+		{
+			"id":                 "insight:external_session_burst:211.93.22.130 -> 10.2.0.12",
+			"source":             "风险线索",
+			"category":           "公网暴露",
+			"kind":               "external_session_burst",
+			"severity":           "warning",
+			"status":             "open",
+			"subject":            "211.93.22.130 -> 10.2.0.12",
+			"summary":            "公网对端在 15 分钟内对内部资产单端口建立 40 条会话",
+			"bytes":              uint64(7000000),
+			"packets":            uint64(6800),
+			"score":              80,
+			"first_seen":         now - 900,
+			"last_seen":          now,
+			"recommended_action": "核对公网来源、服务用途和防火墙访问策略，必要时加入白名单或限制来源",
+		},
+		{
+			"id":                 "anomaly:service:SSH",
+			"source":             "异常波动",
+			"category":           "新增对象",
+			"kind":               "new_dimension",
+			"severity":           "critical",
+			"status":             "open",
+			"subject":            "service:SSH",
+			"summary":            "应用服务 SSH 近 15 分钟新出现流量 18.00 MB",
+			"bytes":              uint64(18000000),
+			"packets":            uint64(7200),
+			"score":              88,
+			"first_seen":         now - 900,
+			"last_seen":          now,
+			"recommended_action": "确认新增服务是否符合变更计划，检查关联资产、端口画像和会话明细",
+		},
+	}
+}
+
 func demoTrafficAnomalies() []map[string]any {
 	return []map[string]any{
 		{
@@ -2427,6 +2500,154 @@ func addTopItem(items map[string]model.TopItem, key string, bytes, packets uint6
 	item.Bytes += bytes
 	item.Packets += packets
 	items[key] = item
+}
+
+func incidentFromAlert(alert model.AlertEvent) map[string]any {
+	return map[string]any{
+		"id":                 "alert:" + alert.ID,
+		"source":             "阈值告警",
+		"category":           "阈值",
+		"kind":               "threshold_alert",
+		"severity":           alert.Severity,
+		"status":             alert.Status,
+		"subject":            alert.Subject,
+		"summary":            alert.Summary,
+		"bytes":              uint64(0),
+		"packets":            uint64(0),
+		"score":              severityScore(alert.Severity),
+		"first_seen":         alert.FirstSeen,
+		"last_seen":          alert.LastSeen,
+		"recommended_action": "确认阈值是否符合当前链路基线，查看相关 TopN、画像和会话明细",
+	}
+}
+
+func incidentFromInsight(row map[string]any, now int64, minutes int) map[string]any {
+	kind := stringValue(row["kind"])
+	severity := stringValue(row["severity"])
+	subject := stringValue(row["subject"])
+	score := int64Value(row["score"])
+	if score == 0 {
+		score = int64(severityScore(severity))
+	}
+	return map[string]any{
+		"id":                 "insight:" + kind + ":" + subject,
+		"source":             "风险线索",
+		"category":           incidentInsightCategory(kind),
+		"kind":               kind,
+		"severity":           severity,
+		"status":             "open",
+		"subject":            subject,
+		"summary":            row["summary"],
+		"bytes":              uintValue(row["bytes"]),
+		"packets":            uintValue(row["packets"]),
+		"score":              score,
+		"first_seen":         now - int64(minutes*60),
+		"last_seen":          now,
+		"recommended_action": recommendedActionForInsight(kind),
+	}
+}
+
+func incidentFromAnomaly(row map[string]any, now int64, minutes int) map[string]any {
+	kind := stringValue(row["kind"])
+	dimension := stringValue(row["dimension"])
+	key := stringValue(row["key"])
+	subject := dimension + ":" + key
+	return map[string]any{
+		"id":                 "anomaly:" + dimension + ":" + key,
+		"source":             "异常波动",
+		"category":           incidentAnomalyCategory(kind),
+		"kind":               kind,
+		"severity":           row["severity"],
+		"status":             "open",
+		"subject":            subject,
+		"summary":            row["summary"],
+		"bytes":              uintValue(row["current_bytes"]),
+		"packets":            uintValue(row["current_packets"]),
+		"score":              int64Value(row["score"]),
+		"first_seen":         now - int64(minutes*60),
+		"last_seen":          now,
+		"recommended_action": recommendedActionForAnomaly(kind, dimension),
+	}
+}
+
+func incidentInsightCategory(kind string) string {
+	switch kind {
+	case "external_port_scan", "external_session_burst", "outbound_probe":
+		return "公网暴露"
+	case "service_risk", "sensitive_port":
+		return "高危服务"
+	case "fanout":
+		return "横向移动"
+	case "qos_mark", "ecn_mark":
+		return "网络质量"
+	default:
+		return "流量风险"
+	}
+}
+
+func incidentAnomalyCategory(kind string) string {
+	switch kind {
+	case "link_burst":
+		return "链路突增"
+	case "new_dimension":
+		return "新增对象"
+	default:
+		return "对象突增"
+	}
+}
+
+func recommendedActionForInsight(kind string) string {
+	switch kind {
+	case "external_port_scan", "external_session_burst":
+		return "核对公网来源、内部资产和端口用途，检查访问控制策略"
+	case "outbound_probe":
+		return "排查内部主机外联目标，结合会话追踪确认是否为异常扫描或自动化任务"
+	case "service_risk", "sensitive_port":
+		return "确认高风险服务是否应暴露，检查资产负责人、白名单和访问来源"
+	case "fanout":
+		return "查看源主机画像和关联目的主机，判断是否存在横向探测"
+	case "qos_mark", "ecn_mark":
+		return "确认 QoS/ECN 标记是否符合网络策略，排查拥塞或异常标记来源"
+	default:
+		return "结合对象画像、会话追踪和 TopN 排行继续排查"
+	}
+}
+
+func recommendedActionForAnomaly(kind, dimension string) string {
+	if kind == "link_burst" {
+		return "查看链路趋势、TopN 和异常增量排行，确认是否为业务峰值或异常放量"
+	}
+	if kind == "new_dimension" {
+		return "确认新增对象是否符合变更计划，检查资产、端口画像和相关会话"
+	}
+	if dimension == "dst_port" || dimension == "service" {
+		return "检查服务端口、应用服务和访问来源，确认是否出现新增服务或异常访问"
+	}
+	return "查看对象画像和关联关系，确认流量增长来源与业务背景"
+}
+
+func incidentStatusWeight(status string) int {
+	switch status {
+	case "open":
+		return 3
+	case "ack":
+		return 2
+	case "resolved":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func severityScore(severity string) int {
+	switch severity {
+	case "critical":
+		return 90
+	case "warning":
+		return 70
+	default:
+		return 40
+	}
 }
 
 func anomalyFromChange(row map[string]any, minutes int) (map[string]any, bool) {
