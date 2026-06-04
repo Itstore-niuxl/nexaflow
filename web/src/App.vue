@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   ChartNoAxesCombined,
+  ClipboardList,
   CircleGauge,
   Database,
   FileText,
@@ -37,6 +38,7 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AuditEvent,
   type AssetMetadata,
   type AssetRiskPosture,
   type AssetRow,
@@ -94,6 +96,7 @@ const topDSCP = ref<TopItem[]>([]);
 const topECN = ref<TopItem[]>([]);
 const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
+const auditEvents = ref<AuditEvent[]>([]);
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -384,6 +387,7 @@ const navGroups = [
       { id: 'reports', label: '报表中心', icon: FileText },
       { id: 'search', label: '检索分析', icon: Search },
       { id: 'history', label: '历史回放', icon: History },
+      { id: 'audit', label: '审计日志', icon: ClipboardList },
       { id: 'collectors', label: '采集器', icon: Settings2 }
     ]
   }
@@ -414,6 +418,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   reports: { title: '报表中心', subtitle: '汇总资产风险、事件、异常、暴露面和 Top 流量对象，支持巡检导出' },
   search: { title: '检索分析', subtitle: '按 IP、端口、主机对或会话关键字检索流量对象' },
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
+  audit: { title: '审计日志', subtitle: '追踪配置变更、事件处置、规则调整和白名单操作' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
 };
 
@@ -479,7 +484,8 @@ const refresh = async () => {
       trafficChangesRes,
       trafficAnomaliesRes,
       reportRes,
-      ruleFindingRes
+      ruleFindingRes,
+      auditRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -522,7 +528,8 @@ const refresh = async () => {
       api.trafficChanges(minutes, 30),
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
-      api.ruleFindings(minutes, 100)
+      api.ruleFindings(minutes, 100),
+      api.auditEvents(120)
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -567,6 +574,7 @@ const refresh = async () => {
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
     ruleFindings.value = ruleFindingRes.data;
+    auditEvents.value = auditRes.data;
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -601,7 +609,8 @@ const refresh = async () => {
       trafficChangesRes.degraded ||
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
-      ruleFindingRes.degraded;
+      ruleFindingRes.degraded ||
+      auditRes.degraded;
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -843,6 +852,28 @@ const refresh = async () => {
         summary: 'API 无法连接后端服务，正在展示本地示例数据',
         first_seen: now,
         last_seen: now
+      }
+    ];
+    auditEvents.value = [
+      {
+        id: 'audit-demo-collector',
+        ts: now - 180,
+        actor: 'operator',
+        action: 'collector.config.update',
+        target: 'dev-collector-01',
+        summary: '更新采集器配置：live_pcap / eth0',
+        detail: '{"mode":"live_pcap","iface":"eth0","session_topn":500}',
+        client_ip: '127.0.0.1'
+      },
+      {
+        id: 'audit-demo-rule',
+        ts: now - 420,
+        actor: 'operator',
+        action: 'detection_rule.upsert',
+        target: 'rule-external-session-burst',
+        summary: '保存检测规则：公网会话突增',
+        detail: '{"metric":"external_sessions","threshold":30}',
+        client_ip: '127.0.0.1'
       }
     ];
     portProfile.value = { port: profilePort.value, minutes: selectedMinutes.value, bytes: 88000000, packets: 48000, flows: topFlows.value };
@@ -1813,6 +1844,9 @@ const assetRiskExposureItems = computed(() => aggregateTopItems(assetRisks.value
 const insightKindItems = computed(() => aggregateTopItems(securityInsights.value, (row) => insightKindText(row.kind), (row) => row.bytes, (row) => row.packets));
 const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
 const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
+const auditActionItems = computed(() => aggregateTopItems(auditEvents.value, (row) => auditActionText(row.action), () => 1, () => 0));
+const auditActorItems = computed(() => aggregateTopItems(auditEvents.value, (row) => row.actor || 'operator', () => 1, () => 0));
+const auditTargetItems = computed(() => aggregateTopItems(auditEvents.value, (row) => row.target || '-', () => 1, () => 0));
 const enabledRuleCount = computed(() => detectionRules.value.filter((row) => row.enabled).length);
 const criticalRuleFindingCount = computed(() => ruleFindings.value.filter((row) => row.severity === 'critical').length);
 const ruleFindingRuleItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => row.rule_name, () => 1, () => 0));
@@ -2050,6 +2084,22 @@ const alertStatusText = (status: string) => {
     resolved: '已恢复'
   };
   return labels[status] ?? status;
+};
+
+const auditActionText = (action: string) => {
+  const labels: Record<string, string> = {
+    'asset.metadata.update': '资产元数据更新',
+    'incident.status.update': '事件状态更新',
+    'incident.note.add': '事件备注新增',
+    'detection_rule.upsert': '检测规则保存',
+    'detection_rule.delete': '检测规则删除',
+    'collector.config.update': '采集配置更新',
+    'alert.status.update': '告警状态更新',
+    'alert.config.update': '告警阈值更新',
+    'alert.silence.add': '加入白名单',
+    'alert.silence.remove': '移出白名单'
+  };
+  return labels[action] ?? action;
 };
 
 const serviceRiskText = (risk: string) => {
@@ -5316,6 +5366,67 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatBytes(row.bytes) }}</td>
                 <td>{{ row.packets.toLocaleString() }}</td>
                 <td>{{ (row.utilization * 100).toFixed(2) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'audit'">
+        <section class="metric-grid">
+          <article class="metric-card">
+            <span>审计事件</span>
+            <strong>{{ auditEvents.length.toLocaleString() }}</strong>
+            <small>{{ rangeLabel }} / 最近操作记录</small>
+          </article>
+          <article class="metric-card">
+            <span>操作人</span>
+            <strong>{{ auditActorItems.length.toLocaleString() }}</strong>
+            <small>{{ auditActorItems[0]?.key ?? '-' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>动作类型</span>
+            <strong>{{ auditActionItems.length.toLocaleString() }}</strong>
+            <small>{{ auditActionItems[0]?.key ?? '-' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>最近操作</span>
+            <strong>{{ formatTime(auditEvents[0]?.ts ?? 0) }}</strong>
+            <small>{{ auditEvents[0]?.summary ?? '-' }}</small>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="审计动作分布" eyebrow="Audit Action" :items="auditActionItems" />
+          <HorizontalBarChart title="操作人分布" eyebrow="Actor" :items="auditActorItems" />
+          <HorizontalBarChart title="目标对象分布" eyebrow="Target" :items="auditTargetItems" />
+        </section>
+        <section class="table-panel audit-table">
+          <div class="section-heading">
+            <h2>操作审计明细</h2>
+            <span>{{ auditEvents.length.toLocaleString() }} 条记录</span>
+          </div>
+          <div v-if="auditEvents.length === 0" class="empty-state">暂无审计记录</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>操作人</th>
+                <th>动作</th>
+                <th>目标</th>
+                <th>摘要</th>
+                <th>来源 IP</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="event in auditEvents" :key="event.id">
+                <td>{{ formatTime(event.ts) }}</td>
+                <td>{{ event.actor || 'operator' }}</td>
+                <td>{{ auditActionText(event.action) }}</td>
+                <td :title="event.target">{{ event.target }}</td>
+                <td>{{ event.summary }}</td>
+                <td>{{ event.client_ip || '-' }}</td>
+                <td :title="event.detail_text || event.detail">{{ event.detail_text || event.detail || '-' }}</td>
               </tr>
             </tbody>
           </table>

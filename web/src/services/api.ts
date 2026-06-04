@@ -39,6 +39,18 @@ export interface AlertEvent {
   last_seen: number;
 }
 
+export interface AuditEvent {
+  id: string;
+  ts: number;
+  actor: string;
+  action: string;
+  target: string;
+  summary: string;
+  detail: string;
+  detail_text?: string;
+  client_ip: string;
+}
+
 export interface NetworkInterface {
   name: string;
   state: string;
@@ -932,5 +944,8 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: CollectorConfig }>;
+  },
+  async auditEvents(limit = 80) {
+    return json<{ data: AuditEvent[]; degraded: boolean }>(`/api/v1/system/audit-events?limit=${limit}`);
   }
 };

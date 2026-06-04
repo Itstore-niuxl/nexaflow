@@ -250,6 +250,21 @@ ENGINE = MergeTree
 PARTITION BY toDate(updated_at)
 ORDER BY (ip, updated_at)
 TTL updated_at + INTERVAL 365 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.operation_audit
+(
+    id String,
+    ts DateTime,
+    actor LowCardinality(String),
+    action LowCardinality(String),
+    target String,
+    summary String,
+    detail String,
+    client_ip String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (ts, action, actor)
+TTL ts + INTERVAL 365 DAY`,
 	}
 	for _, q := range queries {
 		if err := s.exec(ctx, q); err != nil {
@@ -629,6 +644,78 @@ func (s *Store) UpdateAlertStatus(ctx context.Context, id, status string) error 
 	}
 	q := "INSERT INTO " + s.database + ".alert_status_overrides FORMAT JSONEachRow"
 	return s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"status":%q,"updated_at":%q}`+"\n", id, status, formatTime(time.Now().Unix())))
+}
+
+func (s *Store) RecordAuditEvent(ctx context.Context, actor, action, target, summary string, detail map[string]any, clientIP string) error {
+	actor = strings.TrimSpace(actor)
+	action = strings.TrimSpace(action)
+	target = strings.TrimSpace(target)
+	summary = strings.TrimSpace(summary)
+	clientIP = strings.TrimSpace(clientIP)
+	if actor == "" {
+		actor = "operator"
+	}
+	if action == "" {
+		return fmt.Errorf("audit action is required")
+	}
+	if target == "" {
+		target = "-"
+	}
+	if summary == "" {
+		summary = action + " " + target
+	}
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	detailJSON, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	q := "INSERT INTO " + s.database + ".operation_audit FORMAT JSONEachRow"
+	return s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"ts":%q,"actor":%q,"action":%q,"target":%q,"summary":%q,"detail":%q,"client_ip":%q}`+"\n",
+		"audit-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		formatTime(now),
+		actor,
+		action,
+		target,
+		summary,
+		string(detailJSON),
+		clientIP,
+	))
+}
+
+func (s *Store) AuditEvents(ctx context.Context, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+	q := fmt.Sprintf(`SELECT
+    id,
+    toUnixTimestamp(ts) AS ts,
+    actor,
+    action,
+    target,
+    summary,
+    detail,
+    client_ip
+FROM %s.operation_audit
+ORDER BY ts DESC
+LIMIT %d
+FORMAT JSON`, s.database, limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return demoAuditEvents(), err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return demoAuditEvents(), err
+	}
+	for _, row := range parsed.Data {
+		row["detail_text"] = stringValue(row["detail"])
+	}
+	return parsed.Data, nil
 }
 
 func (s *Store) AlertStatusOverrides(ctx context.Context) (map[string]string, error) {
@@ -3031,6 +3118,34 @@ func demoSessions() []map[string]any {
 		sessionRow(model.TopItem{Key: "10.10.1.42:53210 -> 172.20.2.10:443 / tcp", Bytes: 42000000, Packets: 14000}, now-180, now),
 		sessionRow(model.TopItem{Key: "10.10.1.77:53192 -> 172.20.2.81:22 / tcp", Bytes: 18000000, Packets: 7200}, now-120, now-10),
 		sessionRow(model.TopItem{Key: "10.10.1.18:49812 -> 172.20.2.144:53 / udp", Bytes: 5000000, Packets: 12000}, now-90, now-5),
+	}
+}
+
+func demoAuditEvents() []map[string]any {
+	now := time.Now().Unix()
+	return []map[string]any{
+		{
+			"id":          "audit-demo-collector",
+			"ts":          now - 180,
+			"actor":       "operator",
+			"action":      "collector.config.update",
+			"target":      "dev-collector-01",
+			"summary":     "更新采集器配置：live_pcap / eth0",
+			"detail":      `{"mode":"live_pcap","iface":"eth0","session_topn":500}`,
+			"detail_text": `{"mode":"live_pcap","iface":"eth0","session_topn":500}`,
+			"client_ip":   "127.0.0.1",
+		},
+		{
+			"id":          "audit-demo-rule",
+			"ts":          now - 420,
+			"actor":       "operator",
+			"action":      "detection_rule.upsert",
+			"target":      "rule-external-session-burst",
+			"summary":     "保存检测规则：公网会话突增",
+			"detail":      `{"metric":"external_sessions","threshold":30}`,
+			"detail_text": `{"metric":"external_sessions","threshold":30}`,
+			"client_ip":   "127.0.0.1",
+		},
 	}
 }
 

@@ -74,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/status", s.status)
 	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	mux.HandleFunc("/api/v1/system/capture-quality", s.captureQuality)
+	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	return cors(mux)
 }
 
@@ -303,6 +304,14 @@ func (s *Server) assetMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.audit(r, "asset.metadata.update", "asset:"+stringValue(data["ip"]), "更新资产元数据："+stringValue(data["ip"]), map[string]any{
+		"ip":          data["ip"],
+		"name":        data["name"],
+		"owner":       data["owner"],
+		"business":    data["business"],
+		"environment": data["environment"],
+		"criticality": data["criticality"],
+	})
 	writeJSON(w, map[string]any{"data": data})
 }
 
@@ -399,6 +408,12 @@ func (s *Server) securityIncidentStatus(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	s.audit(r, "incident.status.update", strings.TrimSpace(body.ID), "更新事件状态："+strings.TrimSpace(body.Status), map[string]any{
+		"id":     strings.TrimSpace(body.ID),
+		"status": strings.TrimSpace(body.Status),
+		"note":   strings.TrimSpace(body.Note),
+		"author": strings.TrimSpace(body.Author),
+	})
 	writeJSON(w, map[string]any{"data": map[string]string{"id": body.ID, "status": body.Status}})
 }
 
@@ -431,6 +446,10 @@ func (s *Server) securityIncidentNotes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.audit(r, "incident.note.add", strings.TrimSpace(body.ID), "新增事件备注："+strings.TrimSpace(body.ID), map[string]any{
+		"id":     strings.TrimSpace(body.ID),
+		"author": strings.TrimSpace(body.Author),
+	})
 	writeJSON(w, map[string]any{"data": data})
 }
 
@@ -458,6 +477,15 @@ func (s *Server) detectionRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.audit(r, "detection_rule.upsert", strings.TrimSpace(body.ID), "保存检测规则："+strings.TrimSpace(body.Name), map[string]any{
+			"id":        body.ID,
+			"name":      body.Name,
+			"metric":    body.Metric,
+			"operator":  body.Operator,
+			"threshold": body.Threshold,
+			"severity":  body.Severity,
+			"enabled":   body.Enabled,
+		})
 		writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.DetectionRules})
 	case http.MethodDelete:
 		id := strings.TrimSpace(r.URL.Query().Get("id"))
@@ -480,6 +508,7 @@ func (s *Server) detectionRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.audit(r, "detection_rule.delete", id, "删除检测规则："+id, map[string]any{"id": id})
 		writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.DetectionRules})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -561,6 +590,16 @@ func (s *Server) collectorConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.audit(r, "collector.config.update", s.config.CollectorID, "更新采集器配置："+body.Mode+" / "+body.Iface, map[string]any{
+		"collector_id": s.config.CollectorID,
+		"mode":         body.Mode,
+		"iface":        body.Iface,
+		"source_id":    body.SourceID,
+		"bpf_filter":   body.BPFFilter,
+		"pcap_file":    body.PcapFile,
+		"replay_speed": body.ReplaySpeed,
+		"session_topn": body.SessionTopN,
+	})
 	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))})
 }
 
@@ -620,6 +659,10 @@ func (s *Server) alertStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.audit(r, "alert.status.update", strings.TrimSpace(body.ID), "更新告警状态："+strings.TrimSpace(body.Status), map[string]any{
+		"id":     strings.TrimSpace(body.ID),
+		"status": strings.TrimSpace(body.Status),
+	})
 	writeJSON(w, map[string]any{"data": map[string]string{"id": body.ID, "status": body.Status}})
 }
 
@@ -643,6 +686,12 @@ func (s *Server) alertConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.audit(r, "alert.config.update", s.config.CollectorID, "更新告警阈值配置", map[string]any{
+		"flow_bytes":       runtime.Alerts.FlowBytes,
+		"flow_share":       runtime.Alerts.FlowShare,
+		"source_packets":   runtime.Alerts.SourcePackets,
+		"link_utilization": runtime.Alerts.LinkUtilization,
+	})
 	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts})
 }
 
@@ -677,6 +726,13 @@ func (s *Server) alertSilences(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	action := "alert.silence.add"
+	summary := "加入白名单/静默名单：" + subject
+	if r.Method == http.MethodDelete {
+		action = "alert.silence.remove"
+		summary = "移出白名单/静默名单：" + subject
+	}
+	s.audit(r, action, subject, summary, map[string]any{"subject": subject})
 	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.SilencedSubjects})
 }
 
@@ -707,6 +763,11 @@ func (s *Server) dataQuality(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) captureQuality(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.CaptureQuality(r.Context(), queryMinutes(r), queryLimit(r, 20, 200))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.AuditEvents(r.Context(), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -762,6 +823,38 @@ func queryLimit(r *http.Request, fallback, max int) int {
 		}
 	}
 	return limit
+}
+
+func (s *Server) audit(r *http.Request, action, target, summary string, detail map[string]any) {
+	_ = s.store.RecordAuditEvent(r.Context(), auditActor(r), action, target, summary, detail, auditClientIP(r))
+}
+
+func auditActor(r *http.Request) string {
+	actor := strings.TrimSpace(r.Header.Get("X-NexaFlow-Actor"))
+	if actor == "" {
+		actor = strings.TrimSpace(r.URL.Query().Get("actor"))
+	}
+	if actor == "" {
+		actor = "operator"
+	}
+	return actor
+}
+
+func auditClientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if comma := strings.Index(forwarded, ","); comma >= 0 {
+			return strings.TrimSpace(forwarded[:comma])
+		}
+		return forwarded
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if colon := strings.LastIndex(remote, ":"); colon > 0 {
+		return remote[:colon]
+	}
+	return remote
 }
 
 func filterSilencedMaps(rows []map[string]any, subjects []string, key string) []map[string]any {

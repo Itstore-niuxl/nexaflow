@@ -105,3 +105,19 @@ ENGINE = MergeTree
 PARTITION BY toDate(first_seen)
 ORDER BY (severity, status, first_seen, id)
 TTL first_seen + INTERVAL 180 DAY;
+
+CREATE TABLE IF NOT EXISTS nexaflow.operation_audit
+(
+    id String,
+    ts DateTime,
+    actor LowCardinality(String),
+    action LowCardinality(String),
+    target String,
+    summary String,
+    detail String,
+    client_ip String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (ts, action, actor)
+TTL ts + INTERVAL 365 DAY;
