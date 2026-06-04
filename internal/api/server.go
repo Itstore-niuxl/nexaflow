@@ -56,6 +56,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/incidents", s.securityIncidents)
 	mux.HandleFunc("/api/v1/security/incident-context", s.securityIncidentContext)
 	mux.HandleFunc("/api/v1/security/incident-status", s.securityIncidentStatus)
+	mux.HandleFunc("/api/v1/security/incident-timeline", s.securityIncidentTimeline)
+	mux.HandleFunc("/api/v1/security/incident-notes", s.securityIncidentNotes)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -345,6 +347,8 @@ func (s *Server) securityIncidentStatus(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
+		Note   string `json:"note"`
+		Author string `json:"author"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -354,7 +358,45 @@ func (s *Server) securityIncidentStatus(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(body.Note) != "" {
+		if _, err := s.store.AddIncidentNote(r.Context(), strings.TrimSpace(body.ID), strings.TrimSpace(body.Note), strings.TrimSpace(body.Author)); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	writeJSON(w, map[string]any{"data": map[string]string{"id": body.ID, "status": body.Status}})
+}
+
+func (s *Server) securityIncidentTimeline(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	data, err := s.store.IncidentTimeline(r.Context(), id, queryLimit(r, 50, 200))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) securityIncidentNotes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Note   string `json:"note"`
+		Author string `json:"author"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	data, err := s.store.AddIncidentNote(r.Context(), strings.TrimSpace(body.ID), strings.TrimSpace(body.Note), strings.TrimSpace(body.Author))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"data": data})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {

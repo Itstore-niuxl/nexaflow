@@ -1066,6 +1066,52 @@ td {
   gap: 12px;
 }
 
+.incident-note-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.incident-note-editor button {
+  min-height: 42px;
+}
+
+.incident-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.incident-timeline h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.incident-timeline article {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(5, 16, 34, 0.45);
+  padding: 12px;
+}
+
+.incident-timeline article span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.incident-timeline article strong {
+  display: block;
+  margin-top: 4px;
+}
+
+.incident-timeline article p {
+  margin: 6px 0 0;
+  color: var(--text);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .context-session-list {
   overflow-x: auto;
 }
@@ -1200,7 +1246,8 @@ td {
   }
 
   .incident-context-summary,
-  .playbook-list {
+  .playbook-list,
+  .incident-note-editor {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1282,7 +1329,8 @@ td {
   }
 
   .incident-context-summary,
-  .playbook-list {
+  .playbook-list,
+  .incident-note-editor {
     grid-template-columns: 1fr;
   }
 

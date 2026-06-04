@@ -322,6 +322,16 @@ export interface SecurityIncidentContext {
   port_profile?: PortProfile;
 }
 
+export interface IncidentTimelineEntry {
+  id: string;
+  type: string;
+  status: string;
+  note: string;
+  author: string;
+  summary: string;
+  created_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -516,16 +526,32 @@ export const api = {
       `/api/v1/security/incident-context?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&minutes=${minutes}&limit=${limit}`
     );
   },
-  async updateIncidentStatus(id: string, status: string) {
+  async updateIncidentStatus(id: string, status: string, note = '', author = 'operator') {
     const response = await fetch('/api/v1/security/incident-status', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, status })
+      body: JSON.stringify({ id, status, note, author })
     });
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: { id: string; status: string } }>;
+  },
+  async incidentTimeline(id: string, limit = 50) {
+    return json<{ data: IncidentTimelineEntry[]; degraded: boolean }>(
+      `/api/v1/security/incident-timeline?id=${encodeURIComponent(id)}&limit=${limit}`
+    );
+  },
+  async addIncidentNote(id: string, note: string, author = 'operator') {
+    const response = await fetch('/api/v1/security/incident-notes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, note, author })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: IncidentTimelineEntry }>;
   },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);

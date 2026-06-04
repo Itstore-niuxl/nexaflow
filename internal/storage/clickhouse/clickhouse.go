@@ -179,6 +179,17 @@ ENGINE = MergeTree
 PARTITION BY toDate(updated_at)
 ORDER BY (id, updated_at)
 TTL updated_at + INTERVAL 180 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.incident_notes
+(
+    id String,
+    note String,
+    author LowCardinality(String),
+    created_at DateTime
+)
+ENGINE = MergeTree
+PARTITION BY toDate(created_at)
+ORDER BY (id, created_at)
+TTL created_at + INTERVAL 365 DAY`,
 		`CREATE TABLE IF NOT EXISTS ` + s.database + `.asset_metadata_overrides
 (
     ip String,
@@ -431,6 +442,109 @@ FORMAT JSON`, s.database)
 		result[stringValue(row["id"])] = stringValue(row["status"])
 	}
 	return result, nil
+}
+
+func (s *Store) AddIncidentNote(ctx context.Context, id, note, author string) (map[string]any, error) {
+	id = strings.TrimSpace(id)
+	note = strings.TrimSpace(note)
+	author = strings.TrimSpace(author)
+	if id == "" {
+		return nil, fmt.Errorf("incident id is required")
+	}
+	if note == "" {
+		return nil, fmt.Errorf("note is required")
+	}
+	if author == "" {
+		author = "operator"
+	}
+	now := time.Now().Unix()
+	q := "INSERT INTO " + s.database + ".incident_notes FORMAT JSONEachRow"
+	if err := s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"note":%q,"author":%q,"created_at":%q}`+"\n", id, note, author, formatTime(now))); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"id":         id,
+		"type":       "note",
+		"status":     "",
+		"note":       note,
+		"author":     author,
+		"summary":    note,
+		"created_at": now,
+	}, nil
+}
+
+func (s *Store) IncidentTimeline(ctx context.Context, id string, limit int) ([]map[string]any, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return []map[string]any{}, fmt.Errorf("incident id is required")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	statusRows, statusErr := s.incidentStatusTimeline(ctx, id, limit)
+	noteRows, noteErr := s.incidentNoteTimeline(ctx, id, limit)
+	items := append(statusRows, noteRows...)
+	sort.Slice(items, func(i, j int) bool {
+		return int64Value(items[i]["created_at"]) > int64Value(items[j]["created_at"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, firstErr(statusErr, noteErr)
+}
+
+func (s *Store) incidentStatusTimeline(ctx context.Context, id string, limit int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT
+    id,
+    'status' AS type,
+    status,
+    '' AS note,
+    'operator' AS author,
+    concat('状态变更为 ', status) AS summary,
+    toUnixTimestamp(updated_at) AS created_at
+FROM %s.alert_status_overrides
+WHERE id = '%s'
+ORDER BY updated_at DESC
+LIMIT %d
+FORMAT JSON`, s.database, escape(id), limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	return parsed.Data, nil
+}
+
+func (s *Store) incidentNoteTimeline(ctx context.Context, id string, limit int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT
+    id,
+    'note' AS type,
+    '' AS status,
+    note,
+    author,
+    note AS summary,
+    toUnixTimestamp(created_at) AS created_at
+FROM %s.incident_notes
+WHERE id = '%s'
+ORDER BY created_at DESC
+LIMIT %d
+FORMAT JSON`, s.database, escape(id), limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	return parsed.Data, nil
 }
 
 func (s *Store) IPProfile(ctx context.Context, ip string, minutes int) (map[string]any, error) {

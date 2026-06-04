@@ -55,6 +55,7 @@ import {
   type SecurityInsight,
   type SecurityIncident,
   type SecurityIncidentContext,
+  type IncidentTimelineEntry,
   type ServiceExposure,
   type ServiceMap,
   type SessionRow,
@@ -145,6 +146,9 @@ const securityInsights = ref<SecurityInsight[]>([]);
 const securityIncidents = ref<SecurityIncident[]>([]);
 const incidentContext = ref<SecurityIncidentContext>(emptyIncidentContext());
 const selectedIncident = ref<SecurityIncident | null>(null);
+const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
+const incidentNoteText = ref('');
+const savingIncidentNote = ref(false);
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnomalies = ref<TrafficAnomaly[]>([]);
 const trafficAnalysis = ref<TrafficAnalysis>({
@@ -889,6 +893,26 @@ const refresh = async () => {
       }
     ];
     selectedIncident.value = securityIncidents.value[0];
+    incidentTimeline.value = [
+      {
+        id: securityIncidents.value[0].id,
+        type: 'status',
+        status: 'open',
+        note: '',
+        author: 'system',
+        summary: '事件创建',
+        created_at: now - 900
+      },
+      {
+        id: securityIncidents.value[0].id,
+        type: 'note',
+        status: '',
+        note: '样例处置备注：已安排核对公网来源和端口用途',
+        author: 'operator',
+        summary: '样例处置备注：已安排核对公网来源和端口用途',
+        created_at: now - 300
+      }
+    ];
     incidentContext.value = {
       subject: '211.93.22.130 -> 10.2.0.12',
       kind: 'external_session_burst',
@@ -1532,9 +1556,14 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   selectedIncident.value = incident;
   loadingIncidentContext.value = true;
   try {
-    const result = await api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12);
-    incidentContext.value = result.data;
-    degraded.value = result.degraded;
+    const [contextResult, timelineResult] = await Promise.all([
+      api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12),
+      api.incidentTimeline(incident.id, 50)
+    ]);
+    incidentContext.value = contextResult.data;
+    incidentTimeline.value = timelineResult.data;
+    incidentNoteText.value = '';
+    degraded.value = contextResult.degraded || timelineResult.degraded;
   } finally {
     loadingIncidentContext.value = false;
   }
@@ -1553,9 +1582,25 @@ const updateIncidentStatus = async (incident: SecurityIncident, status: string) 
     degraded.value = incidentRes.degraded || assetRiskRes.degraded;
     if (selectedIncident.value?.id === incident.id) {
       selectedIncident.value = securityIncidents.value.find((item) => item.id === incident.id) ?? null;
+      const timelineRes = await api.incidentTimeline(incident.id, 50);
+      incidentTimeline.value = timelineRes.data;
     }
   } finally {
     handlingAlert.value = false;
+  }
+};
+
+const saveIncidentNote = async () => {
+  const note = incidentNoteText.value.trim();
+  if (!selectedIncident.value || !note) return;
+  savingIncidentNote.value = true;
+  try {
+    await api.addIncidentNote(selectedIncident.value.id, note, 'operator');
+    const timelineRes = await api.incidentTimeline(selectedIncident.value.id, 50);
+    incidentTimeline.value = timelineRes.data;
+    incidentNoteText.value = '';
+  } finally {
+    savingIncidentNote.value = false;
   }
 };
 
@@ -2977,6 +3022,24 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <article v-for="action in incidentContext.playbook_actions" :key="action.label">
               <strong>{{ action.label }}</strong>
               <span>{{ action.description }}</span>
+            </article>
+          </div>
+          <div class="incident-note-editor">
+            <label class="filter-field">
+              <span>处置备注</span>
+              <input v-model="incidentNoteText" placeholder="记录排查进展、责任人、结论或后续动作" @keyup.enter="saveIncidentNote" />
+            </label>
+            <button type="button" :disabled="savingIncidentNote || !incidentNoteText.trim()" @click="saveIncidentNote">
+              {{ savingIncidentNote ? '保存中...' : '添加备注' }}
+            </button>
+          </div>
+          <div class="incident-timeline">
+            <h3>处置时间线</h3>
+            <div v-if="incidentTimeline.length === 0" class="empty-state">暂无处置记录</div>
+            <article v-for="entry in incidentTimeline" :key="`${entry.type}-${entry.created_at}-${entry.summary}`">
+              <span>{{ formatTime(entry.created_at) }} / {{ entry.author || 'operator' }}</span>
+              <strong>{{ entry.type === 'status' ? alertStatusText(entry.status) : '备注' }}</strong>
+              <p>{{ entry.summary || entry.note || '-' }}</p>
             </article>
           </div>
           <section class="command-grid">
