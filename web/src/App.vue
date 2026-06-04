@@ -753,6 +753,15 @@ const refresh = async () => {
         bytes: 12000000,
         packets: 4200,
         score: 45
+      },
+      {
+        kind: 'external_session_burst',
+        severity: 'warning',
+        subject: '211.93.22.130 -> 10.2.0.12',
+        summary: '公网对端在 15 分钟内对内部资产单端口建立 40 条会话',
+        bytes: 7000000,
+        packets: 6800,
+        score: 80
       }
     ];
     trafficAnalysis.value = {
@@ -1092,7 +1101,10 @@ const insightKindText = (kind: string) => {
     sensitive_port: '敏感端口',
     service_risk: '高风险服务',
     qos_mark: 'QoS 标记',
-    ecn_mark: 'ECN 标记'
+    ecn_mark: 'ECN 标记',
+    external_port_scan: '公网端口探测',
+    external_session_burst: '公网会话突增',
+    outbound_probe: '外联探测'
   };
   return labels[kind] ?? kind;
 };

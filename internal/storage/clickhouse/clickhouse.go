@@ -1220,8 +1220,9 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	ports, portErr := s.sensitivePortInsights(ctx, minutes, limit)
 	serviceRisks, serviceRiskErr := s.serviceRiskInsights(ctx, minutes, limit)
 	qosMarks, qosErr := s.qosInsights(ctx, minutes, limit)
+	scans, scanErr := s.scanInsights(ctx, minutes, limit)
 
-	items := make([]map[string]any, 0, len(flows)+len(fanouts)+len(ports)+len(serviceRisks)+len(qosMarks))
+	items := make([]map[string]any, 0, len(flows)+len(fanouts)+len(ports)+len(serviceRisks)+len(qosMarks)+len(scans))
 	for _, flow := range flows {
 		if len(items) >= limit {
 			break
@@ -1251,6 +1252,7 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	items = append(items, ports...)
 	items = append(items, serviceRisks...)
 	items = append(items, qosMarks...)
+	items = append(items, scans...)
 	sort.Slice(items, func(i, j int) bool {
 		if insightWeight(stringValue(items[i]["severity"])) != insightWeight(stringValue(items[j]["severity"])) {
 			return insightWeight(stringValue(items[i]["severity"])) > insightWeight(stringValue(items[j]["severity"]))
@@ -1260,10 +1262,10 @@ func (s *Store) SecurityInsights(ctx context.Context, minutes, limit int) ([]map
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	if len(items) == 0 && (totalErr != nil || flowErr != nil || fanoutErr != nil || portErr != nil || serviceRiskErr != nil || qosErr != nil) {
-		return demoSecurityInsights(), firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr)
+	if len(items) == 0 && (totalErr != nil || flowErr != nil || fanoutErr != nil || portErr != nil || serviceRiskErr != nil || qosErr != nil || scanErr != nil) {
+		return demoSecurityInsights(), firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr, scanErr)
 	}
-	return items, firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr)
+	return items, firstErr(totalErr, flowErr, fanoutErr, portErr, serviceRiskErr, qosErr, scanErr)
 }
 
 func (s *Store) ipStats(ctx context.Context, ip string, minutes int) (map[string]model.TopItem, error) {
@@ -1584,6 +1586,123 @@ func (s *Store) qosInsights(ctx context.Context, minutes, limit int) ([]map[stri
 		items = items[:limit]
 	}
 	return items, firstErr(ecnErr, dscpErr)
+}
+
+func (s *Store) scanInsights(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	sessions, err := s.Sessions(ctx, "", minutes, max(limit*10, 80))
+	if err != nil {
+		return nil, err
+	}
+	type scanBucket struct {
+		subject  string
+		ports    map[string]bool
+		targets  map[string]bool
+		bytes    uint64
+		packets  uint64
+		sessions uint64
+	}
+	inbound := map[string]*scanBucket{}
+	outbound := map[string]*scanBucket{}
+	for _, session := range sessions {
+		access, ok := externalAccessRow(session)
+		if !ok {
+			continue
+		}
+		publicIP := stringValue(access["public_ip"])
+		internalIP := stringValue(access["internal_ip"])
+		port := stringValue(access["port"])
+		direction := stringValue(access["direction"])
+		if publicIP == "" || internalIP == "" || port == "" {
+			continue
+		}
+		if strings.Contains(direction, "入站") {
+			key := publicIP + " -> " + internalIP
+			bucket := inbound[key]
+			if bucket == nil {
+				bucket = &scanBucket{subject: key, ports: map[string]bool{}, targets: map[string]bool{}}
+				inbound[key] = bucket
+			}
+			bucket.ports[port] = true
+			bucket.targets[internalIP] = true
+			bucket.bytes += uintValue(session["bytes"])
+			bucket.packets += uintValue(session["packets"])
+			bucket.sessions++
+			continue
+		}
+		if strings.Contains(direction, "出站") {
+			bucket := outbound[internalIP]
+			if bucket == nil {
+				bucket = &scanBucket{subject: internalIP, ports: map[string]bool{}, targets: map[string]bool{}}
+				outbound[internalIP] = bucket
+			}
+			bucket.ports[port] = true
+			bucket.targets[publicIP] = true
+			bucket.bytes += uintValue(session["bytes"])
+			bucket.packets += uintValue(session["packets"])
+			bucket.sessions++
+		}
+	}
+	items := make([]map[string]any, 0)
+	for _, bucket := range inbound {
+		portCount := len(bucket.ports)
+		if portCount < 3 && bucket.sessions < 30 {
+			continue
+		}
+		severity := "warning"
+		score := 65 + portCount*5
+		kind := "external_port_scan"
+		summary := fmt.Sprintf("公网对端在 %d 分钟内访问内部资产 %d 个端口、%d 条会话", minutes, portCount, bucket.sessions)
+		if portCount < 3 {
+			kind = "external_session_burst"
+			score = 68 + int(bucket.sessions/10)
+			summary = fmt.Sprintf("公网对端在 %d 分钟内对内部资产单端口建立 %d 条会话", minutes, bucket.sessions)
+		}
+		if portCount >= 10 || bucket.sessions >= 80 {
+			severity = "critical"
+			score = 90
+		}
+		items = append(items, map[string]any{
+			"kind":     kind,
+			"severity": severity,
+			"subject":  bucket.subject,
+			"summary":  summary,
+			"bytes":    bucket.bytes,
+			"packets":  bucket.packets,
+			"score":    min(score, 100),
+		})
+	}
+	for _, bucket := range outbound {
+		targetCount := len(bucket.targets)
+		portCount := len(bucket.ports)
+		if targetCount < 5 && portCount < 5 && bucket.sessions < 20 {
+			continue
+		}
+		severity := "warning"
+		score := 55 + targetCount*3 + portCount*2
+		if targetCount >= 20 || portCount >= 12 || bucket.sessions >= 60 {
+			severity = "critical"
+			score = 88
+		}
+		items = append(items, map[string]any{
+			"kind":     "outbound_probe",
+			"severity": severity,
+			"subject":  bucket.subject,
+			"summary":  fmt.Sprintf("内部主机在 %d 分钟内访问 %d 个公网目标、%d 个端口、%d 条会话", minutes, targetCount, portCount, bucket.sessions),
+			"bytes":    bucket.bytes,
+			"packets":  bucket.packets,
+			"score":    min(score, 100),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if int64Value(items[i]["score"]) != int64Value(items[j]["score"]) {
+			return int64Value(items[i]["score"]) > int64Value(items[j]["score"])
+		}
+		return uintValue(items[i]["bytes"]) > uintValue(items[j]["bytes"])
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
 }
 
 func (s *Store) qosDimensionInsights(ctx context.Context, dimension string, keys []string, kind, summary string, minutes, limit int) ([]map[string]any, error) {
@@ -2030,6 +2149,15 @@ func demoSecurityInsights() []map[string]any {
 			"bytes":    uint64(24000000),
 			"packets":  uint64(9000),
 			"score":    6,
+		},
+		{
+			"kind":     "external_session_burst",
+			"severity": "warning",
+			"subject":  "211.93.22.130 -> 10.2.0.12",
+			"summary":  "公网对端在 15 分钟内对内部资产单端口建立 40 条会话",
+			"bytes":    uint64(7000000),
+			"packets":  uint64(6800),
+			"score":    80,
 		},
 	}
 }
