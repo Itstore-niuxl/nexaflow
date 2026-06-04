@@ -625,6 +625,80 @@ FORMAT JSON`, s.database, minutes)
 	return items, nil
 }
 
+func (s *Store) DimensionTimeseries(ctx context.Context, dimension, key, direction string, minutes, limit int) ([]map[string]any, error) {
+	dimension = strings.TrimSpace(dimension)
+	key = strings.TrimSpace(key)
+	if dimension == "" {
+		dimension = "service"
+	}
+	var q string
+	if dimension == "ip" {
+		if direction == "" {
+			direction = "src"
+		}
+		whereKey := ""
+		if key != "" {
+			whereKey = " AND ip = '" + escape(key) + "'"
+		} else {
+			whereKey = fmt.Sprintf(` AND ip IN (
+        SELECT ip
+        FROM %s.ip_traffic_5s
+        WHERE ts >= now() - INTERVAL %d MINUTE AND direction = '%s'
+        GROUP BY ip
+        ORDER BY sum(bytes) DESC
+        LIMIT %d
+    )`, s.database, minutes, escape(direction), limit)
+		}
+		q = fmt.Sprintf(`SELECT
+    toUnixTimestamp(ts) AS ts,
+    'ip' AS dimension,
+    ip AS key,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets
+FROM %s.ip_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE AND direction = '%s'%s
+GROUP BY ts, key
+ORDER BY ts ASC, key ASC
+FORMAT JSON`, s.database, minutes, escape(direction), whereKey)
+	} else {
+		whereKey := ""
+		if key != "" {
+			whereKey = " AND dim_key = '" + escape(key) + "'"
+		} else {
+			whereKey = fmt.Sprintf(` AND dim_key IN (
+        SELECT dim_key
+        FROM %s.dimension_traffic_5s
+        WHERE ts >= now() - INTERVAL %d MINUTE AND dimension = '%s'
+        GROUP BY dim_key
+        ORDER BY sum(bytes) DESC
+        LIMIT %d
+    )`, s.database, minutes, escape(dimension), limit)
+		}
+		q = fmt.Sprintf(`SELECT
+    toUnixTimestamp(ts) AS ts,
+    dimension AS dimension,
+    dim_key AS key,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets
+FROM %s.dimension_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE AND dimension = '%s'%s
+GROUP BY ts, dimension, key
+ORDER BY ts ASC, key ASC
+FORMAT JSON`, s.database, minutes, escape(dimension), whereKey)
+	}
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return demoDimensionSeries(), err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return demoDimensionSeries(), err
+	}
+	return parsed.Data, nil
+}
+
 func (s *Store) Search(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
 	if q == "" {
 		return []map[string]any{}, nil
@@ -1504,6 +1578,15 @@ func demoDirectionSeries() []map[string]any {
 	return []map[string]any{
 		{"ts": now - 10, "direction": "出站", "bytes": uint64(76000000), "packets": uint64(48000)},
 		{"ts": now - 10, "direction": "内网东西向", "bytes": uint64(26000000), "packets": uint64(22000)},
+	}
+}
+
+func demoDimensionSeries() []map[string]any {
+	now := time.Now().Unix()
+	return []map[string]any{
+		{"ts": now - 120, "dimension": "service", "key": "HTTPS", "bytes": uint64(18000000), "packets": uint64(7200)},
+		{"ts": now - 60, "dimension": "service", "key": "HTTPS", "bytes": uint64(24000000), "packets": uint64(9300)},
+		{"ts": now, "dimension": "service", "key": "HTTPS", "bytes": uint64(42000000), "packets": uint64(14000)},
 	}
 }
 

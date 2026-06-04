@@ -24,6 +24,7 @@ import {
 } from '@lucide/vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import DashboardChart from './components/DashboardChart.vue';
+import DimensionTrendChart from './components/DimensionTrendChart.vue';
 import FlowMatrixChart from './components/FlowMatrixChart.vue';
 import HealthGaugePanel from './components/HealthGaugePanel.vue';
 import HorizontalBarChart from './components/HorizontalBarChart.vue';
@@ -39,6 +40,7 @@ import {
   type AssetRow,
   type Collector,
   type CollectorConfig,
+  type DimensionPoint,
   type IPProfile,
   type MatrixRow,
   type NetworkInterface,
@@ -98,6 +100,7 @@ const serviceExposure = ref<ServiceExposure[]>([]);
 const protocolSeries = ref<ProtocolPoint[]>([]);
 const portSeries = ref<PortPoint[]>([]);
 const directionSeries = ref<DirectionPoint[]>([]);
+const dimensionTrend = ref<DimensionPoint[]>([]);
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const assets = ref<AssetRow[]>([]);
@@ -142,6 +145,9 @@ const selectedIface = ref('eth0');
 const selectedFilter = ref('ip or ip6');
 const selectedPcapFile = ref('/var/lib/nexaflow/replay.pcap');
 const selectedReplaySpeed = ref(1);
+const trendDimension = ref('service');
+const trendKey = ref('');
+const trendDirection = ref('src');
 const whitelistSubject = ref('');
 const exposureSearch = ref('');
 const exposureRiskFilter = ref('all');
@@ -362,6 +368,12 @@ const refresh = async () => {
       searchResults.value = searchRes.data;
       nextDegraded = nextDegraded || searchRes.degraded;
     }
+    if (!trendKey.value && topServices.value[0]) {
+      trendKey.value = topServices.value[0].key;
+    }
+    const trendRes = await api.dimensionTimeseries(trendDimension.value, trendKey.value.trim(), minutes, trendDirection.value, 5);
+    dimensionTrend.value = trendRes.data;
+    nextDegraded = nextDegraded || trendRes.degraded;
     if (collectorRes.data[0]) {
       selectedMode.value = collectorRes.data[0].mode;
       selectedIface.value = collectorRes.data[0].iface ?? selectedIface.value;
@@ -529,6 +541,11 @@ const refresh = async () => {
     directionSeries.value = [
       { ts: now - 10, direction: '出站', bytes: 76000000, packets: 48000 },
       { ts: now - 10, direction: '内网东西向', bytes: 26000000, packets: 22000 }
+    ];
+    dimensionTrend.value = [
+      { ts: now - 120, dimension: 'service', key: 'HTTPS', bytes: 18000000, packets: 7200 },
+      { ts: now - 60, dimension: 'service', key: 'HTTPS', bytes: 24000000, packets: 9300 },
+      { ts: now, dimension: 'service', key: 'HTTPS', bytes: 42000000, packets: 14000 }
     ];
     searchResults.value = [
       { kind: 'flow', key: `${searchTerm.value}:53210 -> 172.20.2.10:443 / tcp`, bytes: 42000000, packets: 14000 },
@@ -711,6 +728,22 @@ const exposureRiskOptions = [
   { value: 'low', label: '低' },
   { value: 'observe', label: '观察' }
 ];
+const trendDimensionOptions = [
+  { value: 'service', label: '应用服务' },
+  { value: 'service_category', label: '服务类别' },
+  { value: 'service_risk', label: '服务风险' },
+  { value: 'dst_port', label: '目的端口' },
+  { value: 'protocol', label: '协议' },
+  { value: 'vlan', label: 'VLAN' },
+  { value: 'dscp', label: 'DSCP' },
+  { value: 'ecn', label: 'ECN' },
+  { value: 'ip', label: 'IP 地址' }
+];
+const trendDimensionLabel = computed(() => trendDimensionOptions.find((item) => item.value === trendDimension.value)?.label ?? trendDimension.value);
+const trendTitle = computed(() => {
+  const suffix = trendKey.value.trim() || 'Top 对象';
+  return `${trendDimensionLabel.value}趋势 / ${suffix}`;
+});
 const exposureCategoryOptions = computed(() => {
   const categories = Array.from(new Set(serviceExposure.value.map((row) => row.category).filter(Boolean))).sort();
   return [{ value: 'all', label: '全部类别' }, ...categories.map((category) => ({ value: category, label: category }))];
@@ -1008,6 +1041,23 @@ const runSearch = async () => {
   try {
     const result = await api.search(searchTerm.value.trim(), selectedMinutes.value, 80);
     searchResults.value = result.data;
+    degraded.value = result.degraded;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const loadDimensionTrend = async () => {
+  loading.value = true;
+  try {
+    const result = await api.dimensionTimeseries(
+      trendDimension.value,
+      trendKey.value.trim(),
+      selectedMinutes.value,
+      trendDirection.value,
+      5
+    );
+    dimensionTrend.value = result.data;
     degraded.value = result.degraded;
   } finally {
     loading.value = false;
@@ -1439,6 +1489,27 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TrafficHeatmap :points="series" />
           <HorizontalBarChart title="变化对象排行" eyebrow="Change Ranking" :items="trafficChangeItems" />
         </section>
+        <section class="toolbar-panel profile-toolbar">
+          <label>
+            <span>下钻维度</span>
+            <select v-model="trendDimension">
+              <option v-for="option in trendDimensionOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label v-if="trendDimension === 'ip'">
+            <span>IP 方向</span>
+            <select v-model="trendDirection">
+              <option value="src">源 IP</option>
+              <option value="dst">目的 IP</option>
+            </select>
+          </label>
+          <label class="filter-field">
+            <span>对象值</span>
+            <input v-model="trendKey" placeholder="留空查看 Top 对象，或输入 HTTPS / 443 / BE / 10.2.0.12" @keyup.enter="loadDimensionTrend" />
+          </label>
+          <button type="button" @click="loadDimensionTrend">查看趋势</button>
+        </section>
+        <DimensionTrendChart :title="trendTitle" :points="dimensionTrend" />
         <section class="command-grid">
           <HorizontalBarChart title="应用服务排行" eyebrow="Service Ranking" :items="topServices" />
           <HorizontalBarChart title="服务风险流量" eyebrow="Service Risk" :items="topServiceRisks" />
@@ -2072,6 +2143,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" class="command-button" @click="exportSelectedTopN">导出 CSV</button>
         </section>
         <HorizontalBarChart :title="selectedTopNTitle" eyebrow="TopN Chart" :items="selectedTopN" />
+        <DimensionTrendChart :title="trendTitle" :points="dimensionTrend" />
         <TopNTable :title="selectedTopNTitle" :items="selectedTopN" />
       </template>
 

@@ -155,6 +155,14 @@ export interface DirectionPoint {
   packets: number;
 }
 
+export interface DimensionPoint {
+  ts: number;
+  dimension: string;
+  key: string;
+  bytes: number;
+  packets: number;
+}
+
 export interface SearchResult {
   kind: string;
   key: string;
@@ -306,6 +314,11 @@ export const api = {
   },
   async directionTimeseries(minutes = 15) {
     return json<{ data: DirectionPoint[]; degraded: boolean }>(`/api/v1/traffic/direction-timeseries?minutes=${minutes}`);
+  },
+  async dimensionTimeseries(dimension = 'service', key = '', minutes = 15, direction = 'src', limit = 5) {
+    return json<{ data: DimensionPoint[]; degraded: boolean }>(
+      `/api/v1/traffic/dimension-timeseries?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}&direction=${encodeURIComponent(direction)}&minutes=${minutes}&limit=${limit}`
+    );
   },
   async search(q: string, minutes = 15, limit = 50) {
     return json<{ data: SearchResult[]; degraded: boolean }>(
