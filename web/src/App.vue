@@ -71,6 +71,9 @@ const topPacketLens = ref<TopItem[]>([]);
 const topServices = ref<TopItem[]>([]);
 const topServiceCategories = ref<TopItem[]>([]);
 const topServiceRisks = ref<TopItem[]>([]);
+const topVLANs = ref<TopItem[]>([]);
+const topDSCP = ref<TopItem[]>([]);
+const topECN = ref<TopItem[]>([]);
 const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
 const interfaces = ref<NetworkInterface[]>([]);
@@ -232,6 +235,9 @@ const refresh = async () => {
       serviceRes,
       serviceCategoryRes,
       serviceRiskRes,
+      vlanRes,
+      dscpRes,
+      ecnRes,
       flowRes,
       pairRes,
       collectorRes,
@@ -261,6 +267,9 @@ const refresh = async () => {
       api.topn('service', 'src', minutes),
       api.topn('service_category', 'src', minutes),
       api.topn('service_risk', 'src', minutes),
+      api.topn('vlan', 'src', minutes),
+      api.topn('dscp', 'src', minutes),
+      api.topn('ecn', 'src', minutes),
       api.topn('flow', 'src', minutes),
       api.topn('pair', 'src', minutes),
       api.collectors(),
@@ -290,6 +299,9 @@ const refresh = async () => {
     topServices.value = serviceRes.data;
     topServiceCategories.value = serviceCategoryRes.data;
     topServiceRisks.value = serviceRiskRes.data;
+    topVLANs.value = vlanRes.data;
+    topDSCP.value = dscpRes.data;
+    topECN.value = ecnRes.data;
     topFlows.value = flowRes.data;
     topPairs.value = pairRes.data;
     collectors.value = collectorRes.data;
@@ -316,6 +328,9 @@ const refresh = async () => {
       serviceRes.degraded ||
       serviceCategoryRes.degraded ||
       serviceRiskRes.degraded ||
+      vlanRes.degraded ||
+      dscpRes.degraded ||
+      ecnRes.degraded ||
       alertRes.degraded ||
       statusRes.degraded ||
       windowsRes.degraded ||
@@ -403,6 +418,19 @@ const refresh = async () => {
     topServiceRisks.value = [
       { key: 'low', bytes: 116000000, packets: 81000 },
       { key: 'medium', bytes: 18000000, packets: 7200 }
+    ];
+    topVLANs.value = [
+      { key: 'untagged', bytes: 128000000, packets: 90000 },
+      { key: '100', bytes: 6400000, packets: 3100 }
+    ];
+    topDSCP.value = [
+      { key: 'BE', bytes: 108000000, packets: 76000 },
+      { key: 'AF11', bytes: 18000000, packets: 9000 },
+      { key: 'EF', bytes: 6000000, packets: 2200 }
+    ];
+    topECN.value = [
+      { key: 'Not-ECT', bytes: 126000000, packets: 88000 },
+      { key: 'ECT(0)', bytes: 4000000, packets: 1200 }
     ];
     topPairs.value = [
       { key: '10.10.1.42 -> 172.20.2.10', bytes: 52000000, packets: 18000 },
@@ -793,6 +821,9 @@ const selectedTopN = computed(() => {
   if (activeTopN.value === 'service') return topServices.value;
   if (activeTopN.value === 'service_category') return topServiceCategories.value;
   if (activeTopN.value === 'service_risk') return topServiceRisks.value;
+  if (activeTopN.value === 'vlan') return topVLANs.value;
+  if (activeTopN.value === 'dscp') return topDSCP.value;
+  if (activeTopN.value === 'ecn') return topECN.value;
   if (activeTopN.value === 'protocol') return topProtocols.value;
   if (activeTopN.value === 'packet_len') return topPacketLens.value;
   if (activeTopN.value === 'flow') return topFlows.value;
@@ -806,6 +837,9 @@ const selectedTopNTitle = computed(() => {
   if (activeTopN.value === 'service') return '应用服务排行';
   if (activeTopN.value === 'service_category') return '服务类别排行';
   if (activeTopN.value === 'service_risk') return '服务风险排行';
+  if (activeTopN.value === 'vlan') return 'VLAN 流量排行';
+  if (activeTopN.value === 'dscp') return 'DSCP/QoS 排行';
+  if (activeTopN.value === 'ecn') return 'ECN 标记排行';
   if (activeTopN.value === 'protocol') return '协议排行';
   if (activeTopN.value === 'packet_len') return '包长分布排行';
   if (activeTopN.value === 'flow') return '会话排行';
@@ -1397,6 +1431,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <HorizontalBarChart title="应用服务排行" eyebrow="Service Ranking" :items="topServices" />
           <HorizontalBarChart title="服务风险流量" eyebrow="Service Risk" :items="topServiceRisks" />
         </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="VLAN 流量分布" eyebrow="Layer 2 Segment" :items="topVLANs" />
+          <HorizontalBarChart title="DSCP/QoS 分布" eyebrow="QoS Marking" :items="topDSCP" />
+        </section>
         <section class="main-grid">
           <section class="collector-panel">
             <h2>基线摘要</h2>
@@ -1426,6 +1464,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TopNTable title="协议占比" :items="trafficAnalysis.protocol_mix" />
           <TopNTable title="应用服务" :items="topServices" />
           <TopNTable title="服务类别" :items="topServiceCategories" />
+          <TopNTable title="VLAN 分布" :items="topVLANs" />
+          <TopNTable title="DSCP/QoS" :items="topDSCP" />
           <TopNTable title="包长分布" :items="trafficAnalysis.packet_sizes" />
           <TopNTable title="端口服务混合" :items="trafficAnalysis.port_mix" />
         </section>
@@ -2011,6 +2051,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button type="button" :class="{ active: activeTopN === 'service' }" @click="activeTopN = 'service'">应用服务</button>
           <button type="button" :class="{ active: activeTopN === 'service_category' }" @click="activeTopN = 'service_category'">服务类别</button>
           <button type="button" :class="{ active: activeTopN === 'service_risk' }" @click="activeTopN = 'service_risk'">服务风险</button>
+          <button type="button" :class="{ active: activeTopN === 'vlan' }" @click="activeTopN = 'vlan'">VLAN</button>
+          <button type="button" :class="{ active: activeTopN === 'dscp' }" @click="activeTopN = 'dscp'">DSCP</button>
+          <button type="button" :class="{ active: activeTopN === 'ecn' }" @click="activeTopN = 'ecn'">ECN</button>
           <button type="button" :class="{ active: activeTopN === 'protocol' }" @click="activeTopN = 'protocol'">协议</button>
           <button type="button" :class="{ active: activeTopN === 'packet_len' }" @click="activeTopN = 'packet_len'">包长</button>
           <button type="button" :class="{ active: activeTopN === 'flow' }" @click="activeTopN = 'flow'">会话</button>

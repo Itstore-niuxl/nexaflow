@@ -9,6 +9,9 @@ type PacketMeta struct {
 	SrcPort  uint16
 	DstPort  uint16
 	Proto    uint8
+	VLANID   uint16
+	DSCP     uint8
+	ECN      uint8
 	Length   uint32
 }
 
@@ -43,6 +46,9 @@ type WindowResult struct {
 	TopService   []TopItem    `json:"top_service"`
 	TopSvcCat    []TopItem    `json:"top_service_category"`
 	TopSvcRisk   []TopItem    `json:"top_service_risk"`
+	TopVLAN      []TopItem    `json:"top_vlan"`
+	TopDSCP      []TopItem    `json:"top_dscp"`
+	TopECN       []TopItem    `json:"top_ecn"`
 	Alerts       []AlertEvent `json:"alerts"`
 }
 

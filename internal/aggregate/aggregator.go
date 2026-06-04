@@ -40,6 +40,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 	services := map[string]counter{}
 	serviceCategories := map[string]counter{}
 	serviceRisks := map[string]counter{}
+	vlans := map[string]counter{}
+	dscps := map[string]counter{}
+	ecns := map[string]counter{}
 
 	flush := func() {
 		if current == 0 {
@@ -73,6 +76,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 			TopService:   top(services, 20),
 			TopSvcCat:    top(serviceCategories, 20),
 			TopSvcRisk:   top(serviceRisks, 20),
+			TopVLAN:      top(vlans, 20),
+			TopDSCP:      top(dscps, 20),
+			TopECN:       top(ecns, 20),
 		}
 		policy := a.alerts()
 		result.Alerts = append(result.Alerts, anomalyAlerts(result, policy)...)
@@ -105,6 +111,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 		services = map[string]counter{}
 		serviceCategories = map[string]counter{}
 		serviceRisks = map[string]counter{}
+		vlans = map[string]counter{}
+		dscps = map[string]counter{}
+		ecns = map[string]counter{}
 	}
 
 	for pkt := range in {
@@ -129,6 +138,9 @@ func (a *Aggregator) Run(in <-chan model.PacketMeta, out chan<- model.WindowResu
 		add(services, service.Name, pkt.Length)
 		add(serviceCategories, service.Category, pkt.Length)
 		add(serviceRisks, service.Risk, pkt.Length)
+		add(vlans, vlanKey(pkt.VLANID), pkt.Length)
+		add(dscps, dscpLabel(pkt.DSCP), pkt.Length)
+		add(ecns, ecnLabel(pkt.ECN), pkt.Length)
 		link.bytes += uint64(pkt.Length)
 		link.packets++
 	}
@@ -207,6 +219,58 @@ func packetLenBucket(length uint32) string {
 		return "1KB-MTU"
 	default:
 		return "Jumbo"
+	}
+}
+
+func vlanKey(vlanID uint16) string {
+	if vlanID == 0 {
+		return "untagged"
+	}
+	return strconv.Itoa(int(vlanID))
+}
+
+func dscpLabel(dscp uint8) string {
+	labels := map[uint8]string{
+		0:  "BE",
+		8:  "CS1",
+		10: "AF11",
+		12: "AF12",
+		14: "AF13",
+		16: "CS2",
+		18: "AF21",
+		20: "AF22",
+		22: "AF23",
+		24: "CS3",
+		26: "AF31",
+		28: "AF32",
+		30: "AF33",
+		32: "CS4",
+		34: "AF41",
+		36: "AF42",
+		38: "AF43",
+		40: "CS5",
+		46: "EF",
+		48: "CS6",
+		56: "CS7",
+	}
+	if label, ok := labels[dscp]; ok {
+		return label
+	}
+	return "DSCP-" + strconv.Itoa(int(dscp))
+}
+
+func ecnLabel(ecn uint8) string {
+	switch ecn {
+	case 0:
+		return "Not-ECT"
+	case 1:
+		return "ECT(1)"
+	case 2:
+		return "ECT(0)"
+	case 3:
+		return "CE"
+	default:
+		return "ECN-" + strconv.Itoa(int(ecn))
 	}
 }
 

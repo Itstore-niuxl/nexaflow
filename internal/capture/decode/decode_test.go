@@ -54,3 +54,23 @@ func TestCompileFilter(t *testing.T) {
 		}
 	}
 }
+
+func TestEthernetVLANIPv4DSCP(t *testing.T) {
+	packet := []byte{
+		0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x81, 0x00,
+		0x00, 0x64, 0x08, 0x00,
+		0x45, 0x29, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0,
+		10, 0, 0, 1, 172, 16, 0, 2,
+		0x30, 0x39, 0x01, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0x02, 0, 0, 0, 0, 0, 0,
+	}
+	meta, ok := Ethernet("test-source", "eth-test", packet, time.Unix(100, 0))
+	if !ok {
+		t.Fatal("expected packet to decode")
+	}
+	if meta.VLANID != 100 {
+		t.Fatalf("unexpected VLAN ID: %d", meta.VLANID)
+	}
+	if meta.DSCP != 10 || meta.ECN != 1 {
+		t.Fatalf("unexpected QoS fields: dscp=%d ecn=%d", meta.DSCP, meta.ECN)
+	}
+}

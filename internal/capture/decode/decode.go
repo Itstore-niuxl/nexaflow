@@ -27,18 +27,29 @@ func Ethernet(sourceID, iface string, pkt []byte, ts time.Time) (model.PacketMet
 	}
 	etherType := binary.BigEndian.Uint16(pkt[12:14])
 	offset := 14
+	vlanID := uint16(0)
 	if etherType == ethVLAN || etherType == ethQinQ {
 		if len(pkt) < 18 {
 			return model.PacketMeta{}, false
 		}
+		tci := binary.BigEndian.Uint16(pkt[14:16])
+		vlanID = tci & 0x0fff
 		etherType = binary.BigEndian.Uint16(pkt[16:18])
 		offset = 18
+		if etherType == ethVLAN || etherType == ethQinQ {
+			if len(pkt) < 22 {
+				return model.PacketMeta{}, false
+			}
+			etherType = binary.BigEndian.Uint16(pkt[20:22])
+			offset = 22
+		}
 	}
 
 	meta := model.PacketMeta{
 		Ts:       ts.Unix(),
 		SourceID: sourceID,
 		Iface:    iface,
+		VLANID:   vlanID,
 		Length:   uint32(len(pkt)),
 	}
 
@@ -93,6 +104,8 @@ func ipv4(meta model.PacketMeta, pkt []byte) (model.PacketMeta, bool) {
 		return model.PacketMeta{}, false
 	}
 	meta.Proto = pkt[9]
+	meta.DSCP = pkt[1] >> 2
+	meta.ECN = pkt[1] & 0x03
 	meta.SrcIP = net.IP(pkt[12:16]).String()
 	meta.DstIP = net.IP(pkt[16:20]).String()
 	parsePorts(&meta, pkt[ihl:])
@@ -103,6 +116,9 @@ func ipv6(meta model.PacketMeta, pkt []byte) (model.PacketMeta, bool) {
 	if len(pkt) < 40 {
 		return model.PacketMeta{}, false
 	}
+	trafficClass := ((pkt[0] & 0x0f) << 4) | (pkt[1] >> 4)
+	meta.DSCP = trafficClass >> 2
+	meta.ECN = trafficClass & 0x03
 	meta.Proto = pkt[6]
 	meta.SrcIP = net.IP(pkt[8:24]).String()
 	meta.DstIP = net.IP(pkt[24:40]).String()

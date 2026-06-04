@@ -255,6 +255,15 @@ func (s *Store) WriteWindow(ctx context.Context, win model.WindowResult) error {
 	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "service_risk", win.TopSvcRisk); err != nil {
 		return err
 	}
+	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "vlan", win.TopVLAN); err != nil {
+		return err
+	}
+	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "dscp", win.TopDSCP); err != nil {
+		return err
+	}
+	if err := s.insertDim(ctx, win.SourceID, win.Iface, win.Ts, "ecn", win.TopECN); err != nil {
+		return err
+	}
 	for _, alert := range win.Alerts {
 		if err := s.insertAlert(ctx, alert); err != nil {
 			return err
