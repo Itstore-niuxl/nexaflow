@@ -53,6 +53,7 @@ import {
   type SecurityInsight,
   type ServiceExposure,
   type ServiceMap,
+  type SessionRow,
   type SeriesPoint,
   type Summary,
   type SystemStatus,
@@ -117,6 +118,7 @@ const emptyObjectRelations = (): ObjectRelations => ({
 const objectRelations = ref<ObjectRelations>(emptyObjectRelations());
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
+const sessions = ref<SessionRow[]>([]);
 const assets = ref<AssetRow[]>([]);
 const assetEditor = ref<AssetMetadata | null>(null);
 const assetTagsText = ref('');
@@ -166,6 +168,7 @@ const whitelistSubject = ref('');
 const exposureSearch = ref('');
 const exposureRiskFilter = ref('all');
 const exposureCategoryFilter = ref('all');
+const sessionSearch = ref('');
 let timer: number | undefined;
 
 const navGroups = [
@@ -183,6 +186,7 @@ const navGroups = [
       { id: 'analysis', label: '流向分析', icon: Route },
       { id: 'topology', label: '服务拓扑', icon: Network },
       { id: 'topn', label: 'TopN 分析', icon: ListOrdered },
+      { id: 'sessions', label: '会话追踪', icon: Waypoints },
       { id: 'profile', label: '对象画像', icon: Radar },
       { id: 'port', label: '端口画像', icon: CircleGauge }
     ]
@@ -218,6 +222,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   profile: { title: '对象画像', subtitle: '围绕单个 IP 查看收发流量、关联主机对和活跃会话' },
   port: { title: '端口画像', subtitle: '围绕目的端口查看流量规模和关联会话' },
   topn: { title: 'TopN 分析', subtitle: '按 IP、端口、协议和会话维度定位主要流量对象' },
+  sessions: { title: '会话追踪', subtitle: '结构化查看源/目的、端口、协议、服务、方向和风险' },
   alerts: { title: '告警中心', subtitle: '查看阈值、采集健康和异常事件' },
   search: { title: '检索分析', subtitle: '按 IP、端口、主机对或会话关键字检索流量对象' },
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
@@ -272,6 +277,7 @@ const refresh = async () => {
       protocolSeriesRes,
       portSeriesRes,
       directionSeriesRes,
+      sessionsRes,
       assetsRes,
       securityRes,
       trafficAnalysisRes,
@@ -304,6 +310,7 @@ const refresh = async () => {
       api.protocolTimeseries(minutes),
       api.portTimeseries(minutes, 8),
       api.directionTimeseries(minutes),
+      api.sessions(sessionSearch.value.trim(), minutes, 120),
       api.assets(minutes, 100),
       api.securityInsights(minutes, 100),
       api.trafficAnalysis(minutes),
@@ -336,6 +343,7 @@ const refresh = async () => {
     protocolSeries.value = protocolSeriesRes.data;
     portSeries.value = portSeriesRes.data;
     directionSeries.value = directionSeriesRes.data;
+    sessions.value = sessionsRes.data;
     assets.value = assetsRes.data;
     securityInsights.value = securityRes.data;
     trafficAnalysis.value = trafficAnalysisRes.data;
@@ -360,6 +368,7 @@ const refresh = async () => {
       protocolSeriesRes.degraded ||
       portSeriesRes.degraded ||
       directionSeriesRes.degraded ||
+      sessionsRes.degraded ||
       assetsRes.degraded ||
       securityRes.degraded ||
       trafficAnalysisRes.degraded ||
@@ -583,6 +592,50 @@ const refresh = async () => {
       ],
       insights: []
     };
+    sessions.value = [
+      {
+        key: '10.10.1.42:53210 -> 172.20.2.10:443 / tcp',
+        src_ip: '10.10.1.42',
+        src_port: '53210',
+        dst_ip: '172.20.2.10',
+        dst_port: '443',
+        protocol: 'tcp',
+        service: 'HTTPS',
+        category: 'Web',
+        risk: 'low',
+        direction: '内网服务',
+        server_ip: '172.20.2.10',
+        server_port: '443',
+        client_ip: '10.10.1.42',
+        confidence: '高',
+        bytes: 42000000,
+        packets: 14000,
+        avg_packet_size: 3000,
+        first_seen: now - 180,
+        last_seen: now
+      },
+      {
+        key: '10.10.1.77:53192 -> 172.20.2.81:22 / tcp',
+        src_ip: '10.10.1.77',
+        src_port: '53192',
+        dst_ip: '172.20.2.81',
+        dst_port: '22',
+        protocol: 'tcp',
+        service: 'SSH',
+        category: '远程管理',
+        risk: 'high',
+        direction: '内网服务',
+        server_ip: '172.20.2.81',
+        server_port: '22',
+        client_ip: '10.10.1.77',
+        confidence: '高',
+        bytes: 18000000,
+        packets: 7200,
+        avg_packet_size: 2500,
+        first_seen: now - 120,
+        last_seen: now - 10
+      }
+    ];
     searchResults.value = [
       { kind: 'flow', key: `${searchTerm.value}:53210 -> 172.20.2.10:443 / tcp`, bytes: 42000000, packets: 14000 },
       { kind: 'pair', key: `${searchTerm.value} -> 172.20.2.10`, bytes: 52000000, packets: 18000 }
@@ -875,6 +928,12 @@ const insightKindItems = computed(() => aggregateTopItems(securityInsights.value
 const alertSeverityItems = computed(() => aggregateTopItems(alerts.value, (row) => severityText(row.severity), () => 1, () => 0));
 const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) => alertStatusText(row.status), () => 1, () => 0));
 const searchResultItems = computed(() => aggregateTopItems(searchResults.value, (row) => `${row.kind}: ${row.key}`, (row) => row.bytes, (row) => row.packets));
+const sessionServiceItems = computed(() => aggregateTopItems(sessions.value, (row) => row.service, (row) => row.bytes, (row) => row.packets));
+const sessionDirectionItems = computed(() => aggregateTopItems(sessions.value, (row) => row.direction, (row) => row.bytes, (row) => row.packets));
+const sessionRiskItems = computed(() => aggregateTopItems(sessions.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
+const sessionTotalBytes = computed(() => sessions.value.reduce((sum, row) => sum + row.bytes, 0));
+const sessionTotalPackets = computed(() => sessions.value.reduce((sum, row) => sum + row.packets, 0));
+const highRiskSessionCount = computed(() => sessions.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
 const relationTitle = computed(() => `${trendDimensionLabel.value}关联 / ${objectRelations.value.key || trendKey.value.trim() || 'Top 对象'}`);
 const relationInsightItems = computed(() =>
   objectRelations.value.insights.map((row) => ({
@@ -1091,6 +1150,39 @@ const runSearch = async () => {
   }
 };
 
+const loadSessions = async () => {
+  loading.value = true;
+  try {
+    const result = await api.sessions(sessionSearch.value.trim(), selectedMinutes.value, 120);
+    sessions.value = result.data;
+    degraded.value = result.degraded;
+  } finally {
+    loading.value = false;
+  }
+};
+
+const openSessionIP = async (ip: string) => {
+  if (!ip) return;
+  profileIP.value = ip;
+  currentView.value = 'profile';
+  await loadProfile();
+};
+
+const openSessionPort = async (port: string) => {
+  if (!port) return;
+  profilePort.value = port;
+  currentView.value = 'port';
+  await loadPortProfile();
+};
+
+const inspectSession = async (row: SessionRow) => {
+  trendDimension.value = 'flow';
+  trendKey.value = row.key;
+  trendDirection.value = 'src';
+  currentView.value = 'traffic';
+  await loadDimensionTrend();
+};
+
 const loadDimensionTrend = async () => {
   loading.value = true;
   try {
@@ -1266,6 +1358,32 @@ const exportSelectedTopN = () => {
     ...selectedTopN.value.map((item) => [item.key, String(item.bytes), String(item.packets)])
   ];
   exportCSV(`nexaflow-${activeTopN.value}-${selectedMinutes.value}m.csv`, rows);
+};
+
+const exportSessions = () => {
+  const rows = [
+    ['会话', '源IP', '源端口', '目的IP', '目的端口', '协议', '服务', '类别', '风险', '方向', '服务端', '客户端', '流量字节', '包数', '平均包长', '首次出现', '最近出现'],
+    ...sessions.value.map((row) => [
+      row.key,
+      row.src_ip,
+      row.src_port,
+      row.dst_ip,
+      row.dst_port,
+      row.protocol,
+      row.service,
+      row.category,
+      serviceRiskText(row.risk),
+      row.direction,
+      `${row.server_ip}:${row.server_port}`,
+      row.client_ip,
+      String(row.bytes),
+      String(row.packets),
+      String(row.avg_packet_size),
+      formatTime(row.first_seen),
+      formatTime(row.last_seen)
+    ])
+  ];
+  exportCSV(`nexaflow-sessions-${selectedMinutes.value}m.csv`, rows);
 };
 
 const exportCSV = (filename: string, rows: string[][]) => {
@@ -2210,6 +2328,100 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
         <HorizontalBarChart :title="`目的端口 ${portProfile.port} 会话排行`" eyebrow="Port Sessions" :items="portProfile.flows" />
         <TopNTable :title="`目的端口 ${portProfile.port} 关联会话`" :items="portProfile.flows" />
+      </template>
+
+      <template v-else-if="currentView === 'sessions'">
+        <section class="toolbar-panel profile-toolbar">
+          <label class="filter-field">
+            <span>会话关键字</span>
+            <input v-model="sessionSearch" placeholder="源/目的 IP、端口、协议或会话片段" @keyup.enter="loadSessions" />
+          </label>
+          <button type="button" @click="loadSessions">追踪会话</button>
+          <button type="button" class="command-button" @click="exportSessions">导出 CSV</button>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Waypoints :size="22" />
+            <div>
+              <span>会话数量</span>
+              <strong>{{ sessions.length.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>会话流量</span>
+              <strong>{{ formatBytes(sessionTotalBytes) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <ListOrdered :size="22" />
+            <div>
+              <span>会话包数</span>
+              <strong>{{ sessionTotalPackets.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>高风险会话</span>
+              <strong>{{ highRiskSessionCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="会话服务分布" eyebrow="Session Service" :items="sessionServiceItems" />
+          <HorizontalBarChart title="会话方向分布" eyebrow="Session Direction" :items="sessionDirectionItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="会话风险分布" eyebrow="Session Risk" :items="sessionRiskItems" />
+          <HorizontalBarChart title="会话流量排行" eyebrow="Session Ranking" :items="topFlows" />
+        </section>
+        <section class="table-panel wide-key-table session-table">
+          <div class="panel-heading">
+            <h2>结构化会话</h2>
+            <span>{{ rangeLabel }} / {{ sessionSearch.trim() || '全部会话' }}</span>
+          </div>
+          <div v-if="sessions.length === 0" class="empty-state">暂无会话数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>会话</th>
+                <th>服务</th>
+                <th>风险</th>
+                <th>方向</th>
+                <th>服务端</th>
+                <th>客户端</th>
+                <th>流量</th>
+                <th>包数</th>
+                <th>最近出现</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in sessions" :key="row.key">
+                <td :title="row.key">{{ row.key }}</td>
+                <td>
+                  <strong>{{ row.service }}</strong>
+                  <span class="cell-subtle">{{ row.category }} / {{ row.protocol }}</span>
+                </td>
+                <td><span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span></td>
+                <td>{{ row.direction }}</td>
+                <td>{{ row.server_ip }}:{{ row.server_port }}</td>
+                <td>{{ row.client_ip || row.src_ip }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+                <td>{{ formatTime(row.last_seen) }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="openSessionIP(row.src_ip)">源</button>
+                  <button class="inline-button" type="button" @click="openSessionIP(row.dst_ip)">目的</button>
+                  <button class="inline-button" type="button" @click="openSessionPort(row.dst_port)">端口</button>
+                  <button class="inline-button" type="button" @click="inspectSession(row)">关联</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
       </template>
 
       <template v-else-if="currentView === 'topn'">

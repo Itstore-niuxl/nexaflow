@@ -890,8 +890,25 @@ td {
 .asset-table table,
 .risk-table table,
 .exposure-table table,
+.session-table table,
 .change-table table {
   table-layout: fixed;
+}
+
+.session-table table {
+  min-width: 1280px;
+}
+
+.session-table td:nth-child(2) strong,
+.cell-subtle {
+  display: block;
+}
+
+.cell-subtle {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .asset-table table {

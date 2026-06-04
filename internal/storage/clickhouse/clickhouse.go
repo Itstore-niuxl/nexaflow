@@ -859,6 +859,45 @@ func (s *Store) relatedSecurityInsights(ctx context.Context, dimension, key stri
 	return filtered, err
 }
 
+func (s *Store) Sessions(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
+	where := ""
+	if q = strings.TrimSpace(q); q != "" {
+		where = " AND position(dim_key, '" + escape(q) + "') > 0"
+	}
+	query := fmt.Sprintf(`SELECT
+    dim_key AS key,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    min(toUnixTimestamp(ts)) AS first_seen,
+    max(toUnixTimestamp(ts)) AS last_seen
+FROM %s.dimension_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE AND dimension = 'flow'%s
+GROUP BY key
+ORDER BY bytes DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, where, limit)
+	body, err := s.query(ctx, query)
+	if err != nil {
+		return demoSessions(), err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return demoSessions(), err
+	}
+	rows := make([]map[string]any, 0, len(parsed.Data))
+	for _, row := range parsed.Data {
+		item := model.TopItem{
+			Key:     stringValue(row["key"]),
+			Bytes:   uintValue(row["bytes"]),
+			Packets: uintValue(row["packets"]),
+		}
+		rows = append(rows, sessionRow(item, int64Value(row["first_seen"]), int64Value(row["last_seen"])))
+	}
+	return rows, nil
+}
+
 func (s *Store) Search(ctx context.Context, q string, minutes, limit int) ([]map[string]any, error) {
 	if q == "" {
 		return []map[string]any{}, nil
@@ -1757,6 +1796,15 @@ func demoSearch(q string) []map[string]any {
 	}
 }
 
+func demoSessions() []map[string]any {
+	now := time.Now().Unix()
+	return []map[string]any{
+		sessionRow(model.TopItem{Key: "10.10.1.42:53210 -> 172.20.2.10:443 / tcp", Bytes: 42000000, Packets: 14000}, now-180, now),
+		sessionRow(model.TopItem{Key: "10.10.1.77:53192 -> 172.20.2.81:22 / tcp", Bytes: 18000000, Packets: 7200}, now-120, now-10),
+		sessionRow(model.TopItem{Key: "10.10.1.18:49812 -> 172.20.2.144:53 / udp", Bytes: 5000000, Packets: 12000}, now-90, now-5),
+	}
+}
+
 func demoTrafficChanges() []map[string]any {
 	return []map[string]any{
 		{
@@ -2048,6 +2096,77 @@ func sortedTopItems(items map[string]model.TopItem, limit int) []model.TopItem {
 		rows = rows[:limit]
 	}
 	return rows
+}
+
+func sessionRow(item model.TopItem, firstSeen, lastSeen int64) map[string]any {
+	row := map[string]any{
+		"key":             item.Key,
+		"bytes":           item.Bytes,
+		"packets":         item.Packets,
+		"avg_packet_size": uint64(0),
+		"first_seen":      firstSeen,
+		"last_seen":       lastSeen,
+		"src_ip":          "",
+		"src_port":        "",
+		"dst_ip":          "",
+		"dst_port":        "",
+		"protocol":        "",
+		"service":         "未知服务",
+		"category":        "未知",
+		"risk":            "observe",
+		"direction":       "未知",
+		"server_ip":       "",
+		"server_port":     "",
+		"client_ip":       "",
+		"confidence":      "低",
+	}
+	if item.Packets > 0 {
+		row["avg_packet_size"] = item.Bytes / item.Packets
+	}
+	parsed, ok := parseFlowKey(item.Key)
+	if !ok {
+		return row
+	}
+	service := identifyService(parsed.DstPort, parsed.Proto)
+	row["src_ip"] = parsed.SrcIP
+	row["src_port"] = parsed.SrcPort
+	row["dst_ip"] = parsed.DstIP
+	row["dst_port"] = parsed.DstPort
+	row["protocol"] = parsed.Proto
+	row["service"] = service.Name
+	row["category"] = service.Category
+	row["risk"] = service.Risk
+	row["direction"] = flowDirection(parsed)
+	row["server_ip"] = parsed.DstIP
+	row["server_port"] = parsed.DstPort
+	row["client_ip"] = parsed.SrcIP
+	if exposure, ok := inferExposureEndpoint(parsed); ok {
+		row["server_ip"] = exposure.IP
+		row["server_port"] = exposure.Port
+		row["client_ip"] = exposure.ClientIP
+		row["confidence"] = exposure.Confidence
+		if exposure.Direction != "" {
+			row["direction"] = exposure.Direction
+		}
+	}
+	return row
+}
+
+func flowDirection(flow parsedFlow) string {
+	srcInternal := isManagedAssetIP(flow.SrcIP)
+	dstInternal := isManagedAssetIP(flow.DstIP)
+	switch {
+	case srcInternal && dstInternal:
+		return "内网东西向"
+	case srcInternal && !dstInternal:
+		return "出站"
+	case !srcInternal && dstInternal:
+		return "入站"
+	case !srcInternal && !dstInternal:
+		return "外部流量"
+	default:
+		return "未知"
+	}
 }
 
 func stringValue(v any) string {

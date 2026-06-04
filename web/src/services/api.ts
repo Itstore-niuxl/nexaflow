@@ -170,6 +170,28 @@ export interface SearchResult {
   packets: number;
 }
 
+export interface SessionRow {
+  key: string;
+  src_ip: string;
+  src_port: string;
+  dst_ip: string;
+  dst_port: string;
+  protocol: string;
+  service: string;
+  category: string;
+  risk: string;
+  direction: string;
+  server_ip: string;
+  server_port: string;
+  client_ip: string;
+  confidence: string;
+  bytes: number;
+  packets: number;
+  avg_packet_size: number;
+  first_seen: number;
+  last_seen: number;
+}
+
 export interface AssetRow {
   ip: string;
   name: string;
@@ -343,6 +365,11 @@ export const api = {
   async objectRelations(dimension = 'service', key = '', minutes = 15, direction = 'src', limit = 8) {
     return json<{ data: ObjectRelations; degraded: boolean }>(
       `/api/v1/traffic/object-relations?dimension=${encodeURIComponent(dimension)}&key=${encodeURIComponent(key)}&direction=${encodeURIComponent(direction)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async sessions(q = '', minutes = 15, limit = 80) {
+    return json<{ data: SessionRow[]; degraded: boolean }>(
+      `/api/v1/traffic/sessions?q=${encodeURIComponent(q)}&minutes=${minutes}&limit=${limit}`
     );
   },
   async search(q: string, minutes = 15, limit = 50) {

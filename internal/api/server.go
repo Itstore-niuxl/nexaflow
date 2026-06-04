@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/direction-timeseries", s.directionTimeseries)
 	mux.HandleFunc("/api/v1/traffic/dimension-timeseries", s.dimensionTimeseries)
 	mux.HandleFunc("/api/v1/traffic/object-relations", s.objectRelations)
+	mux.HandleFunc("/api/v1/traffic/sessions", s.sessions)
 	mux.HandleFunc("/api/v1/traffic/search", s.search)
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
@@ -212,6 +213,12 @@ func (s *Server) objectRelations(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(q.Get("key"))
 	direction := strings.TrimSpace(q.Get("direction"))
 	data, err := s.store.ObjectRelations(r.Context(), dimension, key, direction, queryMinutes(r), queryLimit(r, 8, 30))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	data, err := s.store.Sessions(r.Context(), q, queryMinutes(r), queryLimit(r, 80, 300))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
