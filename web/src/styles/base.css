@@ -782,6 +782,11 @@ button:disabled,
   background: #d1fae5;
 }
 
+.severity-pill.healthy {
+  color: #065f46;
+  background: #d1fae5;
+}
+
 .collector-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -901,6 +906,7 @@ td {
 .rule-finding-table table,
 .data-quality-table table,
 .data-gap-table table,
+.capacity-growth-table table,
 .change-table table {
   table-layout: fixed;
 }
@@ -932,6 +938,10 @@ td {
 
 .data-gap-table table {
   min-width: 920px;
+}
+
+.capacity-growth-table table {
+  min-width: 1080px;
 }
 
 .anomaly-table table {
@@ -1097,6 +1107,14 @@ td {
   min-width: 0;
   white-space: normal;
   word-break: break-word;
+}
+
+.capacity-growth-table th:nth-child(2),
+.capacity-growth-table td:nth-child(2) {
+  width: 24%;
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
 }
 
 .asset-risk-table th:first-child,

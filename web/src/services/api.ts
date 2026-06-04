@@ -523,6 +523,48 @@ export interface TrafficChange {
   change_ratio: number;
 }
 
+export interface CapacitySummary {
+  minutes: number;
+  bandwidth_mbps: number;
+  avg_mbps: number;
+  peak_mbps: number;
+  p95_mbps: number;
+  previous_peak_mbps: number;
+  growth_mbps: number;
+  growth_ratio: number;
+  headroom_mbps: number;
+  headroom_ratio: number;
+  peak_utilization: number;
+  p95_utilization: number;
+  saturation_eta_mins: number;
+  risk_level: string;
+}
+
+export interface CapacityTrendPoint {
+  ts: number;
+  bytes: number;
+  packets: number;
+  utilization: number;
+  mbps: number;
+}
+
+export interface CapacityRecommendation {
+  level: string;
+  title: string;
+  detail: string;
+}
+
+export interface CapacityPlanning {
+  generated_at: number;
+  minutes: number;
+  summary: CapacitySummary;
+  trend: CapacityTrendPoint[];
+  top_src_growth: TrafficChange[];
+  top_port_growth: TrafficChange[];
+  top_service_growth: TrafficChange[];
+  recommendations: CapacityRecommendation[];
+}
+
 export interface TrafficAnomaly {
   kind: string;
   dimension: string;
@@ -720,6 +762,9 @@ export const api = {
   },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);
+  },
+  async capacityPlanning(minutes = 15, limit = 10) {
+    return json<{ data: CapacityPlanning; degraded: boolean }>(`/api/v1/traffic/capacity?minutes=${minutes}&limit=${limit}`);
   },
   async trafficChanges(minutes = 15, limit = 30) {
     return json<{ data: TrafficChange[]; degraded: boolean }>(`/api/v1/traffic/changes?minutes=${minutes}&limit=${limit}`);

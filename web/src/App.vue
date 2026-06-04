@@ -40,6 +40,7 @@ import {
   type AssetMetadata,
   type AssetRiskPosture,
   type AssetRow,
+  type CapacityPlanning,
   type Collector,
   type CollectorConfig,
   type DataQuality,
@@ -239,6 +240,32 @@ const trafficAnalysis = ref<TrafficAnalysis>({
   packet_sizes: [],
   directions: []
 });
+const emptyCapacityPlanning = (): CapacityPlanning => ({
+  generated_at: 0,
+  minutes: 15,
+  summary: {
+    minutes: 15,
+    bandwidth_mbps: 0,
+    avg_mbps: 0,
+    peak_mbps: 0,
+    p95_mbps: 0,
+    previous_peak_mbps: 0,
+    growth_mbps: 0,
+    growth_ratio: 0,
+    headroom_mbps: 0,
+    headroom_ratio: 0,
+    peak_utilization: 0,
+    p95_utilization: 0,
+    saturation_eta_mins: 0,
+    risk_level: 'healthy'
+  },
+  trend: [],
+  top_src_growth: [],
+  top_port_growth: [],
+  top_service_growth: [],
+  recommendations: []
+});
+const capacityPlanning = ref<CapacityPlanning>(emptyCapacityPlanning());
 const degraded = ref(false);
 const loading = ref(false);
 const switching = ref(false);
@@ -274,6 +301,7 @@ const navGroups = [
       { id: 'dashboard', label: '总览大屏', icon: LayoutDashboard },
       { id: 'realtime', label: '实时监控', icon: MonitorDot },
       { id: 'quality', label: '数据质量', icon: Database },
+      { id: 'capacity', label: '容量趋势', icon: Gauge },
       { id: 'traffic', label: '流量剖析', icon: ChartNoAxesCombined }
     ]
   },
@@ -317,6 +345,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   dashboard: { title: '流量总览', subtitle: '近实时流量、采集健康和关键对象排行' },
   realtime: { title: '实时监控', subtitle: '采集窗口、吞吐、包速率和采集器健康状态' },
   quality: { title: '数据质量', subtitle: '核对采集窗口覆盖率、断档、延迟、采集源和网卡健康状态' },
+  capacity: { title: '容量趋势', subtitle: '评估带宽余量、峰值增长、P95 利用率和容量风险对象' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
@@ -395,6 +424,7 @@ const refresh = async () => {
       securityRes,
       incidentRes,
       trafficAnalysisRes,
+      capacityRes,
       trafficChangesRes,
       trafficAnomaliesRes,
       reportRes,
@@ -435,6 +465,7 @@ const refresh = async () => {
       api.securityInsights(minutes, 100),
       api.securityIncidents(minutes, 120),
       api.trafficAnalysis(minutes),
+      api.capacityPlanning(minutes, 12),
       api.trafficChanges(minutes, 30),
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
@@ -476,6 +507,7 @@ const refresh = async () => {
     securityInsights.value = securityRes.data;
     securityIncidents.value = incidentRes.data;
     trafficAnalysis.value = trafficAnalysisRes.data;
+    capacityPlanning.value = capacityRes.data;
     trafficChanges.value = trafficChangesRes.data;
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
@@ -508,6 +540,7 @@ const refresh = async () => {
       securityRes.degraded ||
       incidentRes.degraded ||
       trafficAnalysisRes.degraded ||
+      capacityRes.degraded ||
       trafficChangesRes.degraded ||
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
@@ -1145,6 +1178,71 @@ const refresh = async () => {
         { key: '内网东西向', bytes: 26000000, packets: 22000 }
       ]
     };
+    capacityPlanning.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      summary: {
+        minutes: selectedMinutes.value,
+        bandwidth_mbps: 1000,
+        avg_mbps: 7.68,
+        peak_mbps: 25.6,
+        p95_mbps: 19.2,
+        previous_peak_mbps: 18.4,
+        growth_mbps: 7.2,
+        growth_ratio: 0.39,
+        headroom_mbps: 974.4,
+        headroom_ratio: 0.974,
+        peak_utilization: 0.0256,
+        p95_utilization: 0.0192,
+        saturation_eta_mins: 9999,
+        risk_level: 'healthy'
+      },
+      trend: [
+        { ts: now - 180, bytes: 24000000, packets: 9300, utilization: 0.02, mbps: 3.2 },
+        { ts: now - 120, bytes: 36000000, packets: 12000, utilization: 0.03, mbps: 4.8 },
+        { ts: now - 60, bytes: 52000000, packets: 18000, utilization: 0.04, mbps: 6.93 }
+      ],
+      top_src_growth: [
+        {
+          dimension: 'src_ip',
+          key: '10.10.1.42',
+          current_bytes: 68000000,
+          previous_bytes: 22000000,
+          delta_bytes: 46000000,
+          current_packets: 21000,
+          previous_packets: 9000,
+          delta_packets: 12000,
+          change_ratio: 2.09
+        }
+      ],
+      top_port_growth: [
+        {
+          dimension: 'dst_port',
+          key: '443',
+          current_bytes: 88000000,
+          previous_bytes: 52000000,
+          delta_bytes: 36000000,
+          current_packets: 48000,
+          previous_packets: 31000,
+          delta_packets: 17000,
+          change_ratio: 0.69
+        }
+      ],
+      top_service_growth: [
+        {
+          dimension: 'service',
+          key: 'HTTPS',
+          current_bytes: 88000000,
+          previous_bytes: 52000000,
+          delta_bytes: 36000000,
+          current_packets: 48000,
+          previous_packets: 31000,
+          delta_packets: 17000,
+          change_ratio: 0.69
+        }
+      ],
+      recommendations: [{ level: 'info', title: '容量余量充足', detail: '当前峰值和 P95 吞吐低于带宽阈值，可继续观察增长趋势' }]
+    };
     trafficChanges.value = [
       {
         dimension: 'src_ip',
@@ -1284,6 +1382,16 @@ const dataQualityDropItems = computed(() =>
     bytes: row.drops,
     packets: row.windows
   }))
+);
+const capacityTrendSeries = computed(() => capacityPlanning.value.trend.map((row) => ({ ts: row.ts, bytes: row.bytes, packets: row.packets })));
+const capacitySrcGrowthItems = computed(() =>
+  capacityPlanning.value.top_src_growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
+);
+const capacityPortGrowthItems = computed(() =>
+  capacityPlanning.value.top_port_growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
+);
+const capacityServiceGrowthItems = computed(() =>
+  capacityPlanning.value.top_service_growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
 );
 
 const profileTotalBytes = computed(() => ipProfile.value.inbound_bytes + ipProfile.value.outbound_bytes);
@@ -1604,6 +1712,15 @@ const dataQualityStatusText = (status: string) => {
     unknown: '未知'
   };
   return labels[status] ?? status;
+};
+
+const capacityRiskText = (risk: string) => {
+  const labels: Record<string, string> = {
+    healthy: '健康',
+    warning: '关注',
+    critical: '严重'
+  };
+  return labels[risk] ?? risk;
 };
 
 const modeText = (mode: string) => {
@@ -2218,6 +2335,19 @@ const exportDataQuality = () => {
   exportCSV(`nexaflow-data-quality-${selectedMinutes.value}m.csv`, rows);
 };
 
+const exportCapacityPlanning = () => {
+  const summary = capacityPlanning.value.summary;
+  const rows = [
+    ['类型', '对象', '当前值', '上一周期', '增量', '变化率', '流量字节', '包数', '摘要'],
+    ['摘要', '链路容量', `${summary.bandwidth_mbps} Mbps`, '', '', '', '', '', `峰值 ${summary.peak_mbps.toFixed(2)} Mbps / P95 ${summary.p95_mbps.toFixed(2)} Mbps / 余量 ${summary.headroom_mbps.toFixed(2)} Mbps`],
+    ['摘要', '容量风险', capacityRiskText(summary.risk_level), '', `${summary.growth_mbps.toFixed(2)} Mbps`, `${(summary.growth_ratio * 100).toFixed(1)}%`, '', '', `预计触顶 ${summary.saturation_eta_mins ? summary.saturation_eta_mins.toFixed(0) : '-'} 分钟`],
+    ...capacityPlanning.value.top_src_growth.map((row) => ['源 IP 增长', row.key, String(row.current_bytes), String(row.previous_bytes), String(row.delta_bytes), formatChangeRatio(row.change_ratio), String(row.current_bytes), String(row.current_packets), '']),
+    ...capacityPlanning.value.top_port_growth.map((row) => ['端口增长', row.key, String(row.current_bytes), String(row.previous_bytes), String(row.delta_bytes), formatChangeRatio(row.change_ratio), String(row.current_bytes), String(row.current_packets), '']),
+    ...capacityPlanning.value.top_service_growth.map((row) => ['服务增长', row.key, String(row.current_bytes), String(row.previous_bytes), String(row.delta_bytes), formatChangeRatio(row.change_ratio), String(row.current_bytes), String(row.current_packets), ''])
+  ];
+  exportCSV(`nexaflow-capacity-${selectedMinutes.value}m.csv`, rows);
+};
+
 const exportSelectedTopN = () => {
   const rows = [
     ['对象', '流量字节', '包数'],
@@ -2728,6 +2858,160 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatTime(row.end_ts) }}</td>
                 <td>{{ row.duration_seconds.toLocaleString() }}</td>
                 <td>{{ row.missing_windows.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'capacity'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" @click="exportCapacityPlanning">导出容量趋势</button>
+          <div class="toolbar-summary">
+            {{ rangeLabel }} / 生成时间 {{ formatTime(capacityPlanning.generated_at) }} / 标称带宽 {{ capacityPlanning.summary.bandwidth_mbps.toLocaleString() }} Mbps
+          </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>容量风险</span>
+              <strong>{{ capacityRiskText(capacityPlanning.summary.risk_level) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>峰值吞吐</span>
+              <strong>{{ capacityPlanning.summary.peak_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>P95 吞吐</span>
+              <strong>{{ capacityPlanning.summary.p95_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>带宽余量</span>
+              <strong>{{ capacityPlanning.summary.headroom_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <RadioTower :size="22" />
+            <div>
+              <span>峰值利用率</span>
+              <strong>{{ (capacityPlanning.summary.peak_utilization * 100).toFixed(2) }}%</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <History :size="22" />
+            <div>
+              <span>P95 利用率</span>
+              <strong>{{ (capacityPlanning.summary.p95_utilization * 100).toFixed(2) }}%</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <RefreshCw :size="22" />
+            <div>
+              <span>峰值增长</span>
+              <strong>{{ capacityPlanning.summary.growth_mbps.toFixed(2) }} Mbps</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>预计触顶</span>
+              <strong>{{ capacityPlanning.summary.saturation_eta_mins > 0 ? `${capacityPlanning.summary.saturation_eta_mins.toFixed(0)} 分钟` : '未增长' }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <DashboardChart class="chart-panel" :points="capacityTrendSeries" />
+          <HorizontalBarChart title="源 IP 增长排行" eyebrow="Source Growth" :items="capacitySrcGrowthItems" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="端口增长排行" eyebrow="Port Growth" :items="capacityPortGrowthItems" />
+          <HorizontalBarChart title="服务增长排行" eyebrow="Service Growth" :items="capacityServiceGrowthItems" />
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel report-recommendations">
+            <div class="panel-heading">
+              <h2>容量建议</h2>
+              <span>{{ capacityPlanning.recommendations.length.toLocaleString() }} 条</span>
+            </div>
+            <article v-for="item in capacityPlanning.recommendations" :key="`${item.level}-${item.title}`" class="report-recommendation">
+              <span class="severity-pill" :class="item.level">{{ severityText(item.level) }}</span>
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.detail }}</p>
+            </article>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>容量摘要</h2>
+              <span>{{ capacityPlanning.summary.bandwidth_mbps.toLocaleString() }} Mbps</span>
+            </div>
+            <div class="kv-list">
+              <div><span>平均吞吐</span><strong>{{ capacityPlanning.summary.avg_mbps.toFixed(2) }} Mbps</strong></div>
+              <div><span>上一峰值</span><strong>{{ capacityPlanning.summary.previous_peak_mbps.toFixed(2) }} Mbps</strong></div>
+              <div><span>增长率</span><strong>{{ (capacityPlanning.summary.growth_ratio * 100).toFixed(1) }}%</strong></div>
+              <div><span>余量比例</span><strong>{{ (capacityPlanning.summary.headroom_ratio * 100).toFixed(1) }}%</strong></div>
+            </div>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table capacity-growth-table">
+          <div class="panel-heading">
+            <h2>容量增长对象</h2>
+            <span>{{ rangeLabel }} / 当前周期对比上一周期</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>对象</th>
+                <th>当前流量</th>
+                <th>上一周期</th>
+                <th>增量</th>
+                <th>变化率</th>
+                <th>当前包数</th>
+                <th>包增量</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in capacityPlanning.top_src_growth" :key="`src-${row.key}`">
+                <td>源 IP</td>
+                <td>{{ row.key }}</td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.previous_bytes) }}</td>
+                <td>{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
+                <td>{{ formatChangeRatio(row.change_ratio) }}</td>
+                <td>{{ row.current_packets.toLocaleString() }}</td>
+                <td>{{ Math.abs(row.delta_packets).toLocaleString() }}</td>
+              </tr>
+              <tr v-for="row in capacityPlanning.top_port_growth" :key="`port-${row.key}`">
+                <td>目的端口</td>
+                <td>{{ row.key }}</td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.previous_bytes) }}</td>
+                <td>{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
+                <td>{{ formatChangeRatio(row.change_ratio) }}</td>
+                <td>{{ row.current_packets.toLocaleString() }}</td>
+                <td>{{ Math.abs(row.delta_packets).toLocaleString() }}</td>
+              </tr>
+              <tr v-for="row in capacityPlanning.top_service_growth" :key="`service-${row.key}`">
+                <td>应用服务</td>
+                <td>{{ row.key }}</td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.previous_bytes) }}</td>
+                <td>{{ formatBytes(Math.abs(row.delta_bytes)) }}</td>
+                <td>{{ formatChangeRatio(row.change_ratio) }}</td>
+                <td>{{ row.current_packets.toLocaleString() }}</td>
+                <td>{{ Math.abs(row.delta_packets).toLocaleString() }}</td>
               </tr>
             </tbody>
           </table>

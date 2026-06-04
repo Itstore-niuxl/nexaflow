@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/sessions", s.sessions)
 	mux.HandleFunc("/api/v1/traffic/search", s.search)
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
+	mux.HandleFunc("/api/v1/traffic/capacity", s.capacityPlanning)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
 	mux.HandleFunc("/api/v1/traffic/anomalies", s.trafficAnomalies)
 	mux.HandleFunc("/api/v1/assets", s.assets)
@@ -248,6 +249,11 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) trafficAnalysis(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.TrafficAnalysis(r.Context(), queryMinutes(r))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) capacityPlanning(w http.ResponseWriter, r *http.Request) {
+	data, err := s.store.CapacityPlanning(r.Context(), queryMinutes(r), queryLimit(r, 10, 50), s.config.BandwidthMbps)
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 

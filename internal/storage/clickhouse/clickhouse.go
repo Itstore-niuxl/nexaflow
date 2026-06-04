@@ -1168,6 +1168,67 @@ func (s *Store) TrafficAnalysis(ctx context.Context, minutes int) (map[string]an
 	return analysis, firstErr(baselineErr, protocolErr, portErr, packetLenErr, matrixErr)
 }
 
+func (s *Store) CapacityPlanning(ctx context.Context, minutes, limit int, bandwidthMbps uint64) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if bandwidthMbps == 0 {
+		bandwidthMbps = 1000
+	}
+	baseline, baselineErr := s.trafficBaseline(ctx, minutes)
+	previous, previousErr := s.trafficBaselineWindow(ctx, minutes, minutes*2)
+	trend, trendErr := s.capacityMinuteTrend(ctx, minutes)
+	srcGrowth, srcErr := s.dimensionChanges(ctx, "src_ip", "ip", "src", minutes, limit)
+	portGrowth, portErr := s.dimensionChanges(ctx, "dst_port", "dst_port", "src", minutes, limit)
+	serviceGrowth, serviceErr := s.dimensionChanges(ctx, "service", "service", "src", minutes, limit)
+
+	peakMbps := floatValue(baseline["peak_mbps"])
+	p95Mbps := floatValue(baseline["p95_mbps"])
+	avgMbps := floatValue(baseline["avg_mbps"])
+	prevPeakMbps := floatValue(previous["peak_mbps"])
+	growthMbps := peakMbps - prevPeakMbps
+	headroomMbps := float64(bandwidthMbps) - peakMbps
+	if headroomMbps < 0 {
+		headroomMbps = 0
+	}
+	headroomRatio := ratio(headroomMbps, float64(bandwidthMbps))
+	etaMinutes := float64(0)
+	if growthMbps > 0 {
+		etaMinutes = headroomMbps / growthMbps * float64(minutes)
+	}
+	summary := map[string]any{
+		"minutes":             minutes,
+		"bandwidth_mbps":      bandwidthMbps,
+		"avg_mbps":            avgMbps,
+		"peak_mbps":           peakMbps,
+		"p95_mbps":            p95Mbps,
+		"previous_peak_mbps":  prevPeakMbps,
+		"growth_mbps":         growthMbps,
+		"growth_ratio":        ratio(growthMbps, prevPeakMbps),
+		"headroom_mbps":       headroomMbps,
+		"headroom_ratio":      headroomRatio,
+		"peak_utilization":    ratio(peakMbps, float64(bandwidthMbps)),
+		"p95_utilization":     ratio(p95Mbps, float64(bandwidthMbps)),
+		"saturation_eta_mins": etaMinutes,
+		"risk_level":          capacityRiskLevel(headroomRatio, growthMbps, etaMinutes),
+	}
+	data := map[string]any{
+		"generated_at":       time.Now().Unix(),
+		"minutes":            minutes,
+		"summary":            summary,
+		"trend":              trend,
+		"top_src_growth":     capacityGrowthRows(srcGrowth, limit),
+		"top_port_growth":    capacityGrowthRows(portGrowth, limit),
+		"top_service_growth": capacityGrowthRows(serviceGrowth, limit),
+		"recommendations":    capacityRecommendations(summary, srcGrowth, portGrowth, serviceGrowth),
+	}
+	err := firstErr(baselineErr, previousErr, trendErr, srcErr, portErr, serviceErr)
+	if err != nil && len(trend) == 0 {
+		return demoCapacityPlanning(minutes, bandwidthMbps), err
+	}
+	return data, err
+}
+
 func (s *Store) TrafficChanges(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
 	srcChanges, srcErr := s.dimensionChanges(ctx, "src_ip", "ip", "src", minutes, limit)
 	dstChanges, dstErr := s.dimensionChanges(ctx, "dst_ip", "ip", "dst", minutes, limit)
@@ -1981,6 +2042,10 @@ FORMAT JSON`, s.database, endMinutesAgo, startMinutesAgo)
 }
 
 func (s *Store) trafficBaseline(ctx context.Context, minutes int) (map[string]any, error) {
+	return s.trafficBaselineWindow(ctx, 0, minutes)
+}
+
+func (s *Store) trafficBaselineWindow(ctx context.Context, startMinutesAgo, endMinutesAgo int) (map[string]any, error) {
 	q := fmt.Sprintf(`SELECT
     count() AS windows,
     ifNull(avg(bytes), 0) AS avg_bytes,
@@ -1992,7 +2057,8 @@ func (s *Store) trafficBaseline(ctx context.Context, minutes int) (map[string]an
     ifNull(max(utilization), 0) AS peak_utilization
 FROM %s.link_traffic_5s
 WHERE ts >= now() - INTERVAL %d MINUTE
-FORMAT JSON`, s.database, minutes)
+    AND ts < now() - INTERVAL %d MINUTE
+FORMAT JSON`, s.database, endMinutesAgo, startMinutesAgo)
 	body, err := s.query(ctx, q)
 	if err != nil {
 		return nil, err
@@ -2012,6 +2078,33 @@ FORMAT JSON`, s.database, minutes)
 	row["p95_mbps"] = bytesToMbps(p95Bytes, 5)
 	row["burst_ratio"] = ratio(peakBytes, avgBytes)
 	return row, nil
+}
+
+func (s *Store) capacityMinuteTrend(ctx context.Context, minutes int) ([]map[string]any, error) {
+	q := fmt.Sprintf(`SELECT
+    toUnixTimestamp(toStartOfMinute(ts)) AS ts,
+    sum(bytes) AS bytes,
+    sum(packets) AS packets,
+    max(utilization) AS utilization
+FROM %s.link_traffic_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+GROUP BY ts
+ORDER BY ts ASC
+FORMAT JSON`, s.database, minutes)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	for _, row := range parsed.Data {
+		row["mbps"] = bytesToMbps(floatValue(row["bytes"]), 60)
+	}
+	return parsed.Data, nil
 }
 
 func (s *Store) totalLinkBytes(ctx context.Context, minutes int) (uint64, error) {
@@ -2994,6 +3087,50 @@ func demoTrafficAnalysis() map[string]any {
 	}
 }
 
+func demoCapacityPlanning(minutes int, bandwidthMbps uint64) map[string]any {
+	now := time.Now().Unix()
+	if bandwidthMbps == 0 {
+		bandwidthMbps = 1000
+	}
+	return map[string]any{
+		"generated_at": now,
+		"minutes":      minutes,
+		"summary": map[string]any{
+			"minutes":             minutes,
+			"bandwidth_mbps":      bandwidthMbps,
+			"avg_mbps":            7.68,
+			"peak_mbps":           25.6,
+			"p95_mbps":            19.2,
+			"previous_peak_mbps":  18.4,
+			"growth_mbps":         7.2,
+			"growth_ratio":        0.39,
+			"headroom_mbps":       float64(bandwidthMbps) - 25.6,
+			"headroom_ratio":      ratio(float64(bandwidthMbps)-25.6, float64(bandwidthMbps)),
+			"peak_utilization":    ratio(25.6, float64(bandwidthMbps)),
+			"p95_utilization":     ratio(19.2, float64(bandwidthMbps)),
+			"saturation_eta_mins": 9999.0,
+			"risk_level":          "healthy",
+		},
+		"trend": []map[string]any{
+			{"ts": now - 180, "bytes": uint64(24000000), "packets": uint64(9300), "utilization": 0.02, "mbps": 3.2},
+			{"ts": now - 120, "bytes": uint64(36000000), "packets": uint64(12000), "utilization": 0.03, "mbps": 4.8},
+			{"ts": now - 60, "bytes": uint64(52000000), "packets": uint64(18000), "utilization": 0.04, "mbps": 6.93},
+		},
+		"top_src_growth": []map[string]any{
+			{"dimension": "src_ip", "key": "10.10.1.42", "current_bytes": uint64(68000000), "previous_bytes": uint64(22000000), "delta_bytes": int64(46000000), "current_packets": uint64(21000), "previous_packets": uint64(9000), "delta_packets": int64(12000), "change_ratio": 2.09},
+		},
+		"top_port_growth": []map[string]any{
+			{"dimension": "dst_port", "key": "443", "current_bytes": uint64(88000000), "previous_bytes": uint64(52000000), "delta_bytes": int64(36000000), "current_packets": uint64(48000), "previous_packets": uint64(31000), "delta_packets": int64(17000), "change_ratio": 0.69},
+		},
+		"top_service_growth": []map[string]any{
+			{"dimension": "service", "key": "HTTPS", "current_bytes": uint64(88000000), "previous_bytes": uint64(52000000), "delta_bytes": int64(36000000), "current_packets": uint64(48000), "previous_packets": uint64(31000), "delta_packets": int64(17000), "change_ratio": 0.69},
+		},
+		"recommendations": []map[string]string{
+			{"level": "info", "title": "容量余量充足", "detail": "当前峰值和 P95 吞吐低于带宽阈值，可继续观察增长趋势"},
+		},
+	}
+}
+
 func splitPair(key string) (string, string) {
 	parts := strings.SplitN(key, " -> ", 2)
 	if len(parts) != 2 {
@@ -3487,6 +3624,52 @@ func mapStringValues(row map[string]any) []string {
 		}
 	}
 	return values
+}
+
+func capacityRiskLevel(headroomRatio, growthMbps, etaMinutes float64) string {
+	if headroomRatio <= 0.1 || (growthMbps > 0 && etaMinutes > 0 && etaMinutes <= 60) {
+		return "critical"
+	}
+	if headroomRatio <= 0.25 || growthMbps > 0 {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func capacityGrowthRows(rows []map[string]any, limit int) []map[string]any {
+	result := []map[string]any{}
+	for _, row := range rows {
+		if int64Value(row["delta_bytes"]) <= 0 {
+			continue
+		}
+		result = append(result, row)
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+func capacityRecommendations(summary map[string]any, srcGrowth, portGrowth, serviceGrowth []map[string]any) []map[string]string {
+	items := []map[string]string{}
+	risk := stringValue(summary["risk_level"])
+	if risk == "critical" {
+		items = append(items, map[string]string{"level": "critical", "title": "容量风险严重", "detail": "峰值带宽余量不足或预计短时间内触顶，建议立即核对 Top 增长对象并评估扩容或限速策略"})
+	} else if risk == "warning" {
+		items = append(items, map[string]string{"level": "warning", "title": "关注容量增长", "detail": "链路峰值或带宽余量出现压力，建议结合增长最快的源 IP、端口和服务确认是否为计划内流量"})
+	} else {
+		items = append(items, map[string]string{"level": "info", "title": "容量余量充足", "detail": "当前峰值和 P95 吞吐低于带宽阈值，可继续观察增长趋势"})
+	}
+	if len(srcGrowth) > 0 && int64Value(srcGrowth[0]["delta_bytes"]) > 0 {
+		items = append(items, map[string]string{"level": "warning", "title": "定位增长源 IP", "detail": stringValue(srcGrowth[0]["key"]) + " 是当前增长最快源 IP，增长 " + formatBytesText(uint64(int64Value(srcGrowth[0]["delta_bytes"])))})
+	}
+	if len(portGrowth) > 0 && int64Value(portGrowth[0]["delta_bytes"]) > 0 {
+		items = append(items, map[string]string{"level": "info", "title": "核对增长端口", "detail": "目的端口 " + stringValue(portGrowth[0]["key"]) + " 增长最明显，建议确认是否符合业务变更"})
+	}
+	if len(serviceGrowth) > 0 && int64Value(serviceGrowth[0]["delta_bytes"]) > 0 {
+		items = append(items, map[string]string{"level": "info", "title": "核对增长服务", "detail": stringValue(serviceGrowth[0]["key"]) + " 是增长最快服务，建议结合会话追踪排查来源"})
+	}
+	return items
 }
 
 func (s *Store) dataQualitySources(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
