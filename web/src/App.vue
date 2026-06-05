@@ -78,7 +78,9 @@ import {
   type SessionRow,
   type SeriesPoint,
   type Summary,
+  type SystemSettings,
   type SystemStatus,
+  type SettingsTestResult,
   type TrafficAnalysis,
   type TrafficAnomaly,
   type TrafficChange,
@@ -106,6 +108,69 @@ const alerts = ref<AlertEvent[]>([]);
 const auditEvents = ref<AuditEvent[]>([]);
 const configVersions = ref<ConfigVersion[]>([]);
 const selectedConfigDiff = ref<ConfigDiff | null>(null);
+const emptySystemSettings = (): SystemSettings => ({
+  ai: {
+    mode: 'local_mock',
+    provider: 'local_mock',
+    model: 'nexaflow-local-summary',
+    base_url: '',
+    api_key: '',
+    api_key_set: false,
+    api_key_masked: '',
+    max_context_rows: 12,
+    timeout_seconds: 30,
+    temperature: 0.2,
+    enabled_summaries: true
+  },
+  analysis: {
+    default_minutes: 15,
+    baseline_minutes: 120,
+    baseline_deviation_warning: 1.8,
+    baseline_deviation_critical: 3,
+    baseline_min_bytes: 1048576,
+    bandwidth_mbps: 1000,
+    report_default_minutes: 60
+  },
+  security: {
+    auth_enabled: false,
+    readonly_enabled: false,
+    admin_password: '',
+    readonly_password: '',
+    admin_password_set: false,
+    readonly_password_set: false,
+    session_ttl_hours: 12,
+    require_audit_for_write: true,
+    allow_frontend_secrets: true
+  },
+  notification: {
+    enabled: false,
+    provider: 'webhook',
+    webhook_url: '',
+    webhook_token: '',
+    webhook_token_set: false,
+    webhook_token_masked: '',
+    min_severity: 'critical',
+    notify_on_incident: false,
+    notify_on_report: false,
+    channels: []
+  },
+  data: {
+    clickhouse_retention_days: 30,
+    audit_retention_days: 180,
+    config_version_limit: 200,
+    session_retention_days: 30,
+    export_enabled: true
+  },
+  backend: {
+    api_addr: '0.0.0.0:8080',
+    clickhouse_url: '',
+    redis_addr: '',
+    database: 'nexaflow',
+    requires_restart: true
+  },
+  updated_at: 0
+});
+const systemSettings = ref<SystemSettings>(emptySystemSettings());
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -419,6 +484,11 @@ const diffingConfigVersion = ref('');
 const restoringConfigVersion = ref('');
 const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
+const savingSettings = ref(false);
+const settingsTestResult = ref<SettingsTestResult | null>(null);
+const webhookTestResult = ref<SettingsTestResult | null>(null);
+const settingsImportText = ref('');
+const settingsExportText = ref('');
 const currentView = ref('dashboard');
 const activeTopN = ref('src_ip');
 const selectedMinutes = ref(15);
@@ -487,6 +557,7 @@ const navGroups = [
       { id: 'history', label: '历史回放', icon: History },
       { id: 'audit', label: '审计日志', icon: ClipboardList },
       { id: 'config-versions', label: '配置版本', icon: History },
+      { id: 'settings', label: '系统设置', icon: Settings2 },
       { id: 'collectors', label: '采集器', icon: Settings2 }
     ]
   }
@@ -521,6 +592,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
   audit: { title: '审计日志', subtitle: '追踪配置变更、事件处置、规则调整和白名单操作' },
   'config-versions': { title: '配置版本', subtitle: '回溯采集、告警、规则和白名单的运行时配置快照' },
+  settings: { title: '系统设置', subtitle: '统一管理大模型、分析参数、安全权限、通知集成、数据保留和后台连接配置' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
 };
 
@@ -600,7 +672,8 @@ const refresh = async () => {
       reportAIRes,
       ruleFindingRes,
       auditRes,
-      configVersionRes
+      configVersionRes,
+      systemSettingsRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -648,7 +721,8 @@ const refresh = async () => {
       api.aiReportSummary(minutes, 12),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
-      api.configVersions('', 120)
+      api.configVersions('', 120),
+      api.systemSettings()
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -698,6 +772,7 @@ const refresh = async () => {
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
+    systemSettings.value = normalizeSettingsForForm(systemSettingsRes.data);
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -1921,6 +1996,7 @@ const refresh = async () => {
       actions: ['先处理严重资产和开放事件。', '对高风险服务补充资产归属和访问策略。', '把本摘要作为巡检报告草案。'],
       generated_at: now
     };
+    systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
     degraded.value = true;
   } finally {
     loading.value = false;
@@ -1932,6 +2008,57 @@ const startRefreshTimer = () => {
     window.clearInterval(timer);
   }
   timer = window.setInterval(refresh, 5000);
+};
+
+const normalizeSettingsForForm = (settings: SystemSettings): SystemSettings => ({
+  ...emptySystemSettings(),
+  ...settings,
+  ai: { ...emptySystemSettings().ai, ...settings.ai, api_key: '' },
+  analysis: { ...emptySystemSettings().analysis, ...settings.analysis },
+  security: { ...emptySystemSettings().security, ...settings.security, admin_password: '', readonly_password: '' },
+  notification: { ...emptySystemSettings().notification, ...settings.notification, webhook_token: '', channels: settings.notification?.channels ?? [] },
+  data: { ...emptySystemSettings().data, ...settings.data },
+  backend: { ...emptySystemSettings().backend, ...settings.backend }
+});
+
+const saveSettings = async () => {
+  if (!canWrite.value) return;
+  savingSettings.value = true;
+  settingsTestResult.value = null;
+  webhookTestResult.value = null;
+  try {
+    const result = await api.saveSystemSettings(systemSettings.value);
+    systemSettings.value = normalizeSettingsForForm(result.data);
+    await refresh();
+  } finally {
+    savingSettings.value = false;
+  }
+};
+
+const testAISettings = async () => {
+  settingsTestResult.value = null;
+  const result = await api.testAISettings(systemSettings.value);
+  settingsTestResult.value = result.data;
+};
+
+const testWebhookSettings = async () => {
+  webhookTestResult.value = null;
+  const result = await api.testWebhookSettings(systemSettings.value);
+  webhookTestResult.value = result.data;
+};
+
+const exportSettings = async () => {
+  const result = await api.exportSystemSettings();
+  settingsExportText.value = JSON.stringify(result.data, null, 2);
+};
+
+const importSettings = async () => {
+  if (!canWrite.value || !settingsImportText.value.trim()) return;
+  const parsed = JSON.parse(settingsImportText.value) as SystemSettings;
+  const result = await api.importSystemSettings(parsed);
+  systemSettings.value = normalizeSettingsForForm(result.data);
+  settingsImportText.value = '';
+  await refresh();
 };
 
 const checkAuth = async () => {
@@ -6562,6 +6689,154 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </tr>
             </tbody>
           </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'settings'">
+        <section class="toolbar-panel">
+          <button class="command-button" type="button" :disabled="savingSettings || !canWrite" @click="saveSettings">
+            {{ savingSettings ? '保存中...' : '保存系统设置' }}
+          </button>
+          <button class="inline-button" type="button" @click="testAISettings">测试大模型</button>
+          <button class="inline-button" type="button" @click="testWebhookSettings">测试通知</button>
+          <button class="inline-button" type="button" @click="exportSettings">导出配置</button>
+          <div class="toolbar-summary">
+            更新时间 {{ formatTime(systemSettings.updated_at) }} / 敏感字段脱敏展示 / 后台连接项需要重启生效
+          </div>
+        </section>
+        <section class="metric-grid">
+          <article class="metric-card">
+            <span>AI 模式</span>
+            <strong>{{ systemSettings.ai.mode }}</strong>
+            <small>{{ systemSettings.ai.provider }} / {{ systemSettings.ai.model }}</small>
+          </article>
+          <article class="metric-card">
+            <span>默认窗口</span>
+            <strong>{{ systemSettings.analysis.default_minutes }} 分钟</strong>
+            <small>基线 {{ systemSettings.analysis.baseline_minutes }} 分钟</small>
+          </article>
+          <article class="metric-card">
+            <span>登录保护</span>
+            <strong>{{ systemSettings.security.auth_enabled ? '已启用' : '未启用' }}</strong>
+            <small>会话 {{ systemSettings.security.session_ttl_hours }} 小时</small>
+          </article>
+          <article class="metric-card">
+            <span>通知集成</span>
+            <strong>{{ systemSettings.notification.enabled ? '已启用' : '未启用' }}</strong>
+            <small>{{ systemSettings.notification.provider }} / {{ severityText(systemSettings.notification.min_severity) }}</small>
+          </article>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>大模型配置</h2>
+              <span>{{ systemSettings.ai.api_key_set ? systemSettings.ai.api_key_masked : '未设置 Key' }}</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>AI 模式</span><select v-model="systemSettings.ai.mode"><option value="disabled">关闭</option><option value="local_mock">本地模板</option><option value="openai">OpenAI 兼容</option></select></label>
+              <label><span>Provider</span><input v-model="systemSettings.ai.provider" placeholder="openai / deepseek / qwen / openai_compatible" /></label>
+              <label><span>模型</span><input v-model="systemSettings.ai.model" placeholder="gpt-4.1-mini / deepseek-chat" /></label>
+              <label><span>Base URL</span><input v-model="systemSettings.ai.base_url" placeholder="https://api.example.com/v1" /></label>
+              <label><span>API Key</span><input v-model="systemSettings.ai.api_key" type="password" :placeholder="systemSettings.ai.api_key_set ? systemSettings.ai.api_key_masked : '输入新 API Key'" /></label>
+              <label><span>上下文行数</span><input v-model.number="systemSettings.ai.max_context_rows" type="number" min="1" max="200" /></label>
+              <label><span>超时秒数</span><input v-model.number="systemSettings.ai.timeout_seconds" type="number" min="1" max="120" /></label>
+              <label><span>温度</span><input v-model.number="systemSettings.ai.temperature" type="number" min="0" max="2" step="0.1" /></label>
+            </div>
+            <label class="check-row"><input v-model="systemSettings.ai.enabled_summaries" type="checkbox" /> 启用页面 AI 摘要</label>
+            <p v-if="settingsTestResult" class="muted-text" :class="{ positive: settingsTestResult.ok, negative: !settingsTestResult.ok }">{{ settingsTestResult.message }}</p>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>分析配置</h2>
+              <span>{{ systemSettings.analysis.bandwidth_mbps.toLocaleString() }} Mbps</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>默认观察窗口</span><input v-model.number="systemSettings.analysis.default_minutes" type="number" min="5" max="10080" /></label>
+              <label><span>基线历史跨度</span><input v-model.number="systemSettings.analysis.baseline_minutes" type="number" min="10" max="10080" /></label>
+              <label><span>偏离警告倍数</span><input v-model.number="systemSettings.analysis.baseline_deviation_warning" type="number" min="1.1" max="20" step="0.1" /></label>
+              <label><span>偏离严重倍数</span><input v-model.number="systemSettings.analysis.baseline_deviation_critical" type="number" min="1.2" max="50" step="0.1" /></label>
+              <label><span>新增对象最小字节</span><input v-model.number="systemSettings.analysis.baseline_min_bytes" type="number" min="1" /></label>
+              <label><span>链路带宽 Mbps</span><input v-model.number="systemSettings.analysis.bandwidth_mbps" type="number" min="1" /></label>
+              <label><span>报表默认窗口</span><input v-model.number="systemSettings.analysis.report_default_minutes" type="number" min="5" max="10080" /></label>
+            </div>
+          </section>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>安全与权限</h2>
+              <span>{{ systemSettings.security.admin_password_set ? '管理员密码已设置' : '免登录' }}</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>管理员密码</span><input v-model="systemSettings.security.admin_password" type="password" :placeholder="systemSettings.security.admin_password_set ? '留空保持原密码' : '设置管理员密码'" /></label>
+              <label><span>观察员密码</span><input v-model="systemSettings.security.readonly_password" type="password" :placeholder="systemSettings.security.readonly_password_set ? '留空保持原密码' : '设置只读密码'" /></label>
+              <label><span>会话时长小时</span><input v-model.number="systemSettings.security.session_ttl_hours" type="number" min="1" max="168" /></label>
+            </div>
+            <label class="check-row"><input v-model="systemSettings.security.auth_enabled" type="checkbox" /> 启用控制台登录保护</label>
+            <label class="check-row"><input v-model="systemSettings.security.readonly_enabled" type="checkbox" /> 启用观察员只读角色</label>
+            <label class="check-row"><input v-model="systemSettings.security.require_audit_for_write" type="checkbox" /> 写操作强制记录审计</label>
+            <label class="check-row"><input v-model="systemSettings.security.allow_frontend_secrets" type="checkbox" /> 允许前端维护敏感配置</label>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>通知集成</h2>
+              <span>{{ systemSettings.notification.webhook_token_set ? systemSettings.notification.webhook_token_masked : '无 Token' }}</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>Provider</span><select v-model="systemSettings.notification.provider"><option value="webhook">Webhook</option><option value="feishu">飞书</option><option value="dingtalk">钉钉</option><option value="wechat_work">企业微信</option></select></label>
+              <label><span>Webhook URL</span><input v-model="systemSettings.notification.webhook_url" placeholder="https://..." /></label>
+              <label><span>Webhook Token</span><input v-model="systemSettings.notification.webhook_token" type="password" :placeholder="systemSettings.notification.webhook_token_set ? systemSettings.notification.webhook_token_masked : '可选 Bearer Token'" /></label>
+              <label><span>最低级别</span><select v-model="systemSettings.notification.min_severity"><option value="info">提示</option><option value="warning">警告</option><option value="critical">严重</option></select></label>
+            </div>
+            <label class="check-row"><input v-model="systemSettings.notification.enabled" type="checkbox" /> 启用通知</label>
+            <label class="check-row"><input v-model="systemSettings.notification.notify_on_incident" type="checkbox" /> 事件通知</label>
+            <label class="check-row"><input v-model="systemSettings.notification.notify_on_report" type="checkbox" /> 报表通知</label>
+            <p v-if="webhookTestResult" class="muted-text" :class="{ positive: webhookTestResult.ok, negative: !webhookTestResult.ok }">{{ webhookTestResult.message }}</p>
+          </section>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>数据与存储</h2>
+              <span>{{ systemSettings.data.export_enabled ? '允许导出' : '禁止导出' }}</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>ClickHouse 保留天数</span><input v-model.number="systemSettings.data.clickhouse_retention_days" type="number" min="1" /></label>
+              <label><span>会话保留天数</span><input v-model.number="systemSettings.data.session_retention_days" type="number" min="1" /></label>
+              <label><span>审计保留天数</span><input v-model.number="systemSettings.data.audit_retention_days" type="number" min="1" /></label>
+              <label><span>配置版本上限</span><input v-model.number="systemSettings.data.config_version_limit" type="number" min="1" /></label>
+            </div>
+            <label class="check-row"><input v-model="systemSettings.data.export_enabled" type="checkbox" /> 允许报表和配置导出</label>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>后台连接</h2>
+              <span>{{ systemSettings.backend.requires_restart ? '修改后需重启' : '热更新' }}</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>API 地址</span><input v-model="systemSettings.backend.api_addr" placeholder="0.0.0.0:8080" /></label>
+              <label><span>ClickHouse URL</span><input v-model="systemSettings.backend.clickhouse_url" placeholder="http://default:***@clickhouse:8123" /></label>
+              <label><span>Redis 地址</span><input v-model="systemSettings.backend.redis_addr" placeholder="redis:6379" /></label>
+              <label><span>数据库</span><input v-model="systemSettings.backend.database" placeholder="nexaflow" /></label>
+            </div>
+          </section>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>配置导出</h2>
+              <span>{{ settingsExportText ? '已生成' : '未生成' }}</span>
+            </div>
+            <textarea v-model="settingsExportText" class="asset-note-field" rows="10" readonly placeholder="点击导出配置生成 JSON"></textarea>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>配置导入</h2>
+              <span>导入后写入审计和配置版本</span>
+            </div>
+            <textarea v-model="settingsImportText" class="asset-note-field" rows="10" placeholder="粘贴系统设置 JSON"></textarea>
+            <button class="command-button" type="button" :disabled="!canWrite || !settingsImportText.trim()" @click="importSettings">导入系统设置</button>
+          </section>
         </section>
       </template>
 

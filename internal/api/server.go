@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -106,6 +107,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	mux.HandleFunc("/api/v1/system/capture-quality", s.captureQuality)
 	mux.HandleFunc("/api/v1/system/capture-diagnostics", s.captureDiagnostics)
+	mux.HandleFunc("/api/v1/system/settings", s.systemSettings)
+	mux.HandleFunc("/api/v1/system/settings/schema", s.systemSettingsSchema)
+	mux.HandleFunc("/api/v1/system/settings/test-ai", s.systemSettingsTestAI)
+	mux.HandleFunc("/api/v1/system/settings/test-webhook", s.systemSettingsTestWebhook)
+	mux.HandleFunc("/api/v1/system/settings/export", s.systemSettingsExport)
+	mux.HandleFunc("/api/v1/system/settings/import", s.systemSettingsImport)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
 	mux.HandleFunc("/api/v1/system/config-version-diff", s.configVersionDiff)
@@ -296,12 +303,17 @@ func (s *Server) trafficAnalysis(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) trafficBaselineProfile(w http.ResponseWriter, r *http.Request) {
 	minutes := queryMinutes(r)
-	data, err := s.store.BehaviorBaseline(r.Context(), minutes, queryBaselineMinutes(r, minutes), queryLimit(r, 10, 50))
+	settings := s.loadSystemSettings()
+	data, err := s.store.BehaviorBaseline(r.Context(), minutes, queryBaselineMinutes(r, minutes, settings.Analysis.BaselineMinutes), queryLimit(r, 10, 50))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
 func (s *Server) capacityPlanning(w http.ResponseWriter, r *http.Request) {
-	data, err := s.store.CapacityPlanning(r.Context(), queryMinutes(r), queryLimit(r, 10, 50), s.config.BandwidthMbps)
+	bandwidth := s.loadSystemSettings().Analysis.BandwidthMbps
+	if bandwidth == 0 {
+		bandwidth = s.config.BandwidthMbps
+	}
+	data, err := s.store.CapacityPlanning(r.Context(), queryMinutes(r), queryLimit(r, 10, 50), bandwidth)
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -891,6 +903,119 @@ func (s *Server) captureDiagnostics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) systemSettings(w http.ResponseWriter, r *http.Request) {
+	path := s.systemSettingsPath()
+	current := s.loadSystemSettings()
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]any{"data": s.publicSystemSettings(current)})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body config.SystemSettings
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	next := mergeSensitiveSystemSettings(current, body)
+	if err := config.SaveSystemSettings(path, next); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	saved := s.loadSystemSettings()
+	s.configSnapshot(r, "system", "settings", "system.settings.update", "更新系统设置", s.publicSystemSettings(saved))
+	s.audit(r, "system.settings.update", "settings", "更新系统设置", map[string]any{
+		"ai_mode":          saved.AI.Mode,
+		"ai_provider":      saved.AI.Provider,
+		"ai_model":         saved.AI.Model,
+		"default_minutes":  saved.Analysis.DefaultMinutes,
+		"baseline_minutes": saved.Analysis.BaselineMinutes,
+		"auth_enabled":     saved.Security.AuthEnabled,
+		"notify_enabled":   saved.Notification.Enabled,
+	})
+	writeJSON(w, map[string]any{"data": s.publicSystemSettings(saved)})
+}
+
+func (s *Server) systemSettingsSchema(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]any{"data": map[string]any{
+		"ai_modes":       []string{"disabled", "local_mock", "openai"},
+		"ai_providers":   []string{"local_mock", "openai", "deepseek", "qwen", "openai_compatible"},
+		"default_ranges": []int{5, 15, 60, 360, 1440},
+		"severities":     []string{"info", "warning", "critical"},
+		"providers":      []string{"webhook", "feishu", "dingtalk", "wechat_work"},
+		"hot_reload":     []string{"ai", "analysis", "security", "notification", "data"},
+		"restart_required": []string{
+			"backend.api_addr",
+			"backend.clickhouse_url",
+			"backend.redis_addr",
+			"backend.database",
+		},
+	}})
+}
+
+func (s *Server) systemSettingsTestAI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	settings, err := s.decodeSettingsCandidate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result := s.testAISettings(r.Context(), settings.AI)
+	writeJSON(w, map[string]any{"data": result})
+}
+
+func (s *Server) systemSettingsTestWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	settings, err := s.decodeSettingsCandidate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result := testWebhookSettings(r.Context(), settings.Notification)
+	writeJSON(w, map[string]any{"data": result})
+}
+
+func (s *Server) systemSettingsExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]any{"data": s.publicSystemSettings(s.loadSystemSettings())})
+}
+
+func (s *Server) systemSettingsImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body config.SystemSettings
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	next := mergeSensitiveSystemSettings(s.loadSystemSettings(), body)
+	if err := config.SaveSystemSettings(s.systemSettingsPath(), next); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	saved := s.loadSystemSettings()
+	s.configSnapshot(r, "system", "settings", "system.settings.import", "导入系统设置", s.publicSystemSettings(saved))
+	s.audit(r, "system.settings.import", "settings", "导入系统设置", map[string]any{"updated_at": saved.UpdatedAt})
+	writeJSON(w, map[string]any{"data": s.publicSystemSettings(saved)})
+}
+
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.AuditEvents(r.Context(), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
@@ -1105,14 +1230,16 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 }
 
 func (s *Server) authEnabled() bool {
-	return strings.TrimSpace(s.config.AuthPassword) != "" || strings.TrimSpace(s.config.AuthReadOnlyPassword) != ""
+	security := s.loadSystemSettings().Security
+	return security.AuthEnabled && (strings.TrimSpace(security.AdminPassword) != "" || strings.TrimSpace(security.ReadOnlyPassword) != "")
 }
 
 func (s *Server) loginRole(password string) string {
-	if strings.TrimSpace(s.config.AuthPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.AuthPassword)) == 1 {
+	security := s.loadSystemSettings().Security
+	if strings.TrimSpace(security.AdminPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(security.AdminPassword)) == 1 {
 		return authRoleAdmin
 	}
-	if strings.TrimSpace(s.config.AuthReadOnlyPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.AuthReadOnlyPassword)) == 1 {
+	if security.ReadOnlyEnabled && strings.TrimSpace(security.ReadOnlyPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(security.ReadOnlyPassword)) == 1 {
 		return authRoleViewer
 	}
 	return ""
@@ -1137,7 +1264,8 @@ func normalizeAuthRole(role string) string {
 }
 
 func (s *Server) setAuthCookie(w http.ResponseWriter, actor, role string) error {
-	token, err := s.signAuthToken(actor, role, time.Now().Add(12*time.Hour).Unix())
+	ttl := s.authSessionTTL()
+	token, err := s.signAuthToken(actor, role, time.Now().Add(ttl).Unix())
 	if err != nil {
 		return err
 	}
@@ -1145,11 +1273,22 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, actor, role string) error 
 		Name:     authCookieName,
 		Value:    token,
 		Path:     "/",
-		MaxAge:   int((12 * time.Hour).Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
+}
+
+func (s *Server) authSessionTTL() time.Duration {
+	hours := s.loadSystemSettings().Security.SessionTTLHours
+	if hours <= 0 {
+		hours = 12
+	}
+	if hours > 168 {
+		hours = 168
+	}
+	return time.Duration(hours) * time.Hour
 }
 
 func (s *Server) signAuthToken(actor, role string, expires int64) (string, error) {
@@ -1259,8 +1398,11 @@ func queryMinutes(r *http.Request) int {
 	return minutes
 }
 
-func queryBaselineMinutes(r *http.Request, minutes int) int {
-	fallback := max(minutes*8, 60)
+func queryBaselineMinutes(r *http.Request, minutes, configured int) int {
+	fallback := configured
+	if fallback <= 0 {
+		fallback = max(minutes*8, 60)
+	}
 	if fallback > 1440 {
 		fallback = 1440
 	}
@@ -1381,6 +1523,189 @@ func configValueText(value any) string {
 	return string(data)
 }
 
+func (s *Server) systemSettingsPath() string {
+	return config.SystemSettingsPath(s.config.RuntimePath)
+}
+
+func (s *Server) loadSystemSettings() config.SystemSettings {
+	return config.LoadSystemSettings(s.systemSettingsPath(), config.DefaultSystemSettings(s.config))
+}
+
+func (s *Server) publicSystemSettings(settings config.SystemSettings) map[string]any {
+	return map[string]any{
+		"ai": map[string]any{
+			"mode":              settings.AI.Mode,
+			"provider":          settings.AI.Provider,
+			"model":             settings.AI.Model,
+			"base_url":          settings.AI.BaseURL,
+			"api_key_set":       strings.TrimSpace(settings.AI.APIKey) != "",
+			"api_key_masked":    maskSecret(settings.AI.APIKey),
+			"max_context_rows":  settings.AI.MaxContextRows,
+			"timeout_seconds":   settings.AI.TimeoutSeconds,
+			"temperature":       settings.AI.Temperature,
+			"enabled_summaries": settings.AI.EnabledSummaries,
+		},
+		"analysis": settings.Analysis,
+		"security": map[string]any{
+			"auth_enabled":            settings.Security.AuthEnabled,
+			"readonly_enabled":        settings.Security.ReadOnlyEnabled,
+			"admin_password_set":      strings.TrimSpace(settings.Security.AdminPassword) != "",
+			"readonly_password_set":   strings.TrimSpace(settings.Security.ReadOnlyPassword) != "",
+			"session_ttl_hours":       settings.Security.SessionTTLHours,
+			"require_audit_for_write": settings.Security.RequireAuditForWrite,
+			"allow_frontend_secrets":  settings.Security.AllowFrontendSecrets,
+		},
+		"notification": map[string]any{
+			"enabled":              settings.Notification.Enabled,
+			"provider":             settings.Notification.Provider,
+			"webhook_url":          settings.Notification.WebhookURL,
+			"webhook_token_set":    strings.TrimSpace(settings.Notification.WebhookToken) != "",
+			"webhook_token_masked": maskSecret(settings.Notification.WebhookToken),
+			"min_severity":         settings.Notification.MinSeverity,
+			"notify_on_incident":   settings.Notification.NotifyOnIncident,
+			"notify_on_report":     settings.Notification.NotifyOnReport,
+			"channels":             settings.Notification.Channels,
+		},
+		"data":       settings.Data,
+		"backend":    settings.Backend,
+		"updated_at": settings.UpdatedAt,
+	}
+}
+
+func mergeSensitiveSystemSettings(current, next config.SystemSettings) config.SystemSettings {
+	if strings.TrimSpace(next.AI.APIKey) == "" || isMaskedSecret(next.AI.APIKey) {
+		next.AI.APIKey = current.AI.APIKey
+	}
+	if strings.TrimSpace(next.Security.AdminPassword) == "" || isMaskedSecret(next.Security.AdminPassword) {
+		next.Security.AdminPassword = current.Security.AdminPassword
+	}
+	if strings.TrimSpace(next.Security.ReadOnlyPassword) == "" || isMaskedSecret(next.Security.ReadOnlyPassword) {
+		next.Security.ReadOnlyPassword = current.Security.ReadOnlyPassword
+	}
+	if strings.TrimSpace(next.Notification.WebhookToken) == "" || isMaskedSecret(next.Notification.WebhookToken) {
+		next.Notification.WebhookToken = current.Notification.WebhookToken
+	}
+	return next
+}
+
+func (s *Server) decodeSettingsCandidate(r *http.Request) (config.SystemSettings, error) {
+	current := s.loadSystemSettings()
+	var body config.SystemSettings
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return current, err
+	}
+	return mergeSensitiveSystemSettings(current, body), nil
+}
+
+func (s *Server) testAISettings(ctx context.Context, ai config.AISettings) map[string]any {
+	result := map[string]any{
+		"ok":       true,
+		"mode":     ai.Mode,
+		"provider": ai.Provider,
+		"model":    ai.Model,
+		"message":  "本地摘要模式可用。",
+	}
+	if ai.Mode == "disabled" {
+		result["ok"] = false
+		result["message"] = "AI 已关闭，启用 local_mock 或外部模型后再测试。"
+		return result
+	}
+	if ai.Mode == "local_mock" {
+		return result
+	}
+	if strings.TrimSpace(ai.BaseURL) == "" || strings.TrimSpace(ai.APIKey) == "" {
+		result["ok"] = false
+		result["message"] = "外部模型需要配置 Base URL 和 API Key。"
+		return result
+	}
+	base, err := url.Parse(strings.TrimRight(ai.BaseURL, "/") + "/models")
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		result["ok"] = false
+		result["message"] = "Base URL 格式不正确。"
+		return result
+	}
+	timeout := time.Duration(ai.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		result["ok"] = false
+		result["message"] = err.Error()
+		return result
+	}
+	req.Header.Set("Authorization", "Bearer "+ai.APIKey)
+	resp, err := client.Do(req)
+	if err != nil {
+		result["ok"] = false
+		result["message"] = "连接模型网关失败：" + err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+	result["status"] = resp.StatusCode
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		result["message"] = "模型网关连接成功。"
+		return result
+	}
+	result["ok"] = false
+	result["message"] = "模型网关返回异常状态：" + resp.Status
+	return result
+}
+
+func testWebhookSettings(ctx context.Context, notification config.NotificationSettings) map[string]any {
+	result := map[string]any{"ok": false, "provider": notification.Provider, "message": "通知未启用或 Webhook URL 为空。"}
+	if !notification.Enabled || strings.TrimSpace(notification.WebhookURL) == "" {
+		return result
+	}
+	target, err := url.Parse(notification.WebhookURL)
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		result["message"] = "Webhook URL 格式不正确。"
+		return result
+	}
+	body := `{"source":"nexaflow","type":"settings_test","severity":"info","message":"NexaFlow 通知测试"}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader(body))
+	if err != nil {
+		result["message"] = err.Error()
+		return result
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(notification.WebhookToken) != "" {
+		req.Header.Set("Authorization", "Bearer "+notification.WebhookToken)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		result["message"] = "Webhook 发送失败：" + err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+	result["status"] = resp.StatusCode
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		result["ok"] = true
+		result["message"] = "Webhook 测试发送成功。"
+		return result
+	}
+	result["message"] = "Webhook 返回异常状态：" + resp.Status
+	return result
+}
+
+func maskSecret(secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	if len(secret) <= 8 {
+		return "****"
+	}
+	return secret[:4] + "****" + secret[len(secret)-4:]
+}
+
+func isMaskedSecret(secret string) bool {
+	secret = strings.TrimSpace(secret)
+	return secret == "****" || strings.Contains(secret, "****")
+}
+
 type aiSummaryOptions struct {
 	Enabled  bool
 	Mode     string
@@ -1389,20 +1714,21 @@ type aiSummaryOptions struct {
 }
 
 func (s *Server) aiOptions() aiSummaryOptions {
-	mode := strings.TrimSpace(strings.ToLower(s.config.AIMode))
+	ai := s.loadSystemSettings().AI
+	mode := strings.TrimSpace(strings.ToLower(ai.Mode))
 	if mode == "" {
 		mode = "local_mock"
 	}
-	provider := strings.TrimSpace(s.config.AIProvider)
+	provider := strings.TrimSpace(ai.Provider)
 	if provider == "" {
 		provider = mode
 	}
-	model := strings.TrimSpace(s.config.AIModel)
+	model := strings.TrimSpace(ai.Model)
 	if model == "" {
 		model = "nexaflow-local-summary"
 	}
 	return aiSummaryOptions{
-		Enabled:  mode != "disabled",
+		Enabled:  mode != "disabled" && ai.EnabledSummaries,
 		Mode:     mode,
 		Provider: provider,
 		Model:    model,
@@ -1410,8 +1736,9 @@ func (s *Server) aiOptions() aiSummaryOptions {
 }
 
 func (s *Server) aiContextLimit(limit int) int {
-	if s.config.AIMaxContextRows > 0 && limit > s.config.AIMaxContextRows {
-		return s.config.AIMaxContextRows
+	maxRows := s.loadSystemSettings().AI.MaxContextRows
+	if maxRows > 0 && limit > maxRows {
+		return maxRows
 	}
 	return limit
 }

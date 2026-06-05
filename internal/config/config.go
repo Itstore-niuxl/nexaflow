@@ -39,6 +39,75 @@ type Config struct {
 	AIMaxContextRows     int
 }
 
+type SystemSettings struct {
+	AI           AISettings           `json:"ai"`
+	Analysis     AnalysisSettings     `json:"analysis"`
+	Security     SecuritySettings     `json:"security"`
+	Notification NotificationSettings `json:"notification"`
+	Data         DataSettings         `json:"data"`
+	Backend      BackendSettings      `json:"backend"`
+	UpdatedAt    int64                `json:"updated_at"`
+}
+
+type AISettings struct {
+	Mode             string  `json:"mode"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	BaseURL          string  `json:"base_url"`
+	APIKey           string  `json:"api_key,omitempty"`
+	MaxContextRows   int     `json:"max_context_rows"`
+	TimeoutSeconds   int     `json:"timeout_seconds"`
+	Temperature      float64 `json:"temperature"`
+	EnabledSummaries bool    `json:"enabled_summaries"`
+}
+
+type AnalysisSettings struct {
+	DefaultMinutes            int     `json:"default_minutes"`
+	BaselineMinutes           int     `json:"baseline_minutes"`
+	BaselineDeviationWarning  float64 `json:"baseline_deviation_warning"`
+	BaselineDeviationCritical float64 `json:"baseline_deviation_critical"`
+	BaselineMinBytes          uint64  `json:"baseline_min_bytes"`
+	BandwidthMbps             uint64  `json:"bandwidth_mbps"`
+	ReportDefaultMinutes      int     `json:"report_default_minutes"`
+}
+
+type SecuritySettings struct {
+	AuthEnabled          bool   `json:"auth_enabled"`
+	ReadOnlyEnabled      bool   `json:"readonly_enabled"`
+	AdminPassword        string `json:"admin_password,omitempty"`
+	ReadOnlyPassword     string `json:"readonly_password,omitempty"`
+	SessionTTLHours      int    `json:"session_ttl_hours"`
+	RequireAuditForWrite bool   `json:"require_audit_for_write"`
+	AllowFrontendSecrets bool   `json:"allow_frontend_secrets"`
+}
+
+type NotificationSettings struct {
+	Enabled          bool     `json:"enabled"`
+	Provider         string   `json:"provider"`
+	WebhookURL       string   `json:"webhook_url"`
+	WebhookToken     string   `json:"webhook_token,omitempty"`
+	MinSeverity      string   `json:"min_severity"`
+	NotifyOnIncident bool     `json:"notify_on_incident"`
+	NotifyOnReport   bool     `json:"notify_on_report"`
+	Channels         []string `json:"channels"`
+}
+
+type DataSettings struct {
+	ClickHouseRetentionDays int  `json:"clickhouse_retention_days"`
+	AuditRetentionDays      int  `json:"audit_retention_days"`
+	ConfigVersionLimit      int  `json:"config_version_limit"`
+	SessionRetentionDays    int  `json:"session_retention_days"`
+	ExportEnabled           bool `json:"export_enabled"`
+}
+
+type BackendSettings struct {
+	APIAddr         string `json:"api_addr"`
+	ClickHouseURL   string `json:"clickhouse_url"`
+	RedisAddr       string `json:"redis_addr"`
+	Database        string `json:"database"`
+	RequiresRestart bool   `json:"requires_restart"`
+}
+
 type CaptureRuntime struct {
 	Mode        string  `json:"mode"`
 	Iface       string  `json:"iface"`
@@ -164,6 +233,97 @@ func SaveRuntime(path string, runtime CaptureRuntime) error {
 	return os.Rename(tmp, path)
 }
 
+func SystemSettingsPath(runtimePath string) string {
+	return dir(runtimePath) + "/system_settings.json"
+}
+
+func DefaultSystemSettings(cfg Config) SystemSettings {
+	return normalizeSystemSettings(SystemSettings{
+		AI: AISettings{
+			Mode:             cfg.AIMode,
+			Provider:         cfg.AIProvider,
+			Model:            cfg.AIModel,
+			BaseURL:          cfg.AIBaseURL,
+			APIKey:           cfg.AIAPIKey,
+			MaxContextRows:   cfg.AIMaxContextRows,
+			TimeoutSeconds:   30,
+			Temperature:      0.2,
+			EnabledSummaries: cfg.AIMode != "disabled",
+		},
+		Analysis: AnalysisSettings{
+			DefaultMinutes:            15,
+			BaselineMinutes:           120,
+			BaselineDeviationWarning:  1.8,
+			BaselineDeviationCritical: 3.0,
+			BaselineMinBytes:          1024 * 1024,
+			BandwidthMbps:             cfg.BandwidthMbps,
+			ReportDefaultMinutes:      60,
+		},
+		Security: SecuritySettings{
+			AuthEnabled:          strings.TrimSpace(cfg.AuthPassword) != "" || strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
+			ReadOnlyEnabled:      strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
+			AdminPassword:        cfg.AuthPassword,
+			ReadOnlyPassword:     cfg.AuthReadOnlyPassword,
+			SessionTTLHours:      12,
+			RequireAuditForWrite: true,
+			AllowFrontendSecrets: true,
+		},
+		Notification: NotificationSettings{
+			Enabled:          false,
+			Provider:         "webhook",
+			MinSeverity:      "critical",
+			NotifyOnIncident: true,
+			NotifyOnReport:   false,
+			Channels:         []string{},
+		},
+		Data: DataSettings{
+			ClickHouseRetentionDays: 30,
+			AuditRetentionDays:      180,
+			ConfigVersionLimit:      200,
+			SessionRetentionDays:    30,
+			ExportEnabled:           true,
+		},
+		Backend: BackendSettings{
+			APIAddr:         cfg.APIAddr,
+			ClickHouseURL:   cfg.ClickHouseURL,
+			RedisAddr:       cfg.RedisAddr,
+			Database:        cfg.Database,
+			RequiresRestart: true,
+		},
+		UpdatedAt: time.Now().Unix(),
+	})
+}
+
+func LoadSystemSettings(path string, fallback SystemSettings) SystemSettings {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return normalizeSystemSettings(fallback)
+	}
+	var settings SystemSettings
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return normalizeSystemSettings(fallback)
+	}
+	settings = mergeSystemSettings(normalizeSystemSettings(fallback), settings)
+	return normalizeSystemSettings(settings)
+}
+
+func SaveSystemSettings(path string, settings SystemSettings) error {
+	settings = normalizeSystemSettings(settings)
+	settings.UpdatedAt = time.Now().Unix()
+	if err := os.MkdirAll(dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func normalizeRuntime(runtime CaptureRuntime) CaptureRuntime {
 	if runtime.Mode == "" {
 		runtime.Mode = "live_pcap"
@@ -186,6 +346,143 @@ func normalizeRuntime(runtime CaptureRuntime) CaptureRuntime {
 	runtime.SessionTopN = normalizeSessionTopN(runtime.SessionTopN)
 	runtime.Alerts = normalizeAlerts(runtime.Alerts)
 	return runtime
+}
+
+func mergeSystemSettings(fallback, settings SystemSettings) SystemSettings {
+	if settings.AI.Mode == "" {
+		settings.AI = fallback.AI
+	} else {
+		if settings.AI.Provider == "" {
+			settings.AI.Provider = fallback.AI.Provider
+		}
+		if settings.AI.Model == "" {
+			settings.AI.Model = fallback.AI.Model
+		}
+		if settings.AI.APIKey == "" {
+			settings.AI.APIKey = fallback.AI.APIKey
+		}
+	}
+	if settings.Analysis.DefaultMinutes == 0 {
+		settings.Analysis = fallback.Analysis
+	}
+	if settings.Security.SessionTTLHours == 0 {
+		settings.Security = fallback.Security
+	}
+	if settings.Notification.Provider == "" {
+		settings.Notification = fallback.Notification
+	}
+	if settings.Data.ClickHouseRetentionDays == 0 {
+		settings.Data = fallback.Data
+	}
+	if settings.Backend.APIAddr == "" {
+		settings.Backend = fallback.Backend
+	}
+	return settings
+}
+
+func normalizeSystemSettings(settings SystemSettings) SystemSettings {
+	settings.AI.Mode = normalizeAIMode(settings.AI.Mode)
+	if settings.AI.Provider == "" {
+		settings.AI.Provider = settings.AI.Mode
+	}
+	if settings.AI.Model == "" {
+		settings.AI.Model = "nexaflow-local-summary"
+	}
+	if settings.AI.MaxContextRows <= 0 {
+		settings.AI.MaxContextRows = 12
+	}
+	if settings.AI.MaxContextRows > 200 {
+		settings.AI.MaxContextRows = 200
+	}
+	if settings.AI.TimeoutSeconds <= 0 {
+		settings.AI.TimeoutSeconds = 30
+	}
+	if settings.AI.TimeoutSeconds > 120 {
+		settings.AI.TimeoutSeconds = 120
+	}
+	if settings.AI.Temperature < 0 {
+		settings.AI.Temperature = 0
+	}
+	if settings.AI.Temperature > 2 {
+		settings.AI.Temperature = 2
+	}
+	if settings.AI.Mode == "disabled" {
+		settings.AI.EnabledSummaries = false
+	}
+	settings.Analysis.DefaultMinutes = normalizeMinutes(settings.Analysis.DefaultMinutes, 15)
+	settings.Analysis.BaselineMinutes = normalizeMinutes(settings.Analysis.BaselineMinutes, 120)
+	if settings.Analysis.BaselineMinutes < settings.Analysis.DefaultMinutes*2 {
+		settings.Analysis.BaselineMinutes = settings.Analysis.DefaultMinutes * 8
+	}
+	if settings.Analysis.BaselineDeviationWarning <= 1 {
+		settings.Analysis.BaselineDeviationWarning = 1.8
+	}
+	if settings.Analysis.BaselineDeviationCritical <= settings.Analysis.BaselineDeviationWarning {
+		settings.Analysis.BaselineDeviationCritical = 3.0
+	}
+	if settings.Analysis.BaselineMinBytes == 0 {
+		settings.Analysis.BaselineMinBytes = 1024 * 1024
+	}
+	if settings.Analysis.BandwidthMbps == 0 {
+		settings.Analysis.BandwidthMbps = 1000
+	}
+	settings.Analysis.ReportDefaultMinutes = normalizeMinutes(settings.Analysis.ReportDefaultMinutes, 60)
+	if settings.Security.SessionTTLHours <= 0 {
+		settings.Security.SessionTTLHours = 12
+	}
+	if settings.Security.SessionTTLHours > 168 {
+		settings.Security.SessionTTLHours = 168
+	}
+	if !settings.Security.AuthEnabled {
+		settings.Security.ReadOnlyEnabled = false
+	}
+	if !settings.Notification.Enabled {
+		settings.Notification.NotifyOnIncident = false
+		settings.Notification.NotifyOnReport = false
+	}
+	if settings.Notification.Provider == "" {
+		settings.Notification.Provider = "webhook"
+	}
+	if settings.Notification.MinSeverity == "" {
+		settings.Notification.MinSeverity = "critical"
+	}
+	if settings.Notification.Channels == nil {
+		settings.Notification.Channels = []string{}
+	}
+	if settings.Data.ClickHouseRetentionDays <= 0 {
+		settings.Data.ClickHouseRetentionDays = 30
+	}
+	if settings.Data.AuditRetentionDays <= 0 {
+		settings.Data.AuditRetentionDays = 180
+	}
+	if settings.Data.ConfigVersionLimit <= 0 {
+		settings.Data.ConfigVersionLimit = 200
+	}
+	if settings.Data.SessionRetentionDays <= 0 {
+		settings.Data.SessionRetentionDays = 30
+	}
+	settings.Backend.RequiresRestart = true
+	return settings
+}
+
+func normalizeAIMode(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "disabled", "local_mock", "openai":
+		return strings.TrimSpace(strings.ToLower(mode))
+	default:
+		return "local_mock"
+	}
+}
+
+func normalizeMinutes(value, fallback int) int {
+	switch {
+	case value < 5:
+		return fallback
+	case value > 10080:
+		return 10080
+	default:
+		return value
+	}
 }
 
 func normalizeSessionTopN(limit int) int {

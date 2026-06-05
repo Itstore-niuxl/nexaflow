@@ -90,6 +90,78 @@ export interface AuthStatus {
   can_write?: boolean;
 }
 
+export interface SystemSettings {
+  ai: {
+    mode: string;
+    provider: string;
+    model: string;
+    base_url: string;
+    api_key?: string;
+    api_key_set?: boolean;
+    api_key_masked?: string;
+    max_context_rows: number;
+    timeout_seconds: number;
+    temperature: number;
+    enabled_summaries: boolean;
+  };
+  analysis: {
+    default_minutes: number;
+    baseline_minutes: number;
+    baseline_deviation_warning: number;
+    baseline_deviation_critical: number;
+    baseline_min_bytes: number;
+    bandwidth_mbps: number;
+    report_default_minutes: number;
+  };
+  security: {
+    auth_enabled: boolean;
+    readonly_enabled: boolean;
+    admin_password?: string;
+    readonly_password?: string;
+    admin_password_set?: boolean;
+    readonly_password_set?: boolean;
+    session_ttl_hours: number;
+    require_audit_for_write: boolean;
+    allow_frontend_secrets: boolean;
+  };
+  notification: {
+    enabled: boolean;
+    provider: string;
+    webhook_url: string;
+    webhook_token?: string;
+    webhook_token_set?: boolean;
+    webhook_token_masked?: string;
+    min_severity: string;
+    notify_on_incident: boolean;
+    notify_on_report: boolean;
+    channels: string[];
+  };
+  data: {
+    clickhouse_retention_days: number;
+    audit_retention_days: number;
+    config_version_limit: number;
+    session_retention_days: number;
+    export_enabled: boolean;
+  };
+  backend: {
+    api_addr: string;
+    clickhouse_url: string;
+    redis_addr: string;
+    database: string;
+    requires_restart: boolean;
+  };
+  updated_at: number;
+}
+
+export interface SettingsTestResult {
+  ok: boolean;
+  mode?: string;
+  provider?: string;
+  model?: string;
+  status?: number;
+  message: string;
+}
+
 export interface NetworkInterface {
   name: string;
   state: string;
@@ -898,6 +970,56 @@ export const api = {
   },
   async captureDiagnostics(minutes = 15, limit = 20) {
     return json<{ data: CaptureDiagnostics; degraded: boolean }>(`/api/v1/system/capture-diagnostics?minutes=${minutes}&limit=${limit}`);
+  },
+  async systemSettings() {
+    return json<{ data: SystemSettings }>('/api/v1/system/settings');
+  },
+  async saveSystemSettings(settings: SystemSettings) {
+    const response = await fetch('/api/v1/system/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SystemSettings }>;
+  },
+  async testAISettings(settings: SystemSettings) {
+    const response = await fetch('/api/v1/system/settings/test-ai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SettingsTestResult }>;
+  },
+  async testWebhookSettings(settings: SystemSettings) {
+    const response = await fetch('/api/v1/system/settings/test-webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SettingsTestResult }>;
+  },
+  async exportSystemSettings() {
+    return json<{ data: SystemSettings }>('/api/v1/system/settings/export');
+  },
+  async importSystemSettings(settings: SystemSettings) {
+    const response = await fetch('/api/v1/system/settings/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SystemSettings }>;
   },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(
