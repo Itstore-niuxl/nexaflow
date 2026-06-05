@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,6 +97,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/incident-summary", s.aiIncidentSummary)
 	mux.HandleFunc("/api/v1/ai/asset-summary", s.aiAssetSummary)
 	mux.HandleFunc("/api/v1/ai/report-summary", s.aiReportSummary)
+	mux.HandleFunc("/api/v1/ai/query", s.aiQuery)
+	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -647,6 +650,75 @@ func (s *Server) aiReportSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"data":     buildAIReportSummary(s.aiOptions(), report),
 		"degraded": err != nil,
+	})
+}
+
+func (s *Server) aiQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var request struct {
+		Question string `json:"question"`
+		Minutes  int    `json:"minutes"`
+		Limit    int    `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	question := strings.TrimSpace(request.Question)
+	if question == "" {
+		http.Error(w, "question is required", http.StatusBadRequest)
+		return
+	}
+	minutes := normalizeQueryMinutes(request.Minutes)
+	minutes = aiQueryMinutes(question, minutes)
+	limit := request.Limit
+	if limit <= 0 {
+		limit = 8
+	}
+	limit = s.aiContextLimit(min(max(limit, 3), 30))
+	intent := parseAIQueryIntent(question, minutes, limit)
+	result, err := s.runAIQuery(r.Context(), intent)
+	result["degraded"] = err != nil
+	if err != nil {
+		result["error"] = err.Error()
+	}
+	writeJSON(w, map[string]any{"data": result, "degraded": err != nil})
+}
+
+func (s *Server) aiIncidentInvestigation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 12, 50))
+	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	incidents, incidentErr := s.collectSecurityIncidents(r.Context(), minutes, max(limit, 20))
+	incident := findAIIncident(incidents, id, subject, kind)
+	if subject == "" {
+		subject = stringValue(incident["subject"])
+	}
+	if kind == "" {
+		kind = stringValue(incident["kind"])
+	}
+	if subject == "" {
+		http.Error(w, "subject or id is required", http.StatusBadRequest)
+		return
+	}
+	contextData, contextErr := s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+	var timeline []map[string]any
+	var timelineErr error
+	if id != "" {
+		timeline, timelineErr = s.store.IncidentTimeline(r.Context(), id, 20)
+	}
+	writeJSON(w, map[string]any{
+		"data":     buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, timeline),
+		"degraded": incidentErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)) || timelineErr != nil,
 	})
 }
 
@@ -1250,6 +1322,9 @@ func requestNeedsWriteAccess(r *http.Request) bool {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return false
 	default:
+		if r.URL.Path == "/api/v1/ai/query" {
+			return false
+		}
 		return strings.HasPrefix(r.URL.Path, "/api/v1/")
 	}
 }
@@ -1706,11 +1781,358 @@ func isMaskedSecret(secret string) bool {
 	return secret == "****" || strings.Contains(secret, "****")
 }
 
+type aiQueryIntent struct {
+	ID          string         `json:"id"`
+	Title       string         `json:"title"`
+	Description string         `json:"description"`
+	API         string         `json:"api"`
+	Question    string         `json:"question"`
+	Minutes     int            `json:"minutes"`
+	Limit       int            `json:"limit"`
+	Params      map[string]any `json:"params"`
+}
+
 type aiSummaryOptions struct {
 	Enabled  bool
 	Mode     string
 	Provider string
 	Model    string
+}
+
+func parseAIQueryIntent(question string, minutes, limit int) aiQueryIntent {
+	normalized := strings.ToLower(strings.TrimSpace(question))
+	ip := firstIPv4(question)
+	base := aiQueryIntent{
+		ID:       "top_src",
+		Title:    "源 IP 流量排行",
+		API:      "/api/v1/traffic/topn",
+		Question: question,
+		Minutes:  minutes,
+		Limit:    limit,
+		Params:   map[string]any{"dimension": "ip", "direction": "src"},
+	}
+	switch {
+	case ip != "" && containsAny(normalized, "连接", "访问", "会话", "外联", "通信"):
+		base.ID = "sessions_for_ip"
+		base.Title = "资产会话追踪"
+		base.API = "/api/v1/traffic/sessions"
+		base.Params = map[string]any{"q": ip}
+	case ip != "" && containsAny(normalized, "画像", "资产", "风险", "解释"):
+		base.ID = "asset_profile"
+		base.Title = "资产画像"
+		base.API = "/api/v1/traffic/ip-profile"
+		base.Params = map[string]any{"ip": ip}
+	case containsAny(normalized, "公网", "外部", "外联", "互联网", "暴露"):
+		base.ID = "external_access"
+		base.Title = "公网访问分析"
+		base.API = "/api/v1/traffic/external-access"
+		base.Params = map[string]any{}
+	case containsAny(normalized, "事件", "告警", "风险事件"):
+		base.ID = "incidents"
+		base.Title = "安全事件分析"
+		base.API = "/api/v1/security/incidents"
+		base.Params = map[string]any{}
+	case containsAny(normalized, "严重资产", "资产风险", "高风险资产"):
+		base.ID = "asset_risk"
+		base.Title = "资产风险排行"
+		base.API = "/api/v1/assets/risk-posture"
+		base.Params = map[string]any{}
+	case containsAny(normalized, "异常", "波动", "突增", "新增"):
+		base.ID = "anomalies"
+		base.Title = "异常波动分析"
+		base.API = "/api/v1/traffic/anomalies"
+		base.Params = map[string]any{}
+	case containsAny(normalized, "服务", "应用"):
+		base.ID = "top_services"
+		base.Title = "应用服务排行"
+		base.API = "/api/v1/traffic/topn"
+		base.Params = map[string]any{"dimension": "service", "direction": "src"}
+	case containsAny(normalized, "端口"):
+		base.ID = "top_ports"
+		base.Title = "目的端口排行"
+		base.API = "/api/v1/traffic/topn"
+		base.Params = map[string]any{"dimension": "dst_port", "direction": "src"}
+	case containsAny(normalized, "目的ip", "目的 ip", "被访问", "访问最多"):
+		base.ID = "top_dst"
+		base.Title = "目的 IP 流量排行"
+		base.API = "/api/v1/traffic/topn"
+		base.Params = map[string]any{"dimension": "ip", "direction": "dst"}
+	}
+	base.Description = aiIntentDescription(base.ID)
+	return base
+}
+
+func (s *Server) runAIQuery(ctx context.Context, intent aiQueryIntent) (map[string]any, error) {
+	var rows []map[string]any
+	var err error
+	switch intent.ID {
+	case "sessions_for_ip":
+		rows, err = s.store.Sessions(ctx, stringValue(intent.Params["q"]), intent.Minutes, intent.Limit)
+	case "asset_profile":
+		var profile map[string]any
+		profile, err = s.store.IPProfile(ctx, stringValue(intent.Params["ip"]), intent.Minutes)
+		rows = aiProfileRows(profile)
+	case "external_access":
+		rows, err = s.store.ExternalAccess(ctx, intent.Minutes, intent.Limit)
+	case "incidents":
+		rows, err = s.collectSecurityIncidents(ctx, intent.Minutes, intent.Limit)
+	case "asset_risk":
+		rows, err = s.store.AssetRiskPosture(ctx, intent.Minutes, intent.Limit)
+	case "anomalies":
+		rows, err = s.store.TrafficAnomalies(ctx, intent.Minutes, intent.Limit)
+	case "top_services":
+		var items []model.TopItem
+		items, err = s.store.TopN(ctx, "service", "src", intent.Limit, intent.Minutes)
+		rows = topItemsToAIRows(items, "service")
+	case "top_ports":
+		var items []model.TopItem
+		items, err = s.store.TopN(ctx, "dst_port", "src", intent.Limit, intent.Minutes)
+		rows = topItemsToAIRows(items, "dst_port")
+	case "top_dst":
+		var items []model.TopItem
+		items, err = s.store.TopN(ctx, "ip", "dst", intent.Limit, intent.Minutes)
+		rows = topItemsToAIRows(items, "dst_ip")
+	default:
+		var items []model.TopItem
+		items, err = s.store.TopN(ctx, "ip", "src", intent.Limit, intent.Minutes)
+		rows = topItemsToAIRows(items, "src_ip")
+	}
+	return buildAIQueryResponse(s.aiOptions(), intent, rows), err
+}
+
+func buildAIQueryResponse(options aiSummaryOptions, intent aiQueryIntent, rows []map[string]any) map[string]any {
+	findings := aiQueryFindings(intent, rows)
+	evidence := aiQueryEvidence(intent, rows)
+	actions := aiQueryActions(intent, rows)
+	summary := fmt.Sprintf("已将问题归类为「%s」，在最近 %d 分钟内检索到 %d 条相关结果。", intent.Title, intent.Minutes, len(rows))
+	if len(findings) > 0 {
+		summary = findings[0]
+	}
+	return map[string]any{
+		"enabled":      options.Enabled,
+		"mode":         options.Mode,
+		"provider":     options.Provider,
+		"model":        options.Model,
+		"question":     intent.Question,
+		"intent":       intent,
+		"title":        "AI 查询结果",
+		"summary":      summary,
+		"confidence":   confidenceByContext(len(rows)),
+		"findings":     findings,
+		"evidence":     evidence,
+		"actions":      actions,
+		"rows":         rows,
+		"followups":    aiQueryFollowups(intent),
+		"generated_at": time.Now().Unix(),
+	}
+}
+
+func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextData map[string]any, timeline []map[string]any) map[string]any {
+	if timeline == nil {
+		timeline = []map[string]any{}
+	}
+	summary := buildAIIncidentSummary(options, incident, contextData)
+	subject := firstString(stringValue(summary["subject"]), stringValue(contextData["subject"]), "未知事件对象")
+	sessions := sliceValue(contextData["sessions"])
+	insights := sliceValue(contextData["insights"])
+	anomalies := sliceValue(contextData["anomalies"])
+	rootCauses := []string{"业务流量峰值或计划内变更", "公网扫描、异常外联或服务暴露扩大", "采集质量异常导致指标失真"}
+	if len(insights) > 0 {
+		rootCauses = append([]string{"规则或风险线索命中，优先核对命中对象是否符合业务白名单"}, rootCauses...)
+	}
+	if len(anomalies) > 0 {
+		rootCauses = append([]string{"历史基线偏离或新增对象出现，优先确认是否存在变更窗口"}, rootCauses...)
+	}
+	evidenceChain := []string{
+		fmt.Sprintf("事件对象：%s", subject),
+		fmt.Sprintf("关联会话：%d 条", len(sessions)),
+		fmt.Sprintf("风险线索：%d 条", len(insights)),
+		fmt.Sprintf("异常波动：%d 条", len(anomalies)),
+		fmt.Sprintf("处置时间线：%d 条", len(timeline)),
+	}
+	nextSteps := []string{
+		"先查看首要关联会话，确认源、目的、端口和服务用途。",
+		"核对资产负责人、业务标签、暴露策略和白名单记录。",
+		"若确认为异常，补充事件备注并沉淀检测规则或临时静默策略。",
+	}
+	return map[string]any{
+		"enabled":        options.Enabled,
+		"mode":           options.Mode,
+		"provider":       options.Provider,
+		"model":          options.Model,
+		"subject":        subject,
+		"summary":        summary,
+		"root_causes":    rootCauses,
+		"evidence_chain": evidenceChain,
+		"next_steps":     nextSteps,
+		"context":        contextData,
+		"timeline":       timeline,
+		"generated_at":   time.Now().Unix(),
+	}
+}
+
+func (s *Server) collectSecurityIncidents(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	incidents, incidentErr := s.store.SecurityIncidents(ctx, minutes, limit)
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	ruleRows, ruleErr := s.store.DetectionRuleFindings(ctx, runtime.Alerts.DetectionRules, minutes, limit)
+	for _, row := range ruleRows {
+		incidents = append(incidents, ruleFindingIncident(row))
+	}
+	incidents = filterSilencedMaps(incidents, runtime.Alerts.SilencedSubjects, "subject")
+	sortIncidentRows(incidents)
+	if incidentErr != nil {
+		return incidents, incidentErr
+	}
+	return incidents, ruleErr
+}
+
+func aiQueryFindings(intent aiQueryIntent, rows []map[string]any) []string {
+	if len(rows) == 0 {
+		return []string{"当前窗口没有检索到匹配数据，建议扩大时间范围或换一个对象继续查询。"}
+	}
+	top := rows[0]
+	key := firstString(stringValue(top["key"]), stringValue(top["ip"]), stringValue(top["subject"]), stringValue(top["public_ip"]), stringValue(top["service"]), stringValue(top["src_ip"]), "-")
+	bytes := uint64Value(top["bytes"])
+	findings := []string{fmt.Sprintf("%s 的首要对象是 %s，流量约 %s。", intent.Title, key, formatAIBytes(bytes))}
+	if packets := uint64Value(top["packets"]); packets > 0 {
+		findings = append(findings, fmt.Sprintf("首要对象关联包数约 %d，建议结合会话和端口继续下钻。", packets))
+	}
+	if severity := stringValue(top["severity"]); severity != "" {
+		findings = append(findings, "首要对象级别为 "+aiSeverityText(severity)+"。")
+	}
+	if risk := firstString(stringValue(top["risk_level"]), stringValue(top["risk"])); risk != "" {
+		findings = append(findings, "首要对象风险标记为 "+assetRiskLevelText(risk)+"。")
+	}
+	return findings
+}
+
+func aiQueryEvidence(intent aiQueryIntent, rows []map[string]any) []string {
+	evidence := []string{
+		"查询意图：" + intent.Title,
+		"调用接口：" + intent.API,
+		"观察窗口：" + strconv.Itoa(intent.Minutes) + " 分钟",
+		"结果数量：" + strconv.Itoa(len(rows)),
+	}
+	if len(rows) > 0 {
+		evidence = append(evidence, "首要结果："+configValueText(rows[0]))
+	}
+	return evidence
+}
+
+func aiQueryActions(intent aiQueryIntent, rows []map[string]any) []string {
+	actions := []string{"查看结果表中的首要对象，再进入对应画像、会话或事件上下文下钻。"}
+	switch intent.ID {
+	case "external_access":
+		actions = append(actions, "核对公网来源和内部资产暴露端口，确认是否属于业务白名单。")
+	case "incidents", "anomalies":
+		actions = append(actions, "优先处理严重级别对象，并补充事件备注保留处置结论。")
+	case "asset_risk", "asset_profile":
+		actions = append(actions, "补齐资产负责人、业务系统和重要性，降低后续事件分派成本。")
+	case "sessions_for_ip":
+		actions = append(actions, "围绕该资产查看公网访问、端口画像和最近异常波动。")
+	default:
+		actions = append(actions, "如果该对象长期稳定，可以继续对比行为基线判断是否异常。")
+	}
+	if len(rows) == 0 {
+		actions = []string{"扩大观察窗口到 1 小时或 24 小时后再次查询。"}
+	}
+	return actions
+}
+
+func aiQueryFollowups(intent aiQueryIntent) []string {
+	switch intent.ID {
+	case "external_access":
+		return []string{"这些公网访问里哪些风险最高？", "有没有新增的高风险端口暴露？"}
+	case "incidents":
+		return []string{"解释首要事件为什么严重", "这个事件关联了哪些资产和会话？"}
+	case "asset_risk", "asset_profile":
+		return []string{"这个资产最近连接了哪些外部地址？", "这个资产的主要风险原因是什么？"}
+	case "anomalies":
+		return []string{"异常增长最大的服务是什么？", "这些异常是否偏离行为基线？"}
+	default:
+		return []string{"最近 30 分钟哪个公网 IP 访问最多？", "今天比昨天流量增长最大的服务是什么？"}
+	}
+}
+
+func aiIntentDescription(id string) string {
+	switch id {
+	case "sessions_for_ip":
+		return "识别指定资产的关联会话，适合回答连接了谁、访问了哪些地址。"
+	case "asset_profile":
+		return "汇总指定资产的收发流量、关联主机对和会话。"
+	case "external_access":
+		return "聚合公网对端、内部资产、访问方向、端口和服务风险。"
+	case "incidents":
+		return "检索统一事件流和规则命中结果。"
+	case "asset_risk":
+		return "按资产风险评分、暴露面和事件关联排序。"
+	case "anomalies":
+		return "对比当前窗口和历史窗口，查找异常波动。"
+	default:
+		return "按现有白名单查询模板返回排行和解释。"
+	}
+}
+
+func aiProfileRows(profile map[string]any) []map[string]any {
+	if len(profile) == 0 {
+		return []map[string]any{}
+	}
+	return []map[string]any{profile}
+}
+
+func topItemsToAIRows(items []model.TopItem, keyName string) []map[string]any {
+	rows := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		rows = append(rows, map[string]any{
+			keyName:   item.Key,
+			"key":     item.Key,
+			"bytes":   item.Bytes,
+			"packets": item.Packets,
+		})
+	}
+	return rows
+}
+
+func aiQueryMinutes(question string, fallback int) int {
+	matches := regexp.MustCompile(`(?i)(\d+)\s*(分钟|分|小时|天|h|hour|hours|d|day|days)`).FindStringSubmatch(question)
+	if len(matches) != 3 {
+		return fallback
+	}
+	value, err := strconv.Atoi(matches[1])
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	unit := strings.ToLower(matches[2])
+	switch unit {
+	case "小时", "h", "hour", "hours":
+		value *= 60
+	case "天", "d", "day", "days":
+		value *= 1440
+	}
+	return normalizeQueryMinutes(value)
+}
+
+func firstIPv4(text string) string {
+	return regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`).FindString(text)
+}
+
+func containsAny(text string, values ...string) bool {
+	for _, value := range values {
+		if strings.Contains(text, strings.ToLower(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeQueryMinutes(value int) int {
+	if value <= 0 {
+		return 15
+	}
+	if value > 10080 {
+		return 10080
+	}
+	return value
 }
 
 func (s *Server) aiOptions() aiSummaryOptions {

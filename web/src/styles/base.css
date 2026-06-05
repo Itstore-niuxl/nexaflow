@@ -1404,6 +1404,10 @@ td {
   gap: 12px;
 }
 
+.ai-summary-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .ai-summary-grid > div {
   min-width: 0;
   padding: 13px 14px;
@@ -1439,6 +1443,28 @@ td {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.ai-query-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.ai-query-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.ai-query-form input {
+  min-width: 0;
+  width: 100%;
+}
+
+.ai-query-panel table td:first-child,
+.ai-query-panel table td:last-child {
+  white-space: normal;
+  word-break: break-word;
 }
 
 .ai-action-panel {

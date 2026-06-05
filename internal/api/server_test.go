@@ -77,6 +77,11 @@ func TestRequestNeedsWriteAccess(t *testing.T) {
 	if requestNeedsWriteAccess(healthReq) {
 		t.Fatal("non-api path should not require write access")
 	}
+
+	aiQueryReq, _ := http.NewRequest(http.MethodPost, "/api/v1/ai/query", nil)
+	if requestNeedsWriteAccess(aiQueryReq) {
+		t.Fatal("AI query is read-only and should not require write access")
+	}
 }
 
 func TestAuthRequiredBlocksViewerWrites(t *testing.T) {
@@ -258,5 +263,83 @@ func TestAIIncidentContextUsable(t *testing.T) {
 		"sessions": []any{map[string]any{"key": "flow"}},
 	}) {
 		t.Fatal("session context should be usable")
+	}
+}
+
+func TestParseAIQueryIntent(t *testing.T) {
+	cases := []struct {
+		question string
+		id       string
+		minutes  int
+	}{
+		{"最近 30 分钟哪个公网 IP 访问最多？", "external_access", 30},
+		{"10.2.0.12 最近连接了哪些外部地址？", "sessions_for_ip", 15},
+		{"有没有新增的高风险端口暴露？", "external_access", 15},
+		{"最近 1 小时异常增长最大的服务是什么？", "anomalies", 60},
+	}
+	for _, tt := range cases {
+		minutes := aiQueryMinutes(tt.question, 15)
+		intent := parseAIQueryIntent(tt.question, minutes, 8)
+		if intent.ID != tt.id {
+			t.Fatalf("expected %s for %q, got %s", tt.id, tt.question, intent.ID)
+		}
+		if intent.Minutes != tt.minutes {
+			t.Fatalf("expected %d minutes for %q, got %d", tt.minutes, tt.question, intent.Minutes)
+		}
+		if intent.API == "" || intent.Description == "" {
+			t.Fatalf("expected API and description for %#v", intent)
+		}
+	}
+}
+
+func TestBuildAIQueryResponse(t *testing.T) {
+	intent := parseAIQueryIntent("最近 30 分钟哪个公网 IP 访问最多？", 30, 8)
+	response := buildAIQueryResponse(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		intent,
+		[]map[string]any{
+			{"public_ip": "211.93.22.130", "internal_ip": "10.2.0.12", "bytes": uint64(7340032), "packets": uint64(6800), "risk": "high"},
+		},
+	)
+	if stringValue(response["question"]) == "" {
+		t.Fatal("expected original question")
+	}
+	if len(sliceValue(response["findings"])) < 2 {
+		t.Fatalf("expected findings, got %#v", response["findings"])
+	}
+	if len(sliceValue(response["rows"])) != 1 {
+		t.Fatalf("expected one result row, got %#v", response["rows"])
+	}
+	if float64Value(response["confidence"]) <= 0 {
+		t.Fatalf("expected confidence, got %#v", response["confidence"])
+	}
+}
+
+func TestBuildAIIncidentInvestigation(t *testing.T) {
+	investigation := buildAIIncidentInvestigation(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{"subject": "10.2.0.12:8081", "kind": "external_session_burst", "severity": "critical"},
+		map[string]any{
+			"subject": "10.2.0.12:8081",
+			"sessions": []any{
+				map[string]any{"key": "211.93.22.130 -> 10.2.0.12 / 8081/TCP", "bytes": uint64(7340032)},
+			},
+			"insights": []any{
+				map[string]any{"severity": "critical", "summary": "公网会话突增"},
+			},
+			"anomalies": []any{
+				map[string]any{"summary": "新增公网访问流量"},
+			},
+		},
+		nil,
+	)
+	if stringValue(investigation["subject"]) != "10.2.0.12:8081" {
+		t.Fatalf("unexpected subject: %#v", investigation["subject"])
+	}
+	if len(sliceValue(investigation["root_causes"])) < 4 {
+		t.Fatalf("expected root cause candidates, got %#v", investigation["root_causes"])
+	}
+	if len(sliceValue(investigation["evidence_chain"])) == 0 {
+		t.Fatalf("expected evidence chain, got %#v", investigation["evidence_chain"])
 	}
 }

@@ -39,6 +39,8 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AIIncidentInvestigation,
+  type AIQueryResult,
   type AISummary,
   type AuditEvent,
   type AssetMetadata,
@@ -353,6 +355,46 @@ const emptyAISummary = (kind = 'report', subject = ''): AISummary => ({
   actions: [],
   generated_at: 0
 });
+const emptyAIQueryResult = (): AIQueryResult => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  question: '',
+  intent: {
+    id: 'top_src',
+    title: '源 IP 流量排行',
+    description: '按现有白名单查询模板返回排行和解释。',
+    api: '/api/v1/traffic/topn',
+    question: '',
+    minutes: 15,
+    limit: 8,
+    params: {}
+  },
+  title: 'AI 查询结果',
+  summary: '输入中文问题后，系统会先解析查询意图，再调用白名单 API 返回证据和建议。',
+  confidence: 0,
+  findings: [],
+  evidence: [],
+  actions: [],
+  rows: [],
+  followups: ['最近 30 分钟哪个公网 IP 访问最多？', '有没有新增的高风险端口暴露？'],
+  generated_at: 0
+});
+const emptyAIIncidentInvestigation = (): AIIncidentInvestigation => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  subject: '',
+  summary: emptyAISummary('incident'),
+  root_causes: [],
+  evidence_chain: [],
+  next_steps: [],
+  context: emptyIncidentContext(),
+  timeline: [],
+  generated_at: 0
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -366,11 +408,15 @@ const incidentContext = ref<SecurityIncidentContext>(emptyIncidentContext());
 const selectedIncident = ref<SecurityIncident | null>(null);
 const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
 const incidentAISummary = ref<AISummary>(emptyAISummary('incident'));
+const incidentInvestigation = ref<AIIncidentInvestigation>(emptyAIIncidentInvestigation());
 const incidentNoteText = ref('');
 const savingIncidentNote = ref(false);
 const reportOverview = ref<ReportOverview>(emptyReportOverview());
 const assetAISummary = ref<AISummary>(emptyAISummary('asset'));
 const reportAISummary = ref<AISummary>(emptyAISummary('report'));
+const aiQuestion = ref('最近 30 分钟哪个公网 IP 访问最多？');
+const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
+const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
 const ruleEditor = ref<DetectionRule | null>(null);
@@ -822,11 +868,16 @@ const refresh = async () => {
     }
     if (securityIncidents.value[0]) {
       const incident = securityIncidents.value[0];
-      const incidentAIRes = await api.aiIncidentSummary(incident.subject, incident.kind, incident.id, minutes, 12);
+      const [incidentAIRes, investigationRes] = await Promise.all([
+        api.aiIncidentSummary(incident.subject, incident.kind, incident.id, minutes, 12),
+        api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, minutes, 12)
+      ]);
       incidentAISummary.value = incidentAIRes.data;
-      nextDegraded = nextDegraded || incidentAIRes.degraded;
+      incidentInvestigation.value = investigationRes.data;
+      nextDegraded = nextDegraded || incidentAIRes.degraded || investigationRes.degraded;
     } else {
       incidentAISummary.value = emptyAISummary('incident');
+      incidentInvestigation.value = emptyAIIncidentInvestigation();
     }
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
@@ -2121,6 +2172,30 @@ const formatBytes = (value: number) => {
   return `${value.toFixed(0)} B`;
 };
 
+const recordString = (row: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) {
+    const value = row[key];
+    if (value !== undefined && value !== null && String(value).trim()) return String(value);
+  }
+  return '-';
+};
+
+const recordNumber = (row: Record<string, unknown>, keys: string[]) => {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return 0;
+};
+
+const aiRowObject = (row: Record<string, unknown>) =>
+  recordString(row, ['key', 'ip', 'subject', 'public_ip', 'internal_ip', 'service', 'src_ip', 'dst_ip']);
+const aiRowDetail = (row: Record<string, unknown>) =>
+  recordString(row, ['summary', 'top_finding', 'sample_flow', 'direction', 'risk', 'risk_level', 'category']);
+const aiRowBytes = (row: Record<string, unknown>) => formatBytes(recordNumber(row, ['bytes', 'total_bytes', 'external_bytes', 'current_bytes']));
+const aiRowPackets = (row: Record<string, unknown>) => recordNumber(row, ['packets', 'current_packets', 'session_count', 'open_incidents']).toLocaleString();
+
 const formatRate = (bytes: number, seconds = rangeSeconds.value) => `${((bytes * 8) / seconds / 1000 / 1000).toFixed(2)} Mbps`;
 
 const pps = computed(() => Math.round(summary.value.packets / rangeSeconds.value));
@@ -2462,6 +2537,7 @@ const aiActionItems = computed(() =>
     .slice(0, 8)
     .map((item, index) => ({ key: item, bytes: 8 - index, packets: 1 }))
 );
+const aiQueryRows = computed(() => aiQueryResult.value.rows.slice(0, 8));
 const incidentContextSessionItems = computed(() => incidentContext.value.sessions.map((row) => ({ key: row.key, bytes: row.bytes, packets: row.packets })));
 const incidentContextInsightItems = computed(() =>
   incidentContext.value.insights.map((row) => ({
@@ -2865,16 +2941,18 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   selectedIncident.value = incident;
   loadingIncidentContext.value = true;
   try {
-    const [contextResult, timelineResult, aiResult] = await Promise.all([
+    const [contextResult, timelineResult, aiResult, investigationResult] = await Promise.all([
       api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12),
       api.incidentTimeline(incident.id, 50),
-      api.aiIncidentSummary(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12)
+      api.aiIncidentSummary(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12),
+      api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12)
     ]);
     incidentContext.value = contextResult.data;
     incidentTimeline.value = timelineResult.data;
     incidentAISummary.value = aiResult.data;
+    incidentInvestigation.value = investigationResult.data;
     incidentNoteText.value = '';
-    degraded.value = contextResult.degraded || timelineResult.degraded || aiResult.degraded;
+    degraded.value = contextResult.degraded || timelineResult.degraded || aiResult.degraded || investigationResult.degraded;
   } finally {
     loadingIncidentContext.value = false;
   }
@@ -2885,6 +2963,20 @@ const openPrimaryIncidentContext = async () => {
   currentView.value = 'incidents';
   if (incident) {
     await loadIncidentContext(incident);
+  }
+};
+
+const runAIQuery = async (question = aiQuestion.value) => {
+  const text = question.trim();
+  if (!text) return;
+  aiQuestion.value = text;
+  queryingAI.value = true;
+  try {
+    const result = await api.aiQuery(text, selectedMinutes.value, 8);
+    aiQueryResult.value = result.data;
+    degraded.value = degraded.value || result.degraded || Boolean(result.data.degraded);
+  } finally {
+    queryingAI.value = false;
   }
 };
 
@@ -3728,6 +3820,58 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <button class="command-button" type="button" @click="currentView = 'reports'">进入报表中心</button>
         </section>
 
+        <section class="table-panel ai-query-panel">
+          <div class="panel-heading">
+            <h2>自然语言查询</h2>
+            <span>{{ aiQueryResult.intent.title }} / {{ aiConfidenceText(aiQueryResult.confidence) }}</span>
+          </div>
+          <form class="ai-query-form" @submit.prevent="runAIQuery()">
+            <input v-model="aiQuestion" type="text" placeholder="最近 30 分钟哪个公网 IP 访问最多？" />
+            <button class="command-button" type="submit" :disabled="queryingAI || !aiQuestion.trim()">
+              {{ queryingAI ? '查询中...' : '查询' }}
+            </button>
+          </form>
+          <div class="ai-workbench-actions">
+            <button v-for="item in aiQueryResult.followups" :key="`ai-followup-${item}`" class="inline-button" type="button" @click="runAIQuery(item)">
+              {{ item }}
+            </button>
+          </div>
+          <p class="ai-summary-lead">{{ aiQueryResult.summary }}</p>
+          <div class="ai-summary-grid">
+            <div>
+              <span>查询发现</span>
+              <ul>
+                <li v-for="item in aiQueryResult.findings" :key="`ai-query-finding-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+            <div>
+              <span>证据与建议</span>
+              <ul>
+                <li v-for="item in [...aiQueryResult.evidence.slice(0, 3), ...aiQueryResult.actions.slice(0, 2)]" :key="`ai-query-evidence-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
+          <div v-if="aiQueryRows.length === 0" class="empty-state">暂无查询结果</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>流量</th>
+                <th>包数/计数</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, index) in aiQueryRows" :key="`ai-query-row-${index}`">
+                <td>{{ aiRowObject(row) }}</td>
+                <td>{{ aiRowBytes(row) }}</td>
+                <td>{{ aiRowPackets(row) }}</td>
+                <td>{{ aiRowDetail(row) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
         <section class="command-grid">
           <section class="ai-summary-card featured">
             <div class="panel-heading">
@@ -3804,6 +3948,44 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <article v-for="item in aiActionItems" :key="`ai-action-${item.key}`">
               <strong>{{ item.key }}</strong>
             </article>
+          </section>
+        </section>
+
+        <section class="command-grid">
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>AI 事件调查包</h2>
+              <span>{{ incidentInvestigation.mode }} / {{ incidentInvestigation.subject || '未选择事件' }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ incidentInvestigation.summary.summary }}</p>
+            <div class="ai-summary-grid">
+              <div>
+                <span>根因候选</span>
+                <ul>
+                  <li v-for="item in incidentInvestigation.root_causes.slice(0, 4)" :key="`ai-invest-root-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+              <div>
+                <span>证据链</span>
+                <ul>
+                  <li v-for="item in incidentInvestigation.evidence_chain" :key="`ai-invest-evidence-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>调查下一步</h2>
+              <span>{{ incidentInvestigation.timeline.length.toLocaleString() }} 条时间线</span>
+            </div>
+            <div class="ai-summary-grid single">
+              <div>
+                <span>建议动作</span>
+                <ul>
+                  <li v-for="item in incidentInvestigation.next_steps" :key="`ai-invest-step-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
           </section>
         </section>
 

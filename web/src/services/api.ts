@@ -742,6 +742,52 @@ export interface AISummary {
   generated_at: number;
 }
 
+export interface AIQueryIntent {
+  id: string;
+  title: string;
+  description: string;
+  api: string;
+  question: string;
+  minutes: number;
+  limit: number;
+  params: Record<string, unknown>;
+}
+
+export interface AIQueryResult {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  question: string;
+  intent: AIQueryIntent;
+  title: string;
+  summary: string;
+  confidence: number;
+  findings: string[];
+  evidence: string[];
+  actions: string[];
+  rows: Record<string, unknown>[];
+  followups: string[];
+  generated_at: number;
+  degraded?: boolean;
+  error?: string;
+}
+
+export interface AIIncidentInvestigation {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  subject: string;
+  summary: AISummary;
+  root_causes: string[];
+  evidence_chain: string[];
+  next_steps: string[];
+  context: SecurityIncidentContext;
+  timeline: IncidentTimelineEntry[];
+  generated_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1156,6 +1202,22 @@ export const api = {
   },
   async aiReportSummary(minutes = 15, limit = 10) {
     return json<{ data: AISummary; degraded: boolean }>(`/api/v1/ai/report-summary?minutes=${minutes}&limit=${limit}`);
+  },
+  async aiQuery(question: string, minutes = 15, limit = 8) {
+    const response = await fetch('/api/v1/ai/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, minutes, limit })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AIQueryResult; degraded: boolean }>;
+  },
+  async aiIncidentInvestigation(subject: string, kind = '', id = '', minutes = 15, limit = 12) {
+    return json<{ data: AIIncidentInvestigation; degraded: boolean }>(
+      `/api/v1/ai/incident-investigation?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`
+    );
   },
   async detectionRules() {
     return json<{ data: DetectionRule[] }>('/api/v1/security/rules');
