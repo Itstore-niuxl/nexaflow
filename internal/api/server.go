@@ -7,7 +7,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -99,8 +101,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/status", s.status)
 	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	mux.HandleFunc("/api/v1/system/capture-quality", s.captureQuality)
+	mux.HandleFunc("/api/v1/system/capture-diagnostics", s.captureDiagnostics)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
+	mux.HandleFunc("/api/v1/system/config-version-diff", s.configVersionDiff)
 	return cors(s.authRequired(mux))
 }
 
@@ -797,6 +801,17 @@ func (s *Server) captureQuality(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
+func (s *Server) captureDiagnostics(w http.ResponseWriter, r *http.Request) {
+	minutes := queryMinutes(r)
+	limit := queryLimit(r, 20, 200)
+	capture, captureErr := s.store.CaptureQuality(r.Context(), minutes, limit)
+	quality, qualityErr := s.store.DataQuality(r.Context(), minutes, limit)
+	writeJSON(w, map[string]any{
+		"data":     captureDiagnosticReport(capture, quality, minutes),
+		"degraded": captureErr != nil || qualityErr != nil,
+	})
+}
+
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.AuditEvents(r.Context(), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
@@ -856,6 +871,51 @@ func (s *Server) configVersions(w http.ResponseWriter, r *http.Request) {
 		"source":     version["summary"],
 	})
 	writeJSON(w, map[string]any{"data": restored, "version": version})
+}
+
+func (s *Server) configVersionDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.ConfigVersion(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal([]byte(stringValue(version["config"])), &snapshot); err != nil {
+		http.Error(w, "invalid config snapshot: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	currentJSON, err := json.Marshal(config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var current map[string]any
+	if err := json.Unmarshal(currentJSON, &current); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	changes := configDiffRows(snapshot, current)
+	writeJSON(w, map[string]any{
+		"data": map[string]any{
+			"version_id": id,
+			"summary": map[string]any{
+				"change_count": len(changes),
+				"source":       version["summary"],
+				"source_ts":    version["ts"],
+				"current_ts":   current["updated_at"],
+			},
+			"changes": changes,
+		},
+	})
 }
 
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
@@ -1138,6 +1198,368 @@ func (s *Server) configSnapshot(r *http.Request, scope, target, action, summary 
 	_ = s.store.RecordConfigVersion(r.Context(), auditActor(r), scope, target, action, summary, snapshot, auditClientIP(r))
 }
 
+func configDiffRows(before, after map[string]any) []map[string]string {
+	left := map[string]string{}
+	right := map[string]string{}
+	flattenConfigValue("", before, left)
+	flattenConfigValue("", after, right)
+	paths := map[string]bool{}
+	for path := range left {
+		paths[path] = true
+	}
+	for path := range right {
+		paths[path] = true
+	}
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+	changes := []map[string]string{}
+	for _, path := range ordered {
+		beforeValue, beforeOK := left[path]
+		afterValue, afterOK := right[path]
+		if beforeOK && afterOK && beforeValue == afterValue {
+			continue
+		}
+		kind := "changed"
+		if !beforeOK {
+			kind = "added"
+		}
+		if !afterOK {
+			kind = "removed"
+		}
+		changes = append(changes, map[string]string{
+			"path":   path,
+			"type":   kind,
+			"before": beforeValue,
+			"after":  afterValue,
+		})
+	}
+	return changes
+}
+
+func flattenConfigValue(prefix string, value any, out map[string]string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if len(typed) == 0 && prefix != "" {
+			out[prefix] = "{}"
+			return
+		}
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			flattenConfigValue(path, typed[key], out)
+		}
+	case []any:
+		if len(typed) == 0 && prefix != "" {
+			out[prefix] = "[]"
+			return
+		}
+		for index, item := range typed {
+			flattenConfigValue(prefix+"["+strconv.Itoa(index)+"]", item, out)
+		}
+	default:
+		if prefix == "" {
+			prefix = "$"
+		}
+		out[prefix] = configValueText(value)
+	}
+}
+
+func configValueText(value any) string {
+	if value == nil {
+		return "null"
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return stringValue(value)
+	}
+	return string(data)
+}
+
+func captureDiagnosticReport(capture, quality map[string]any, minutes int) map[string]any {
+	captureSummary := mapValue(capture["summary"])
+	qualitySummary := mapValue(quality["summary"])
+	captureSources := sliceValue(capture["sources"])
+	now := time.Now().Unix()
+
+	rxDrops := uint64Value(captureSummary["rx_dropped"])
+	txDrops := uint64Value(captureSummary["tx_dropped"])
+	rxErrors := uint64Value(captureSummary["rx_errors"])
+	txErrors := uint64Value(captureSummary["tx_errors"])
+	dropRatio := float64Value(captureSummary["drop_ratio"])
+	errorRatio := float64Value(captureSummary["error_ratio"])
+	packetPressure := maxCaptureSourcePressure(captureSources, "packet_queue_pressure")
+	if packetPressure == 0 {
+		packetPressure = float64Value(captureSummary["queue_pressure"])
+	}
+	windowPressure := maxCaptureSourcePressure(captureSources, "window_queue_pressure")
+	if windowPressure == 0 {
+		windowPressure = float64Value(captureSummary["queue_pressure"])
+	}
+	freshness := int64Value(qualitySummary["freshness_seconds"])
+	if freshness == 0 {
+		freshness = maxCaptureSourceFreshness(captureSources)
+	}
+	coverage := float64Value(qualitySummary["coverage_ratio"])
+
+	layers := []map[string]any{
+		diagnosticLayer(
+			"interface_counters",
+			"网卡接口计数",
+			statusByCounters(rxDrops+txDrops, rxErrors+txErrors, dropRatio, errorRatio),
+			scoreByRatio(maxFloat(dropRatio, errorRatio)),
+			fmt.Sprintf("Dropped %d / Errors %d", rxDrops+txDrops, rxErrors+txErrors),
+			fmt.Sprintf("丢包率 %.4f%%，错误率 %.4f%%，用于判断内核网卡计数是否异常。", dropRatio*100, errorRatio*100),
+			"检查物理链路、网卡驱动、交换机端口和服务器内核日志，必要时提升采集机规格。",
+		),
+		diagnosticLayer(
+			"packet_queue",
+			"用户态包队列",
+			statusByUpperThreshold(packetPressure, 0.7, 0.9),
+			scoreByRatio(packetPressure),
+			fmt.Sprintf("队列压力 %.1f%%", packetPressure*100),
+			"反映抓包线程到聚合线程之间的包队列堆积，持续升高会导致采样延迟或丢包。",
+			"减少过滤范围、提升 packet_queue_capacity，或增加采集进程 CPU 配额。",
+		),
+		diagnosticLayer(
+			"window_queue",
+			"窗口写入队列",
+			statusByUpperThreshold(windowPressure, 0.7, 0.9),
+			scoreByRatio(windowPressure),
+			fmt.Sprintf("队列压力 %.1f%%", windowPressure*100),
+			"反映窗口聚合结果写入 ClickHouse 前的堆积，持续升高通常意味着存储写入或网络链路变慢。",
+			"检查 ClickHouse 写入延迟、批量窗口配置和服务器磁盘 IO。",
+		),
+		diagnosticLayer(
+			"freshness",
+			"数据新鲜度",
+			statusByUpperThreshold(float64(freshness), 12, 30),
+			scoreByUpper(freshness, 30),
+			fmt.Sprintf("最新延迟 %d 秒", freshness),
+			"衡量最新采集窗口距离当前时间的延迟，越高代表实时性越差。",
+			"确认采集器在线、时间同步正常，并检查 API 与数据库之间的查询延迟。",
+		),
+		diagnosticLayer(
+			"storage_windows",
+			"窗口覆盖率",
+			statusByLowerThreshold(coverage, 0.95, 0.8),
+			scoreByCoverage(coverage),
+			fmt.Sprintf("覆盖率 %.1f%%", coverage*100),
+			"衡量查询时间范围内预期窗口和实际窗口的匹配程度，断档会降低覆盖率。",
+			"排查采集器重启、ClickHouse 写入失败和 runtime 配置变更时间点。",
+		),
+	}
+
+	status := "healthy"
+	critical := 0
+	warning := 0
+	recommendations := []map[string]string{}
+	for _, layer := range layers {
+		layerStatus := stringValue(layer["status"])
+		if statusWeight(layerStatus) > statusWeight(status) {
+			status = layerStatus
+		}
+		if layerStatus == "critical" {
+			critical++
+		}
+		if layerStatus == "warning" {
+			warning++
+		}
+		if layerStatus != "healthy" {
+			recommendations = append(recommendations, map[string]string{
+				"level":  layerStatus,
+				"title":  stringValue(layer["name"]),
+				"detail": stringValue(layer["recommendation"]),
+			})
+		}
+	}
+	if len(recommendations) == 0 {
+		recommendations = append(recommendations, map[string]string{
+			"level":  "info",
+			"title":  "采集链路状态正常",
+			"detail": "当前网卡计数、用户态队列、数据新鲜度和窗口覆盖率均在阈值内。",
+		})
+	}
+	return map[string]any{
+		"generated_at": now,
+		"minutes":      minutes,
+		"status":       status,
+		"summary": map[string]any{
+			"layer_count":     len(layers),
+			"critical_layers": critical,
+			"warning_layers":  warning,
+		},
+		"layers":          layers,
+		"recommendations": recommendations,
+	}
+}
+
+func diagnosticLayer(id, name, status string, score int, metric, detail, recommendation string) map[string]any {
+	return map[string]any{
+		"id":             id,
+		"name":           name,
+		"status":         status,
+		"score":          score,
+		"metric":         metric,
+		"detail":         detail,
+		"recommendation": recommendation,
+	}
+}
+
+func statusWeight(status string) int {
+	switch status {
+	case "critical":
+		return 3
+	case "warning":
+		return 2
+	case "healthy":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func statusByCounters(drops, errors uint64, dropRatio, errorRatio float64) string {
+	if errors > 0 || errorRatio > 0 {
+		return "critical"
+	}
+	if drops > 0 || dropRatio > 0 {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func statusByUpperThreshold(value, warning, critical float64) string {
+	if value >= critical {
+		return "critical"
+	}
+	if value >= warning {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func statusByLowerThreshold(value, warning, critical float64) string {
+	if value <= 0 {
+		return "unknown"
+	}
+	if value < critical {
+		return "critical"
+	}
+	if value < warning {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func scoreByRatio(value float64) int {
+	if value <= 0 {
+		return 0
+	}
+	score := int(math.Round(value * 100))
+	if score < 1 {
+		return 1
+	}
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func scoreByUpper(value int64, critical int64) int {
+	if value <= 0 || critical <= 0 {
+		return 0
+	}
+	score := int((value * 100) / critical)
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func scoreByCoverage(value float64) int {
+	if value <= 0 {
+		return 0
+	}
+	score := int(math.Round((1 - value) * 100))
+	if score < 0 {
+		return 0
+	}
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func maxCaptureSourcePressure(sources []any, field string) float64 {
+	maxValue := 0.0
+	for _, row := range sources {
+		value := float64Value(mapValue(row)[field])
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func maxCaptureSourceFreshness(sources []any) int64 {
+	maxValue := int64(0)
+	for _, row := range sources {
+		value := int64Value(mapValue(row)["freshness_seconds"])
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func mapValue(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+func sliceValue(v any) []any {
+	if items, ok := v.([]any); ok {
+		return items
+	}
+	if rows, ok := v.([]map[string]any); ok {
+		items := make([]any, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, row)
+		}
+		return items
+	}
+	if rows, ok := v.([]map[string]string); ok {
+		items := make([]any, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, row)
+		}
+		return items
+	}
+	return []any{}
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func auditActor(r *http.Request) string {
 	if actor := authenticatedActor(r); actor != "" {
 		return actor
@@ -1328,6 +1750,25 @@ func int64Value(v any) int64 {
 		return int64(value)
 	case float64:
 		return int64(value)
+	default:
+		return 0
+	}
+}
+
+func float64Value(v any) float64 {
+	switch value := v.(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case uint:
+		return float64(value)
+	case uint64:
+		return float64(value)
 	default:
 		return 0
 	}

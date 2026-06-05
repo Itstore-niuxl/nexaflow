@@ -64,6 +64,24 @@ export interface ConfigVersion {
   client_ip: string;
 }
 
+export interface ConfigDiffChange {
+  path: string;
+  type: string;
+  before: string;
+  after: string;
+}
+
+export interface ConfigDiff {
+  version_id: string;
+  summary: {
+    change_count: number;
+    source: string;
+    source_ts: number;
+    current_ts: number;
+  };
+  changes: ConfigDiffChange[];
+}
+
 export interface AuthStatus {
   enabled: boolean;
   authenticated: boolean;
@@ -209,6 +227,29 @@ export interface CaptureQuality {
   status: string;
   summary: CaptureQualitySummary;
   sources: CaptureQualitySource[];
+  recommendations: DataQualityRecommendation[];
+}
+
+export interface CaptureDiagnosticLayer {
+  id: string;
+  name: string;
+  status: string;
+  score: number;
+  metric: string;
+  detail: string;
+  recommendation: string;
+}
+
+export interface CaptureDiagnostics {
+  generated_at: number;
+  minutes: number;
+  status: string;
+  summary: {
+    layer_count: number;
+    critical_layers: number;
+    warning_layers: number;
+  };
+  layers: CaptureDiagnosticLayer[];
   recommendations: DataQualityRecommendation[];
 }
 
@@ -780,6 +821,9 @@ export const api = {
   async captureQuality(minutes = 15, limit = 20) {
     return json<{ data: CaptureQuality; degraded: boolean }>(`/api/v1/system/capture-quality?minutes=${minutes}&limit=${limit}`);
   },
+  async captureDiagnostics(minutes = 15, limit = 20) {
+    return json<{ data: CaptureDiagnostics; degraded: boolean }>(`/api/v1/system/capture-diagnostics?minutes=${minutes}&limit=${limit}`);
+  },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(
       `/api/v1/traffic/ip-profile?ip=${encodeURIComponent(ip)}&minutes=${minutes}`
@@ -1015,5 +1059,8 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: CollectorConfig; version: ConfigVersion }>;
+  },
+  async configVersionDiff(id: string) {
+    return json<{ data: ConfigDiff }>(`/api/v1/system/config-version-diff?id=${encodeURIComponent(id)}`);
   }
 };

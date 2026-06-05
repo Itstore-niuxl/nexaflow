@@ -107,3 +107,86 @@ func TestAuthRequiredBlocksViewerWrites(t *testing.T) {
 		t.Fatalf("expected viewer POST to be forbidden, got %d", postResp.Code)
 	}
 }
+
+func TestConfigDiffRows(t *testing.T) {
+	before := map[string]any{
+		"mode": "live_pcap",
+		"alerts": map[string]any{
+			"flow_share": 0.3,
+			"silenced_subjects": []any{
+				"dst_port:22",
+			},
+		},
+	}
+	after := map[string]any{
+		"mode": "pcap_replay",
+		"alerts": map[string]any{
+			"flow_share": 0.4,
+		},
+		"session_topn": 1000,
+	}
+
+	changes := configDiffRows(before, after)
+	byPath := map[string]map[string]string{}
+	for _, change := range changes {
+		byPath[change["path"]] = change
+	}
+
+	if byPath["mode"]["type"] != "changed" || byPath["mode"]["before"] != "live_pcap" || byPath["mode"]["after"] != "pcap_replay" {
+		t.Fatalf("unexpected mode diff: %#v", byPath["mode"])
+	}
+	if byPath["alerts.flow_share"]["type"] != "changed" {
+		t.Fatalf("expected flow share changed diff, got %#v", byPath["alerts.flow_share"])
+	}
+	if byPath["alerts.silenced_subjects[0]"]["type"] != "removed" {
+		t.Fatalf("expected silence removal diff, got %#v", byPath["alerts.silenced_subjects[0]"])
+	}
+	if byPath["session_topn"]["type"] != "added" {
+		t.Fatalf("expected session_topn added diff, got %#v", byPath["session_topn"])
+	}
+}
+
+func TestCaptureDiagnosticReport(t *testing.T) {
+	capture := map[string]any{
+		"summary": map[string]any{
+			"rx_dropped":     uint64(12),
+			"tx_dropped":     uint64(0),
+			"rx_errors":      uint64(0),
+			"tx_errors":      uint64(0),
+			"drop_ratio":     0.0004,
+			"error_ratio":    0.0,
+			"queue_pressure": 0.2,
+		},
+		"sources": []any{
+			map[string]any{
+				"packet_queue_pressure": 0.72,
+				"window_queue_pressure": 0.91,
+				"freshness_seconds":     int64(8),
+			},
+		},
+	}
+	quality := map[string]any{
+		"summary": map[string]any{
+			"freshness_seconds": int64(35),
+			"coverage_ratio":    0.93,
+		},
+	}
+
+	report := captureDiagnosticReport(capture, quality, 15)
+	if status := stringValue(report["status"]); status != "critical" {
+		t.Fatalf("expected critical status, got %q", status)
+	}
+	summary := mapValue(report["summary"])
+	if int64Value(summary["critical_layers"]) != 2 {
+		t.Fatalf("expected two critical layers, got %#v", summary)
+	}
+	if int64Value(summary["warning_layers"]) != 3 {
+		t.Fatalf("expected three warning layers, got %#v", summary)
+	}
+	if len(sliceValue(report["layers"])) != 5 {
+		t.Fatalf("expected five diagnostic layers, got %#v", report["layers"])
+	}
+	if len(sliceValue(report["recommendations"])) != 5 {
+		t.Fatalf("expected recommendations for abnormal layers, got %#v", report["recommendations"])
+	}
+}

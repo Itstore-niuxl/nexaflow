@@ -44,9 +44,11 @@ import {
   type AssetRow,
   type AuthStatus,
   type CapacityPlanning,
+  type CaptureDiagnostics,
   type CaptureQuality,
   type Collector,
   type CollectorConfig,
+  type ConfigDiff,
   type ConfigVersion,
   type DataQuality,
   type DimensionPoint,
@@ -100,6 +102,7 @@ const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
 const auditEvents = ref<AuditEvent[]>([]);
 const configVersions = ref<ConfigVersion[]>([]);
+const selectedConfigDiff = ref<ConfigDiff | null>(null);
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -155,6 +158,19 @@ const emptyCaptureQuality = (): CaptureQuality => ({
   recommendations: []
 });
 const captureQuality = ref<CaptureQuality>(emptyCaptureQuality());
+const emptyCaptureDiagnostics = (): CaptureDiagnostics => ({
+  generated_at: 0,
+  minutes: 15,
+  status: 'unknown',
+  summary: {
+    layer_count: 0,
+    critical_layers: 0,
+    warning_layers: 0
+  },
+  layers: [],
+  recommendations: []
+});
+const captureDiagnostics = ref<CaptureDiagnostics>(emptyCaptureDiagnostics());
 const alertConfig = ref<AlertConfig>({ flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 });
 const ipProfile = ref<IPProfile>({
   ip: '10.2.0.12',
@@ -333,6 +349,7 @@ const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
 const savingRule = ref(false);
+const diffingConfigVersion = ref('');
 const restoringConfigVersion = ref('');
 const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
@@ -488,6 +505,7 @@ const refresh = async () => {
       statusRes,
       dataQualityRes,
       captureQualityRes,
+      captureDiagnosticsRes,
       windowsRes,
       alertConfigRes,
       matrixRes,
@@ -533,6 +551,7 @@ const refresh = async () => {
       api.status(),
       api.dataQuality(minutes, 80),
       api.captureQuality(minutes, 80),
+      api.captureDiagnostics(minutes, 80),
       api.windows(minutes, 80),
       api.alertConfig(),
       api.matrix(minutes, 80),
@@ -578,6 +597,7 @@ const refresh = async () => {
     systemStatus.value = statusRes.data;
     dataQuality.value = dataQualityRes.data;
     captureQuality.value = captureQualityRes.data;
+    captureDiagnostics.value = captureDiagnosticsRes.data;
     historyWindows.value = windowsRes.data;
     alertConfig.value = alertConfigRes.data;
     detectionRules.value = alertConfigRes.data.detection_rules ?? [];
@@ -617,6 +637,7 @@ const refresh = async () => {
       statusRes.degraded ||
       dataQualityRes.degraded ||
       captureQualityRes.degraded ||
+      captureDiagnosticsRes.degraded ||
       windowsRes.degraded ||
       matrixRes.degraded ||
       serviceMapRes.degraded ||
@@ -838,6 +859,24 @@ const refresh = async () => {
         }
       ],
       recommendations: [{ level: 'info', title: '接口采集稳定', detail: '当前网卡 RX/TX 丢包和错误计数未出现异常增量' }]
+    };
+    captureDiagnostics.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      status: 'warning',
+      summary: {
+        layer_count: 5,
+        critical_layers: 0,
+        warning_layers: 1
+      },
+      layers: [
+        { id: 'interface_counters', name: '网卡接口计数', status: 'healthy', score: 0, metric: 'Dropped 0 / Errors 0', detail: '网卡 RX/TX 计数未发现异常。', recommendation: '持续观察接口计数变化。' },
+        { id: 'packet_queue', name: '用户态包队列', status: 'healthy', score: 1, metric: '队列压力 0.2%', detail: '包队列保持低水位。', recommendation: '维持当前队列容量和过滤范围。' },
+        { id: 'window_queue', name: '窗口写入队列', status: 'healthy', score: 0, metric: '队列压力 0.0%', detail: '窗口写入队列无明显堆积。', recommendation: '持续观察 ClickHouse 写入延迟。' },
+        { id: 'freshness', name: '数据新鲜度', status: 'healthy', score: 17, metric: '最新延迟 5 秒', detail: '实时窗口延迟处于正常范围。', recommendation: '保持采集器在线和时间同步。' },
+        { id: 'storage_windows', name: '窗口覆盖率', status: 'warning', score: 6, metric: '覆盖率 94.0%', detail: '示例数据存在短时窗口断档。', recommendation: '检查采集器重启或 ClickHouse 写入失败时间点。' }
+      ],
+      recommendations: [{ level: 'warning', title: '窗口覆盖率', detail: '示例数据存在短时窗口断档，真实采集接入后会展示实际诊断建议' }]
     };
     alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
     detectionRules.value = [
@@ -1759,6 +1798,13 @@ const captureQualityQueueItems = computed(() =>
     packets: row.packet_queue_len + row.window_queue_len
   }))
 );
+const captureDiagnosticItems = computed(() =>
+  captureDiagnostics.value.layers.map((row) => ({
+    key: `${dataQualityStatusText(row.status)} / ${row.name}`,
+    bytes: row.score,
+    packets: row.score
+  }))
+);
 const capacityTrendSeries = computed(() => capacityPlanning.value.trend.map((row) => ({ ts: row.ts, bytes: row.bytes, packets: row.packets })));
 const capacitySrcGrowthItems = computed(() =>
   capacityPlanning.value.top_src_growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
@@ -2563,6 +2609,17 @@ const restoreConfigVersion = async (version: ConfigVersion) => {
   }
 };
 
+const loadConfigVersionDiff = async (version: ConfigVersion) => {
+  if (!version.id) return;
+  diffingConfigVersion.value = version.id;
+  try {
+    const result = await api.configVersionDiff(version.id);
+    selectedConfigDiff.value = result.data;
+  } finally {
+    diffingConfigVersion.value = '';
+  }
+};
+
 const updateAlertStatus = async (alert: AlertEvent, status: string) => {
   if (!canWrite.value) return;
   handlingAlert.value = true;
@@ -3270,6 +3327,68 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <div class="toolbar-summary">
             {{ rangeLabel }} / 生成时间 {{ formatTime(dataQuality.generated_at) }} / 窗口间隔 {{ dataQuality.window_interval }} 秒
           </div>
+        </section>
+        <section class="metrics-grid">
+          <article class="metric">
+            <Radar :size="22" />
+            <div>
+              <span>链路诊断</span>
+              <strong>{{ dataQualityStatusText(captureDiagnostics.status) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重层</span>
+              <strong>{{ captureDiagnostics.summary.critical_layers.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>警告层</span>
+              <strong>{{ captureDiagnostics.summary.warning_layers.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <ClipboardList :size="22" />
+            <div>
+              <span>检查层</span>
+              <strong>{{ captureDiagnostics.summary.layer_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="采集链路诊断" eyebrow="Capture Diagnostics" :items="captureDiagnosticItems" unit="count" />
+          <section class="table-panel capture-diagnostics-table">
+            <div class="panel-heading">
+              <h2>分层诊断</h2>
+              <span>生成时间 {{ formatTime(captureDiagnostics.generated_at) }}</span>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>层级</th>
+                  <th>状态</th>
+                  <th>评分</th>
+                  <th>指标</th>
+                  <th>诊断说明</th>
+                  <th>建议动作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in captureDiagnostics.layers" :key="row.id">
+                  <td><strong>{{ row.name }}</strong></td>
+                  <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                  <td>{{ row.score.toLocaleString() }}</td>
+                  <td>{{ row.metric }}</td>
+                  <td>{{ row.detail }}</td>
+                  <td>{{ row.recommendation }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-if="captureDiagnostics.layers.length === 0" class="empty-state">暂无采集链路诊断数据</div>
+          </section>
         </section>
         <section class="metrics-grid">
           <article class="metric">
@@ -5685,6 +5804,47 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <HorizontalBarChart title="配置动作分布" eyebrow="Config Action" :items="configActionItems" />
           <HorizontalBarChart title="操作人分布" eyebrow="Actor" :items="configActorItems" />
         </section>
+        <section v-if="selectedConfigDiff" class="table-panel config-diff-table">
+          <div class="section-heading">
+            <h2>配置差异</h2>
+            <span>
+              {{ selectedConfigDiff.version_id }} / {{ selectedConfigDiff.summary.change_count.toLocaleString() }} 处差异
+            </span>
+          </div>
+          <div class="config-diff-summary">
+            <div>
+              <span>历史版本</span>
+              <strong>{{ formatTime(selectedConfigDiff.summary.source_ts) }}</strong>
+            </div>
+            <div>
+              <span>当前配置</span>
+              <strong>{{ formatTime(selectedConfigDiff.summary.current_ts) }}</strong>
+            </div>
+            <div>
+              <span>来源摘要</span>
+              <strong>{{ selectedConfigDiff.summary.source || '-' }}</strong>
+            </div>
+          </div>
+          <div v-if="selectedConfigDiff.changes.length === 0" class="empty-state">该版本与当前运行时配置一致</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>路径</th>
+                <th>类型</th>
+                <th>历史值</th>
+                <th>当前值</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="change in selectedConfigDiff.changes" :key="`${selectedConfigDiff.version_id}-${change.path}`">
+                <td>{{ change.path }}</td>
+                <td>{{ change.type }}</td>
+                <td :title="change.before">{{ change.before || '-' }}</td>
+                <td :title="change.after">{{ change.after || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
         <section class="table-panel config-version-table">
           <div class="section-heading">
             <h2>配置快照历史</h2>
@@ -5716,6 +5876,14 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ version.client_ip || '-' }}</td>
                 <td :title="version.config_text || version.config">{{ version.config_text || version.config || '-' }}</td>
                 <td class="action-cell">
+                  <button
+                    class="inline-button"
+                    type="button"
+                    :disabled="diffingConfigVersion === version.id"
+                    @click="loadConfigVersionDiff(version)"
+                  >
+                    {{ diffingConfigVersion === version.id ? '对比中...' : '对比当前' }}
+                  </button>
                   <button
                     class="inline-button"
                     type="button"
