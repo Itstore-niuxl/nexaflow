@@ -1,11 +1,13 @@
 services:
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
 
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: nexaflow
       POSTGRES_USER: nexaflow
@@ -17,6 +19,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    restart: unless-stopped
     environment:
       CLICKHOUSE_USER: default
       CLICKHOUSE_PASSWORD: nexaflow
@@ -28,6 +31,7 @@ services:
       - chdata:/var/lib/clickhouse
 
   api-server:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/api-server.Dockerfile
@@ -59,6 +63,7 @@ services:
       - "127.0.0.1:8080:8080"
 
   collector:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/collector.Dockerfile
@@ -82,6 +87,7 @@ services:
       - redis
 
   web:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/web.Dockerfile
