@@ -877,6 +877,33 @@ export interface AIRuleEffectiveness {
   generated_at: number;
 }
 
+export interface AIAssetEnrichmentSuggestion {
+  id: string;
+  type: string;
+  severity: string;
+  ip: string;
+  title: string;
+  summary: string;
+  confidence: number;
+  missing_fields: string[];
+  evidence: string[];
+  actions: string[];
+  proposed_metadata: AssetMetadata;
+  generated_at: number;
+  enabled: boolean;
+}
+
+export interface AIAssetEnrichmentSuggestions {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  minutes: number;
+  summary: string;
+  suggestions: AIAssetEnrichmentSuggestion[];
+  generated_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1316,6 +1343,11 @@ export const api = {
   async aiRuleEffectiveness(minutes = 15, limit = 100) {
     return json<{ data: AIRuleEffectiveness; degraded: boolean }>(
       `/api/v1/ai/rule-effectiveness?minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async aiAssetEnrichmentSuggestions(minutes = 15, limit = 8) {
+    return json<{ data: AIAssetEnrichmentSuggestions; degraded: boolean }>(
+      `/api/v1/ai/asset-enrichment-suggestions?minutes=${minutes}&limit=${limit}`
     );
   },
   async detectionRules() {

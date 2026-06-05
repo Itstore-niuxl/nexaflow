@@ -1477,6 +1477,11 @@ td {
   gap: 14px;
 }
 
+.ai-asset-enrichment-panel {
+  display: grid;
+  gap: 14px;
+}
+
 .compact-metrics {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1525,6 +1530,22 @@ td {
   color: #24324a;
   font-size: 13px;
   line-height: 1.65;
+}
+
+.asset-tag-preview {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.asset-tag-preview span {
+  padding: 5px 9px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .ai-action-panel {

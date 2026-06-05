@@ -39,6 +39,8 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AIAssetEnrichmentSuggestions,
+  type AIAssetEnrichmentSuggestion,
   type AIGovernanceSuggestions,
   type AIGovernanceSuggestion,
   type AIIncidentInvestigation,
@@ -428,6 +430,16 @@ const emptyAIRuleEffectiveness = (): AIRuleEffectiveness => ({
   tuning_suggestions: [],
   generated_at: 0
 });
+const emptyAIAssetEnrichmentSuggestions = (): AIAssetEnrichmentSuggestions => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  minutes: 15,
+  summary: '等待资产风险和公网访问上下文加载后生成资产画像补全建议。',
+  suggestions: [],
+  generated_at: 0
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -451,6 +463,7 @@ const aiQuestion = ref('最近 30 分钟哪个公网 IP 访问最多？');
 const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
 const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
 const aiRuleEffectiveness = ref<AIRuleEffectiveness>(emptyAIRuleEffectiveness());
+const aiAssetEnrichment = ref<AIAssetEnrichmentSuggestions>(emptyAIAssetEnrichmentSuggestions());
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
@@ -753,6 +766,7 @@ const refresh = async () => {
       reportAIRes,
       governanceRes,
       ruleEffectivenessRes,
+      assetEnrichmentRes,
       ruleFindingRes,
       auditRes,
       configVersionRes,
@@ -804,6 +818,7 @@ const refresh = async () => {
       api.aiReportSummary(minutes, 12),
       api.aiGovernanceSuggestions(minutes, 8),
       api.aiRuleEffectiveness(minutes, 120),
+      api.aiAssetEnrichmentSuggestions(minutes, 8),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
@@ -856,6 +871,7 @@ const refresh = async () => {
     reportAISummary.value = reportAIRes.data;
     aiGovernance.value = governanceRes.data;
     aiRuleEffectiveness.value = ruleEffectivenessRes.data;
+    aiAssetEnrichment.value = assetEnrichmentRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -899,6 +915,7 @@ const refresh = async () => {
       reportAIRes.degraded ||
       governanceRes.degraded ||
       ruleEffectivenessRes.degraded ||
+      assetEnrichmentRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
       configVersionRes.degraded;
@@ -2185,6 +2202,41 @@ const refresh = async () => {
       ],
       generated_at: now
     };
+    aiAssetEnrichment.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      minutes: selectedMinutes.value,
+      summary: '基于样例资产风险生成 1 条画像补全建议。',
+      suggestions: [
+        {
+          id: 'ai:asset-enrichment:10.2.0.12',
+          type: 'asset_enrichment',
+          severity: 'critical',
+          ip: '10.2.0.12',
+          title: '补全资产画像：10.2.0.12',
+          summary: '10.2.0.12 缺少负责人、业务系统，且当前风险等级为严重，建议优先补齐画像。',
+          confidence: 0.86,
+          missing_fields: ['负责人', '业务系统'],
+          evidence: ['风险评分：86', '公网对端：2', '暴露服务：3', '开放事件：2', '主要原因：公网暴露'],
+          actions: ['确认资产负责人和业务系统。', '复核推荐标签是否符合实际用途。', '填入资产台账后再保存。'],
+          proposed_metadata: {
+            ip: '10.2.0.12',
+            name: '公网服务资产 10.2.0.12',
+            owner: '待分配',
+            business: '公网服务',
+            environment: '生产',
+            criticality: 'critical',
+            tags: ['AI建议', '公网访问', '服务暴露', '高风险'],
+            note: 'AI 建议补全：风险评分 86，公网暴露。'
+          },
+          generated_at: now,
+          enabled: true
+        }
+      ],
+      generated_at: now
+    };
     systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
     degraded.value = true;
   } finally {
@@ -3376,6 +3428,24 @@ const editAsset = (asset: AssetRow) => {
   assetTagsText.value = (asset.tags || []).join(', ');
 };
 
+const useAssetEnrichmentSuggestion = (suggestion: AIAssetEnrichmentSuggestion) => {
+  if (!canWrite.value) return;
+  const metadata = suggestion.proposed_metadata;
+  assetEditor.value = {
+    ip: metadata.ip,
+    name: metadata.name || '',
+    owner: metadata.owner || '',
+    business: metadata.business || '',
+    environment: metadata.environment || '未分类',
+    criticality: metadata.criticality || 'normal',
+    tags: [...(metadata.tags || [])],
+    note: metadata.note || '',
+    metadata_updated_at: metadata.metadata_updated_at || 0
+  };
+  assetTagsText.value = (metadata.tags || []).join(', ');
+  currentView.value = 'assets';
+};
+
 const saveAssetMetadata = async () => {
   if (!canWrite.value) return;
   if (!assetEditor.value) return;
@@ -4072,6 +4142,51 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div class="ai-workbench-actions">
                 <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canWrite" @click="useGovernanceRule(item)">填入规则草案</button>
                 <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canWrite" @click="reviewGovernanceSilence(item)">复核白名单</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="table-panel ai-asset-enrichment-panel">
+          <div class="panel-heading">
+            <h2>AI 资产画像补全</h2>
+            <span>{{ aiAssetEnrichment.suggestions.length.toLocaleString() }} 条 / {{ aiAssetEnrichment.mode }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ aiAssetEnrichment.summary }}</p>
+          <div v-if="aiAssetEnrichment.suggestions.length === 0" class="empty-state">暂无资产补全建议</div>
+          <div v-else class="governance-list">
+            <article v-for="item in aiAssetEnrichment.suggestions" :key="item.id" class="governance-card">
+              <div class="governance-card-header">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <span>缺失字段：{{ item.missing_fields.join('、') || '需复核现有画像' }}</span>
+                </div>
+                <b class="severity-pill" :class="item.severity">{{ severityText(item.severity) }} / {{ aiConfidenceText(item.confidence) }}</b>
+              </div>
+              <p>{{ item.summary }}</p>
+              <div class="ai-summary-grid">
+                <div>
+                  <span>建议画像</span>
+                  <ul>
+                    <li>名称：{{ item.proposed_metadata.name }}</li>
+                    <li>负责人：{{ item.proposed_metadata.owner }}</li>
+                    <li>业务：{{ item.proposed_metadata.business }}</li>
+                    <li>环境/重要性：{{ item.proposed_metadata.environment }} / {{ criticalityText(item.proposed_metadata.criticality) }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <span>证据</span>
+                  <ul>
+                    <li v-for="evidence in item.evidence.slice(0, 5)" :key="`asset-enrich-evidence-${item.id}-${evidence}`">{{ evidence }}</li>
+                  </ul>
+                </div>
+              </div>
+              <div class="asset-tag-preview">
+                <span v-for="tag in item.proposed_metadata.tags" :key="`asset-enrich-tag-${item.id}-${tag}`">{{ tag }}</span>
+              </div>
+              <div class="ai-workbench-actions">
+                <button class="command-button" type="button" :disabled="!canWrite" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
+                <button class="inline-button" type="button" @click="profileIP = item.ip; currentView = 'asset-risk'">查看资产风险</button>
               </div>
             </article>
           </div>

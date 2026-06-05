@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
 	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
 	mux.HandleFunc("/api/v1/ai/rule-effectiveness", s.aiRuleEffectiveness)
+	mux.HandleFunc("/api/v1/ai/asset-enrichment-suggestions", s.aiAssetEnrichmentSuggestions)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -747,6 +748,18 @@ func (s *Server) aiRuleEffectiveness(w http.ResponseWriter, r *http.Request) {
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	findings, err := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, minutes, limit)
 	result := buildAIRuleEffectiveness(s.aiOptions(), runtime.Alerts.DetectionRules, findings, runtime.Alerts, minutes)
+	writeJSON(w, map[string]any{"data": result, "degraded": err != nil})
+}
+
+func (s *Server) aiAssetEnrichmentSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 8, 50))
+	risks, err := s.store.AssetRiskPosture(r.Context(), minutes, max(limit, 20))
+	result := buildAIAssetEnrichmentSuggestions(s.aiOptions(), risks, minutes, limit)
 	writeJSON(w, map[string]any{"data": result, "degraded": err != nil})
 }
 
@@ -2167,6 +2180,210 @@ func buildAIRuleEffectiveness(options aiSummaryOptions, rules []model.DetectionR
 		"tuning_suggestions": tuning,
 		"generated_at":       time.Now().Unix(),
 	}
+}
+
+func buildAIAssetEnrichmentSuggestions(options aiSummaryOptions, risks []map[string]any, minutes, limit int) map[string]any {
+	suggestions := []map[string]any{}
+	for _, risk := range risks {
+		if len(suggestions) >= limit {
+			break
+		}
+		ip := stringValue(risk["ip"])
+		if ip == "" {
+			continue
+		}
+		missing := assetMissingFields(risk)
+		if len(missing) == 0 && int64Value(risk["risk_score"]) < 70 {
+			continue
+		}
+		suggestions = append(suggestions, assetEnrichmentSuggestion(options, risk, missing))
+	}
+	return map[string]any{
+		"enabled":      options.Enabled,
+		"mode":         options.Mode,
+		"provider":     options.Provider,
+		"model":        options.Model,
+		"minutes":      minutes,
+		"summary":      fmt.Sprintf("基于最近 %d 分钟资产风险、暴露服务和公网访问生成 %d 条资产画像补全建议。", minutes, len(suggestions)),
+		"suggestions":  suggestions,
+		"generated_at": time.Now().Unix(),
+	}
+}
+
+func assetEnrichmentSuggestion(options aiSummaryOptions, risk map[string]any, missing []string) map[string]any {
+	ip := stringValue(risk["ip"])
+	riskLevel := firstString(stringValue(risk["risk_level"]), "info")
+	metadata := proposedAssetMetadata(risk)
+	evidence := []string{
+		"风险评分：" + strconv.FormatInt(int64Value(risk["risk_score"]), 10),
+		"风险等级：" + assetRiskLevelText(riskLevel),
+		"公网对端：" + strconv.FormatInt(int64Value(risk["external_peers"]), 10),
+		"暴露服务：" + strconv.FormatInt(int64Value(risk["exposed_services"]), 10),
+		"开放事件：" + strconv.FormatInt(int64Value(risk["open_incidents"]), 10),
+		"主要原因：" + firstString(stringValue(risk["top_finding"]), "-"),
+	}
+	actions := []string{"确认资产负责人和业务系统。", "复核推荐标签是否符合实际用途。", "填入资产台账后再保存。"}
+	if int64Value(risk["open_incidents"]) > 0 {
+		actions = append([]string{"先处理该资产关联开放事件。"}, actions...)
+	}
+	return map[string]any{
+		"id":                "ai:asset-enrichment:" + ip,
+		"type":              "asset_enrichment",
+		"severity":          riskSeverity(riskLevel),
+		"ip":                ip,
+		"title":             "补全资产画像：" + ip,
+		"summary":           assetEnrichmentSummary(risk, missing),
+		"confidence":        confidenceByContext(len(missing) + int(int64Value(risk["open_incidents"])) + int(int64Value(risk["exposed_services"])) + int(int64Value(risk["external_peers"]))),
+		"missing_fields":    missing,
+		"evidence":          evidence,
+		"actions":           actions,
+		"proposed_metadata": metadata,
+		"generated_at":      time.Now().Unix(),
+		"enabled":           options.Enabled,
+	}
+}
+
+func proposedAssetMetadata(risk map[string]any) map[string]any {
+	ip := stringValue(risk["ip"])
+	tags := mergeTags(sliceValue(risk["tags"]), inferredAssetTags(risk))
+	name := firstString(stringValue(risk["name"]), inferredAssetName(risk))
+	owner := firstString(stringValue(risk["owner"]), "待分配")
+	business := firstString(stringValue(risk["business"]), inferredAssetBusiness(risk))
+	environment := stringValue(risk["environment"])
+	if environment == "" || environment == "未分类" {
+		environment = inferredAssetEnvironment(risk)
+	}
+	criticality := stringValue(risk["criticality"])
+	if criticality == "" || (criticality == "normal" && int64Value(risk["risk_score"]) >= 70) {
+		criticality = inferredAssetCriticality(risk)
+	}
+	note := strings.TrimSpace(stringValue(risk["note"]))
+	inferredNote := fmt.Sprintf("AI 建议补全：风险评分 %d，%s。", int64Value(risk["risk_score"]), firstString(stringValue(risk["top_finding"]), "近期活跃资产"))
+	if note == "" {
+		note = inferredNote
+	}
+	return map[string]any{
+		"ip":          ip,
+		"name":        name,
+		"owner":       owner,
+		"business":    business,
+		"environment": environment,
+		"criticality": criticality,
+		"tags":        tags,
+		"note":        note,
+	}
+}
+
+func assetMissingFields(risk map[string]any) []string {
+	fields := []struct {
+		key   string
+		label string
+	}{
+		{"name", "资产名称"},
+		{"owner", "负责人"},
+		{"business", "业务系统"},
+		{"environment", "环境"},
+		{"criticality", "重要性"},
+	}
+	missing := []string{}
+	for _, field := range fields {
+		value := strings.TrimSpace(stringValue(risk[field.key]))
+		if value == "" || value == "未分类" || value == "normal" && field.key == "criticality" && int64Value(risk["risk_score"]) >= 70 {
+			missing = append(missing, field.label)
+		}
+	}
+	return missing
+}
+
+func assetEnrichmentSummary(risk map[string]any, missing []string) string {
+	ip := stringValue(risk["ip"])
+	if len(missing) > 0 {
+		return fmt.Sprintf("%s 缺少 %s，且当前风险等级为 %s，建议优先补齐画像。", ip, strings.Join(missing, "、"), assetRiskLevelText(stringValue(risk["risk_level"])))
+	}
+	return fmt.Sprintf("%s 当前风险较高，建议复核已有资产画像并补充处置备注。", ip)
+}
+
+func inferredAssetName(risk map[string]any) string {
+	ip := stringValue(risk["ip"])
+	switch {
+	case int64Value(risk["exposed_services"]) > 0:
+		return "公网服务资产 " + ip
+	case int64Value(risk["external_sessions"]) > 0:
+		return "外联活跃资产 " + ip
+	default:
+		return "活跃资产 " + ip
+	}
+}
+
+func inferredAssetBusiness(risk map[string]any) string {
+	switch {
+	case int64Value(risk["exposed_services"]) > 0:
+		return "公网服务"
+	case int64Value(risk["external_sessions"]) > 0:
+		return "外联业务"
+	case uint64Value(risk["total_bytes"]) > 1024*1024*1024:
+		return "高流量业务"
+	default:
+		return "待确认业务"
+	}
+}
+
+func inferredAssetEnvironment(risk map[string]any) string {
+	if int64Value(risk["risk_score"]) >= 70 || int64Value(risk["exposed_services"]) > 0 {
+		return "生产"
+	}
+	return "未分类"
+}
+
+func inferredAssetCriticality(risk map[string]any) string {
+	switch {
+	case int64Value(risk["risk_score"]) >= 80 || int64Value(risk["critical_incidents"]) > 0:
+		return "critical"
+	case int64Value(risk["risk_score"]) >= 55 || int64Value(risk["exposed_services"]) > 0:
+		return "high"
+	default:
+		return "normal"
+	}
+}
+
+func inferredAssetTags(risk map[string]any) []string {
+	tags := []string{"AI建议"}
+	if role := stringValue(risk["role"]); role != "" {
+		tags = append(tags, role)
+	}
+	if int64Value(risk["external_peers"]) > 0 || int64Value(risk["external_sessions"]) > 0 {
+		tags = append(tags, "公网访问")
+	}
+	if int64Value(risk["exposed_services"]) > 0 {
+		tags = append(tags, "服务暴露")
+	}
+	if int64Value(risk["open_incidents"]) > 0 {
+		tags = append(tags, "开放事件")
+	}
+	if int64Value(risk["risk_score"]) >= 70 {
+		tags = append(tags, "高风险")
+	}
+	return tags
+}
+
+func mergeTags(raw []any, inferred []string) []string {
+	seen := map[string]bool{}
+	tags := []string{}
+	for _, value := range raw {
+		tag := strings.TrimSpace(stringValue(value))
+		if tag != "" && !seen[tag] {
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+	}
+	for _, tag := range inferred {
+		tag = strings.TrimSpace(tag)
+		if tag != "" && !seen[tag] {
+			seen[tag] = true
+			tags = append(tags, tag)
+		}
+	}
+	return tags
 }
 
 func buildAIRuleEffectivenessRow(rule model.DetectionRule, findings []map[string]any, alerts config.Alerts, minutes int) map[string]any {

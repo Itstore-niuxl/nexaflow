@@ -454,3 +454,50 @@ func TestBuildAIRuleEffectiveness(t *testing.T) {
 		t.Fatalf("expected tuning suggestions, got %#v", result)
 	}
 }
+
+func TestBuildAIAssetEnrichmentSuggestions(t *testing.T) {
+	risks := []map[string]any{
+		{
+			"ip":                 "10.2.0.12",
+			"name":               "",
+			"owner":              "",
+			"business":           "",
+			"environment":        "未分类",
+			"criticality":        "normal",
+			"role":               "server",
+			"risk_score":         int64(86),
+			"risk_level":         "critical",
+			"external_peers":     int64(2),
+			"external_sessions":  int64(40),
+			"exposed_services":   int64(3),
+			"open_incidents":     int64(2),
+			"critical_incidents": int64(1),
+			"top_finding":        "公网暴露",
+		},
+	}
+	result := buildAIAssetEnrichmentSuggestions(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		risks,
+		15,
+		8,
+	)
+	suggestions := sliceValue(result["suggestions"])
+	if len(suggestions) != 1 {
+		t.Fatalf("expected one asset suggestion, got %#v", result)
+	}
+	suggestion := mapValue(suggestions[0])
+	if len(sliceValue(suggestion["missing_fields"])) < 4 {
+		t.Fatalf("expected missing fields, got %#v", suggestion)
+	}
+	metadata := mapValue(suggestion["proposed_metadata"])
+	if stringValue(metadata["ip"]) != "10.2.0.12" {
+		t.Fatalf("unexpected metadata: %#v", metadata)
+	}
+	if stringValue(metadata["criticality"]) != "critical" {
+		t.Fatalf("expected critical metadata, got %#v", metadata)
+	}
+	tags := sliceValue(metadata["tags"])
+	if len(tags) == 0 {
+		t.Fatalf("expected inferred tags, got %#v", metadata)
+	}
+}
