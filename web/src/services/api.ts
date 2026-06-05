@@ -51,6 +51,12 @@ export interface AuditEvent {
   client_ip: string;
 }
 
+export interface AuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+  actor: string;
+}
+
 export interface NetworkInterface {
   name: string;
   state: string;
@@ -699,6 +705,27 @@ const json = async <T>(url: string): Promise<T> => {
 };
 
 export const api = {
+  async authStatus() {
+    return json<{ data: AuthStatus }>('/api/v1/auth/status');
+  },
+  async login(actor: string, password: string) {
+    const response = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor, password })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AuthStatus }>;
+  },
+  async logout() {
+    const response = await fetch('/api/v1/auth/logout', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AuthStatus }>;
+  },
   async summary(minutes = 15) {
     return json<{ data: Summary; degraded: boolean }>(`/api/v1/dashboard/summary?minutes=${minutes}`);
   },

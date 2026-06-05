@@ -39,6 +39,8 @@ services:
       NEXAFLOW_IFACE: ${NEXAFLOW_IFACE:-eth0}
       NEXAFLOW_RUNTIME_CONFIG: /var/lib/nexaflow/collector_config.json
       NEXAFLOW_HOST_NET_PATH: /host/sys/class/net
+      NEXAFLOW_AUTH_PASSWORD: ${NEXAFLOW_AUTH_PASSWORD:-}
+      NEXAFLOW_AUTH_SECRET: ${NEXAFLOW_AUTH_SECRET:-}
     volumes:
       - ../runtime:/var/lib/nexaflow
       - /sys:/host/sys:ro

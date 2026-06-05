@@ -28,6 +28,8 @@ type Config struct {
 	ReplaySpeed   float64
 	RuntimePath   string
 	HostNetPath   string
+	AuthPassword  string
+	AuthSecret    string
 }
 
 type CaptureRuntime struct {
@@ -69,6 +71,8 @@ func Load() Config {
 		ReplaySpeed:   envFloat64("NEXAFLOW_REPLAY_SPEED", 1),
 		RuntimePath:   env("NEXAFLOW_RUNTIME_CONFIG", "/var/lib/nexaflow/collector_config.json"),
 		HostNetPath:   env("NEXAFLOW_HOST_NET_PATH", "/host/sys/class/net"),
+		AuthPassword:  env("NEXAFLOW_AUTH_PASSWORD", ""),
+		AuthSecret:    env("NEXAFLOW_AUTH_SECRET", ""),
 	}
 
 	flag.StringVar(&cfg.APIAddr, "api-addr", cfg.APIAddr, "API listen address")
@@ -83,6 +87,8 @@ func Load() Config {
 	flag.StringVar(&cfg.BPFFilter, "bpf-filter", cfg.BPFFilter, "BPF filter for live pcap mode")
 	flag.StringVar(&cfg.PcapFile, "pcap-file", cfg.PcapFile, "pcap file for pcap_replay mode")
 	flag.StringVar(&cfg.RuntimePath, "runtime-config", cfg.RuntimePath, "collector runtime config path")
+	flag.StringVar(&cfg.AuthPassword, "auth-password", cfg.AuthPassword, "optional console login password")
+	flag.StringVar(&cfg.AuthSecret, "auth-secret", cfg.AuthSecret, "optional session signing secret")
 	flag.Uint64Var(&cfg.BandwidthMbps, "bandwidth-mbps", cfg.BandwidthMbps, "link bandwidth in Mbps")
 	flag.Float64Var(&cfg.ReplaySpeed, "replay-speed", cfg.ReplaySpeed, "pcap replay speed multiplier")
 	flag.Parse()

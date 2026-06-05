@@ -1,6 +1,11 @@
 package api
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -16,6 +21,12 @@ import (
 	"nexaflow/internal/storage/clickhouse"
 )
 
+const authCookieName = "nexaflow_session"
+
+type contextKey string
+
+const actorContextKey contextKey = "actor"
+
 type Server struct {
 	store  *clickhouse.Store
 	config config.Config
@@ -30,6 +41,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/readyz", s.health)
 	mux.HandleFunc("/metrics", s.metrics)
+	mux.HandleFunc("/api/v1/auth/status", s.authStatus)
+	mux.HandleFunc("/api/v1/auth/login", s.authLogin)
+	mux.HandleFunc("/api/v1/auth/logout", s.authLogout)
 	mux.HandleFunc("/api/v1/dashboard/summary", s.summary)
 	mux.HandleFunc("/api/v1/traffic/topn", s.topn)
 	mux.HandleFunc("/api/v1/traffic/timeseries", s.timeseries)
@@ -75,7 +89,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	mux.HandleFunc("/api/v1/system/capture-quality", s.captureQuality)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
-	return cors(mux)
+	return cors(s.authRequired(mux))
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -771,6 +785,170 @@ func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
+func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+	enabled := s.authEnabled()
+	authenticated := true
+	actor := "operator"
+	if enabled {
+		actor, authenticated = s.verifyAuthRequest(r)
+	}
+	if actor == "" {
+		actor = "operator"
+	}
+	writeJSON(w, map[string]any{"data": map[string]any{
+		"enabled":       enabled,
+		"authenticated": authenticated,
+		"actor":         actor,
+	}})
+}
+
+func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authEnabled() {
+		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator"}})
+		return
+	}
+	var body struct {
+		Actor    string `json:"actor"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(s.config.AuthPassword)) != 1 {
+		http.Error(w, "invalid password", http.StatusUnauthorized)
+		return
+	}
+	actor := strings.TrimSpace(body.Actor)
+	if actor == "" {
+		actor = "operator"
+	}
+	if err := s.setAuthCookie(w, actor); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.login", "console", "控制台登录："+actor, map[string]any{"actor": actor}, auditClientIP(r))
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": actor}})
+}
+
+func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	actor, _ := s.verifyAuthRequest(r)
+	if actor == "" {
+		actor = "operator"
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	if s.authEnabled() {
+		_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.logout", "console", "控制台退出："+actor, map[string]any{"actor": actor}, auditClientIP(r))
+	}
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": ""}})
+}
+
+func (s *Server) authRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.authEnabled() || !strings.HasPrefix(r.URL.Path, "/api/v1/") || strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		actor, ok := s.verifyAuthRequest(r)
+		if !ok {
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorContextKey, actor)))
+	})
+}
+
+func (s *Server) authEnabled() bool {
+	return strings.TrimSpace(s.config.AuthPassword) != ""
+}
+
+func (s *Server) setAuthCookie(w http.ResponseWriter, actor string) error {
+	token, err := s.signAuthToken(actor, time.Now().Add(12*time.Hour).Unix())
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int((12 * time.Hour).Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil
+}
+
+func (s *Server) signAuthToken(actor string, expires int64) (string, error) {
+	payload := actor + "|" + strconv.FormatInt(expires, 10)
+	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	sig := s.authSignature(encodedPayload)
+	return encodedPayload + "." + sig, nil
+}
+
+func (s *Server) verifyAuthRequest(r *http.Request) (string, bool) {
+	cookie, err := r.Cookie(authCookieName)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return "", false
+	}
+	return s.verifyAuthToken(cookie.Value)
+}
+
+func (s *Server) verifyAuthToken(token string) (string, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	expected := s.authSignature(parts[0])
+	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
+		return "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", false
+	}
+	payload := strings.Split(string(raw), "|")
+	if len(payload) != 2 {
+		return "", false
+	}
+	expires, err := strconv.ParseInt(payload[1], 10, 64)
+	if err != nil || expires < time.Now().Unix() {
+		return "", false
+	}
+	actor := strings.TrimSpace(payload[0])
+	if actor == "" {
+		actor = "operator"
+	}
+	return actor, true
+}
+
+func (s *Server) authSignature(payload string) string {
+	mac := hmac.New(sha256.New, []byte(s.authSecret()))
+	_, _ = mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) authSecret() string {
+	if secret := strings.TrimSpace(s.config.AuthSecret); secret != "" {
+		return secret
+	}
+	return s.config.AuthPassword
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -830,6 +1008,9 @@ func (s *Server) audit(r *http.Request, action, target, summary string, detail m
 }
 
 func auditActor(r *http.Request) string {
+	if actor := authenticatedActor(r); actor != "" {
+		return actor
+	}
 	actor := strings.TrimSpace(r.Header.Get("X-NexaFlow-Actor"))
 	if actor == "" {
 		actor = strings.TrimSpace(r.URL.Query().Get("actor"))
@@ -838,6 +1019,13 @@ func auditActor(r *http.Request) string {
 		actor = "operator"
 	}
 	return actor
+}
+
+func authenticatedActor(r *http.Request) string {
+	if actor, ok := r.Context().Value(actorContextKey).(string); ok {
+		return strings.TrimSpace(actor)
+	}
+	return ""
 }
 
 func auditClientIP(r *http.Request) string {

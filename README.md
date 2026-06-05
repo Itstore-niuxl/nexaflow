@@ -49,6 +49,13 @@ NEXAFLOW_REMOTE_HOST=<ubuntu-ip> ./scripts/server_compose.sh up --build -d
 NEXAFLOW_REMOTE_HOST=<ubuntu-ip> ./scripts/list_server_interfaces.sh
 ```
 
+Console login is optional. Set `NEXAFLOW_AUTH_PASSWORD` in the server `.env` and restart `api-server`/`web` to protect `/api/v1/*` with a signed HttpOnly session cookie:
+
+```bash
+NEXAFLOW_AUTH_PASSWORD='<strong-password>'
+NEXAFLOW_AUTH_SECRET='<random-session-secret>'
+```
+
 The web console can switch the collector mode and interface from the `采集器` page. The same operation is available from the command line:
 
 ```bash

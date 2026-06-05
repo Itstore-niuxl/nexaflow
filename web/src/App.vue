@@ -42,6 +42,7 @@ import {
   type AssetMetadata,
   type AssetRiskPosture,
   type AssetRow,
+  type AuthStatus,
   type CapacityPlanning,
   type CaptureQuality,
   type Collector,
@@ -317,6 +318,12 @@ const emptyCapacityPlanning = (): CapacityPlanning => ({
 const capacityPlanning = ref<CapacityPlanning>(emptyCapacityPlanning());
 const degraded = ref(false);
 const loading = ref(false);
+const authChecking = ref(true);
+const authStatus = ref<AuthStatus>({ enabled: false, authenticated: true, actor: 'operator' });
+const loginActor = ref('operator');
+const loginPassword = ref('');
+const loginError = ref('');
+const loggingIn = ref(false);
 const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
@@ -439,6 +446,10 @@ const rangeOptions = [
 ];
 
 const refresh = async () => {
+  if (authStatus.value.enabled && !authStatus.value.authenticated) {
+    loading.value = false;
+    return;
+  }
   loading.value = true;
   try {
     const minutes = selectedMinutes.value;
@@ -1577,9 +1588,58 @@ const refresh = async () => {
   }
 };
 
-onMounted(() => {
-  void refresh();
+const startRefreshTimer = () => {
+  if (timer) {
+    window.clearInterval(timer);
+  }
   timer = window.setInterval(refresh, 5000);
+};
+
+const checkAuth = async () => {
+  authChecking.value = true;
+  try {
+    const result = await api.authStatus();
+    authStatus.value = result.data;
+    loginActor.value = result.data.actor || 'operator';
+    authChecking.value = false;
+    if (!result.data.enabled || result.data.authenticated) {
+      void refresh();
+      startRefreshTimer();
+    }
+  } finally {
+    authChecking.value = false;
+  }
+};
+
+const login = async () => {
+  loggingIn.value = true;
+  loginError.value = '';
+  try {
+    const result = await api.login(loginActor.value.trim() || 'operator', loginPassword.value);
+    authStatus.value = result.data;
+    loginActor.value = result.data.actor || loginActor.value || 'operator';
+    loginPassword.value = '';
+    await refresh();
+    startRefreshTimer();
+  } catch {
+    loginError.value = '登录失败，请检查密码';
+  } finally {
+    loggingIn.value = false;
+  }
+};
+
+const logout = async () => {
+  if (timer) {
+    window.clearInterval(timer);
+    timer = undefined;
+  }
+  const result = await api.logout();
+  authStatus.value = result.data;
+  loginPassword.value = '';
+};
+
+onMounted(() => {
+  void checkAuth();
 });
 
 onUnmounted(() => {
@@ -2834,6 +2894,37 @@ const exportCSV = (filename: string, rows: string[][]) => {
 
 <template>
   <main class="app-shell">
+    <section v-if="authChecking" class="login-screen">
+      <div class="login-panel">
+        <div class="brand-mark">
+          <RadioTower :size="24" />
+        </div>
+        <h1>NexaFlow</h1>
+        <p>正在校验访问状态</p>
+      </div>
+    </section>
+
+    <section v-else-if="authStatus.enabled && !authStatus.authenticated" class="login-screen">
+      <form class="login-panel" @submit.prevent="login">
+        <div class="brand-mark">
+          <RadioTower :size="24" />
+        </div>
+        <h1>NexaFlow</h1>
+        <p>请输入访问凭据进入流量分析控制台</p>
+        <label>
+          <span>操作人</span>
+          <input v-model="loginActor" autocomplete="username" placeholder="operator" />
+        </label>
+        <label>
+          <span>访问密码</span>
+          <input v-model="loginPassword" type="password" autocomplete="current-password" placeholder="输入访问密码" />
+        </label>
+        <button type="submit" :disabled="loggingIn">{{ loggingIn ? '登录中...' : '登录' }}</button>
+        <small v-if="loginError" class="login-error">{{ loginError }}</small>
+      </form>
+    </section>
+
+    <template v-else>
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">
@@ -2875,6 +2966,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <p>{{ pageSubtitle }}</p>
         </div>
         <div class="topbar-actions">
+          <div class="status-chip auth-chip">
+            <span>{{ authStatus.enabled ? authStatus.actor : '免登录' }}</span>
+            <button v-if="authStatus.enabled" type="button" @click="logout">退出</button>
+          </div>
           <div class="status-chip" :class="{ warning: degraded }">
             <span class="status-dot" :class="{ offline: degraded }"></span>
             {{ degraded ? '降级数据' : '实时数据' }}
@@ -5511,5 +5606,6 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
       </template>
     </section>
+    </template>
   </main>
 </template>
