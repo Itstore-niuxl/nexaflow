@@ -343,3 +343,56 @@ func TestBuildAIIncidentInvestigation(t *testing.T) {
 		t.Fatalf("expected evidence chain, got %#v", investigation["evidence_chain"])
 	}
 }
+
+func TestBuildAIGovernanceSuggestions(t *testing.T) {
+	report := map[string]any{
+		"incidents": []map[string]any{
+			{"subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "critical", "summary": "公网会话突增", "bytes": uint64(7340032), "packets": uint64(6800), "recommended_action": "核对公网来源"},
+		},
+		"external_access": []map[string]any{
+			{"public_ip": "211.93.22.130", "internal_ip": "10.2.0.12", "port": "8081", "service": "HTTP Alternate", "risk": "medium", "session_count": int64(40), "bytes": uint64(7340032), "packets": uint64(6800)},
+		},
+		"exposures": []map[string]any{
+			{"ip": "10.2.0.12", "port": "8081", "service": "HTTP Alternate", "risk": "high", "client_count": int64(6), "bytes": uint64(7340032), "packets": uint64(6800)},
+		},
+		"anomalies": []map[string]any{
+			{"dimension": "service", "key": "SSH", "severity": "warning", "summary": "SSH 新增流量", "current_bytes": uint64(18874368), "change_ratio": 9.9},
+		},
+		"asset_risks": []map[string]any{
+			{"ip": "10.2.0.12", "risk_level": "critical", "risk_score": int64(86), "open_incidents": int64(2), "exposed_services": int64(3), "external_peers": int64(2), "top_finding": "公网暴露"},
+		},
+	}
+
+	result := buildAIGovernanceSuggestions(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		report,
+		config.Alerts{},
+		15,
+		8,
+	)
+	suggestions := sliceValue(result["suggestions"])
+	if len(suggestions) < 4 {
+		t.Fatalf("expected governance suggestions, got %#v", result)
+	}
+	first := mapValue(suggestions[0])
+	if mapValue(first["proposed_rule"])["metric"] == "" {
+		t.Fatalf("expected proposed rule in first suggestion, got %#v", first)
+	}
+	hasSilence := false
+	hasAsset := false
+	for _, item := range suggestions {
+		row := mapValue(item)
+		if mapValue(row["proposed_silence"])["subject"] != "" {
+			hasSilence = true
+		}
+		if stringValue(row["type"]) == "asset_governance" {
+			hasAsset = true
+		}
+	}
+	if !hasSilence {
+		t.Fatalf("expected whitelist review suggestion, got %#v", suggestions)
+	}
+	if !hasAsset {
+		t.Fatalf("expected asset governance suggestion, got %#v", suggestions)
+	}
+}

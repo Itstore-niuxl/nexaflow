@@ -788,6 +788,35 @@ export interface AIIncidentInvestigation {
   generated_at: number;
 }
 
+export interface AIGovernanceSuggestion {
+  id: string;
+  type: string;
+  severity: string;
+  title: string;
+  target: string;
+  summary: string;
+  confidence: number;
+  evidence: string[];
+  actions: string[];
+  proposed_rule?: DetectionRule;
+  proposed_silence?: {
+    subject: string;
+    reason: string;
+    scope: string;
+  };
+}
+
+export interface AIGovernanceSuggestions {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  minutes: number;
+  summary: string;
+  suggestions: AIGovernanceSuggestion[];
+  generated_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1217,6 +1246,11 @@ export const api = {
   async aiIncidentInvestigation(subject: string, kind = '', id = '', minutes = 15, limit = 12) {
     return json<{ data: AIIncidentInvestigation; degraded: boolean }>(
       `/api/v1/ai/incident-investigation?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async aiGovernanceSuggestions(minutes = 15, limit = 8) {
+    return json<{ data: AIGovernanceSuggestions; degraded: boolean }>(
+      `/api/v1/ai/governance-suggestions?minutes=${minutes}&limit=${limit}`
     );
   },
   async detectionRules() {

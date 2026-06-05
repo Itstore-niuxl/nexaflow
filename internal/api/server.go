@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/report-summary", s.aiReportSummary)
 	mux.HandleFunc("/api/v1/ai/query", s.aiQuery)
 	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
+	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -720,6 +721,19 @@ func (s *Server) aiIncidentInvestigation(w http.ResponseWriter, r *http.Request)
 		"data":     buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, timeline),
 		"degraded": incidentErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)) || timelineErr != nil,
 	})
+}
+
+func (s *Server) aiGovernanceSuggestions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 8, 30))
+	report, reportErr := s.store.ReportOverview(r.Context(), minutes, limit)
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	suggestions := buildAIGovernanceSuggestions(s.aiOptions(), report, runtime.Alerts, minutes, limit)
+	writeJSON(w, map[string]any{"data": suggestions, "degraded": reportErr != nil})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
@@ -1969,6 +1983,230 @@ func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextDat
 		"timeline":       timeline,
 		"generated_at":   time.Now().Unix(),
 	}
+}
+
+func buildAIGovernanceSuggestions(options aiSummaryOptions, report map[string]any, alerts config.Alerts, minutes, limit int) map[string]any {
+	suggestions := []map[string]any{}
+	incidents := sliceValue(report["incidents"])
+	anomalies := sliceValue(report["anomalies"])
+	exposures := sliceValue(report["exposures"])
+	externalRows := sliceValue(report["external_access"])
+	assetRisks := sliceValue(report["asset_risks"])
+
+	if len(incidents) > 0 {
+		incident := mapValue(incidents[0])
+		subject := stringValue(incident["subject"])
+		suggestions = append(suggestions, governanceSuggestion(
+			"rule", firstString(stringValue(incident["severity"]), "warning"),
+			"沉淀首要事件检测规则", subject,
+			"首要事件反复出现时，建议把当前事件对象沉淀为检测规则草案，便于后续自动识别。",
+			confidenceByContext(len(incidents)),
+			[]string{
+				"事件摘要：" + firstString(stringValue(incident["summary"]), "-"),
+				"事件级别：" + aiSeverityText(firstString(stringValue(incident["severity"]), "warning")),
+				"事件流量：" + formatAIBytes(uint64Value(incident["bytes"])),
+			},
+			[]string{"确认事件是否为真实风险。", "如确认有效，将草案填入规则中心后再人工保存。"},
+			proposedRule("AI 推荐：首要事件 "+shortTarget(subject), "事件检测", ruleMetricForIncident(incident), subject, thresholdForIncident(incident), firstString(stringValue(incident["severity"]), "warning"), firstString(stringValue(incident["recommended_action"]), "核对事件对象、关联会话和资产归属。")),
+			nil,
+		))
+	}
+	if len(externalRows) > 0 {
+		row := mapValue(externalRows[0])
+		target := firstString(stringValue(row["public_ip"]), "-") + " -> " + firstString(stringValue(row["internal_ip"]), "-") + ":" + firstString(stringValue(row["port"]), "-")
+		if !isSilencedSubject(target, alerts.SilencedSubjects) {
+			suggestions = append(suggestions, governanceSuggestion(
+				"whitelist_review", riskSeverity(stringValue(row["risk"])),
+				"公网访问白名单复核", target,
+				"该公网访问对象有稳定业务可能，但仍需管理员确认来源、端口和资产归属后再决定是否加入白名单。",
+				confidenceByContext(int(int64Value(row["session_count"]))),
+				[]string{
+					"公网来源：" + firstString(stringValue(row["public_ip"]), "-"),
+					"内部资产：" + firstString(stringValue(row["internal_ip"]), "-"),
+					"服务端口：" + firstString(stringValue(row["port"]), "-") + " / " + firstString(stringValue(row["service"]), "-"),
+					"会话数量：" + strconv.FormatInt(int64Value(row["session_count"]), 10),
+				},
+				[]string{"确认访问方是否可信。", "确认服务用途和防火墙策略。", "只有长期稳定且低风险的业务流量才建议加入白名单。"},
+				nil,
+				map[string]any{"subject": target, "reason": "AI 推荐复核公网访问白名单", "scope": "external_access"},
+			))
+		}
+	}
+	if len(exposures) > 0 {
+		row := mapValue(exposures[0])
+		target := firstString(stringValue(row["ip"]), "-") + ":" + firstString(stringValue(row["port"]), "-")
+		suggestions = append(suggestions, governanceSuggestion(
+			"rule", riskSeverity(stringValue(row["risk"])),
+			"暴露服务客户端数规则", target,
+			"该服务暴露面可用客户端数量做检测条件，适合识别来源扩散或暴露范围扩大。",
+			confidenceByContext(int(int64Value(row["client_count"]))),
+			[]string{
+				"暴露服务：" + target + " / " + firstString(stringValue(row["service"]), "-"),
+				"客户端数量：" + strconv.FormatInt(int64Value(row["client_count"]), 10),
+				"风险等级：" + assetRiskLevelText(stringValue(row["risk"])),
+			},
+			[]string{"确认端口是否应对公网或跨网段开放。", "如来源扩散不符合预期，将草案保存为检测规则。"},
+			proposedRule("AI 推荐：暴露服务 "+target, "服务暴露", "exposed_clients", target, maxFloat(float64(int64Value(row["client_count"])), 5), riskSeverity(stringValue(row["risk"])), "核对服务暴露来源、客户端数量和访问策略。"),
+			nil,
+		))
+	}
+	if len(anomalies) > 0 {
+		row := mapValue(anomalies[0])
+		dimension := stringValue(row["dimension"])
+		target := firstString(stringValue(row["key"]), "-")
+		suggestions = append(suggestions, governanceSuggestion(
+			"rule", firstString(stringValue(row["severity"]), "warning"),
+			"异常波动检测规则", target,
+			"该对象偏离历史窗口，建议用当前维度和流量规模生成检测规则草案。",
+			confidenceByContext(len(anomalies)),
+			[]string{
+				"异常摘要：" + firstString(stringValue(row["summary"]), "-"),
+				"当前流量：" + formatAIBytes(uint64Value(row["current_bytes"])),
+				"变化比例：" + fmt.Sprintf("%.2f", float64Value(row["change_ratio"])),
+			},
+			[]string{"确认是否处于变更窗口。", "对非计划新增或突增对象沉淀检测规则。"},
+			proposedRule("AI 推荐：异常波动 "+shortTarget(target), "行为基线", ruleMetricForDimension(dimension), target, maxFloat(float64(uint64Value(row["current_bytes"]))*0.8, 1), firstString(stringValue(row["severity"]), "warning"), "确认异常对象是否符合业务预期，必要时下钻会话和资产画像。"),
+			nil,
+		))
+	}
+	if len(assetRisks) > 0 {
+		row := mapValue(assetRisks[0])
+		ip := firstString(stringValue(row["ip"]), "-")
+		suggestions = append(suggestions, governanceSuggestion(
+			"asset_governance", firstString(stringValue(row["risk_level"]), "warning"),
+			"补齐高风险资产归属", ip,
+			"高风险资产需要优先补齐负责人、业务系统、环境和重要性，后续事件才能稳定分派和复盘。",
+			confidenceByContext(int(int64Value(row["open_incidents"])+int64Value(row["exposed_services"])+int64Value(row["external_peers"]))),
+			[]string{
+				"风险评分：" + strconv.FormatInt(int64Value(row["risk_score"]), 10),
+				"开放事件：" + strconv.FormatInt(int64Value(row["open_incidents"]), 10),
+				"暴露服务：" + strconv.FormatInt(int64Value(row["exposed_services"]), 10),
+				"主要原因：" + firstString(stringValue(row["top_finding"]), "-"),
+			},
+			[]string{"进入资产风险页核对该资产。", "补齐负责人、业务标签、环境和重要性。", "处理该资产关联开放事件。"},
+			nil,
+			nil,
+		))
+	}
+	if len(suggestions) > limit {
+		suggestions = suggestions[:limit]
+	}
+	return map[string]any{
+		"enabled":      options.Enabled,
+		"mode":         options.Mode,
+		"provider":     options.Provider,
+		"model":        options.Model,
+		"minutes":      minutes,
+		"summary":      fmt.Sprintf("基于最近 %d 分钟数据生成 %d 条治理建议，所有建议均需管理员人工确认后执行。", minutes, len(suggestions)),
+		"suggestions":  suggestions,
+		"generated_at": time.Now().Unix(),
+	}
+}
+
+func governanceSuggestion(kind, severity, title, target, summary string, confidence float64, evidence, actions []string, rule, silence map[string]any) map[string]any {
+	idParts := []string{"ai", kind, severity, target}
+	item := map[string]any{
+		"id":         strings.ToLower(strings.ReplaceAll(strings.Join(idParts, ":"), " ", "-")),
+		"type":       kind,
+		"severity":   firstString(severity, "info"),
+		"title":      title,
+		"target":     target,
+		"summary":    summary,
+		"confidence": confidence,
+		"evidence":   evidence,
+		"actions":    actions,
+	}
+	if rule != nil {
+		item["proposed_rule"] = rule
+	}
+	if silence != nil {
+		item["proposed_silence"] = silence
+	}
+	return item
+}
+
+func proposedRule(name, category, metric, match string, threshold float64, severity, action string) map[string]any {
+	return map[string]any{
+		"id":                 "",
+		"name":               name,
+		"category":           category,
+		"metric":             metric,
+		"match":              match,
+		"operator":           "gte",
+		"threshold":          math.Ceil(threshold),
+		"severity":           firstString(riskSeverity(severity), "warning"),
+		"enabled":            true,
+		"description":        "由 AI 治理建议生成的规则草案，保存前请人工确认阈值、匹配对象和级别。",
+		"recommended_action": action,
+		"updated_at":         time.Now().Unix(),
+	}
+}
+
+func ruleMetricForIncident(incident map[string]any) string {
+	kind := strings.ToLower(stringValue(incident["kind"]))
+	subject := strings.ToLower(stringValue(incident["subject"]))
+	switch {
+	case strings.Contains(kind, "external") || strings.Contains(subject, "->"):
+		return "external_sessions"
+	case strings.Contains(subject, "dst_port:"):
+		return "dst_port_bytes"
+	case strings.Contains(subject, "service:"):
+		return "service_bytes"
+	default:
+		return "flow_bytes"
+	}
+}
+
+func thresholdForIncident(incident map[string]any) float64 {
+	if value := float64Value(incident["value"]); value > 0 {
+		return value
+	}
+	if ruleMetricForIncident(incident) == "external_sessions" {
+		return 1
+	}
+	if packets := uint64Value(incident["packets"]); packets > 0 {
+		return float64(packets)
+	}
+	if bytes := uint64Value(incident["bytes"]); bytes > 0 {
+		return float64(bytes) * 0.8
+	}
+	return 1
+}
+
+func ruleMetricForDimension(dimension string) string {
+	switch strings.ToLower(strings.TrimSpace(dimension)) {
+	case "src_ip", "source_ip", "ip":
+		return "src_ip_bytes"
+	case "dst_ip":
+		return "dst_ip_bytes"
+	case "dst_port", "port":
+		return "dst_port_bytes"
+	case "service":
+		return "service_bytes"
+	case "flow":
+		return "flow_bytes"
+	default:
+		return "flow_bytes"
+	}
+}
+
+func riskSeverity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical", "严重":
+		return "critical"
+	case "high", "warning", "medium", "警告":
+		return "warning"
+	default:
+		return "info"
+	}
+}
+
+func shortTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if len(target) <= 28 {
+		return target
+	}
+	return target[:28]
 }
 
 func (s *Server) collectSecurityIncidents(ctx context.Context, minutes, limit int) ([]map[string]any, error) {

@@ -39,6 +39,8 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AIGovernanceSuggestions,
+  type AIGovernanceSuggestion,
   type AIIncidentInvestigation,
   type AIQueryResult,
   type AISummary,
@@ -395,6 +397,16 @@ const emptyAIIncidentInvestigation = (): AIIncidentInvestigation => ({
   timeline: [],
   generated_at: 0
 });
+const emptyAIGovernanceSuggestions = (): AIGovernanceSuggestions => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  minutes: 15,
+  summary: '等待流量、事件和资产上下文加载后生成治理建议。',
+  suggestions: [],
+  generated_at: 0
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -416,6 +428,7 @@ const assetAISummary = ref<AISummary>(emptyAISummary('asset'));
 const reportAISummary = ref<AISummary>(emptyAISummary('report'));
 const aiQuestion = ref('最近 30 分钟哪个公网 IP 访问最多？');
 const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
+const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
@@ -716,6 +729,7 @@ const refresh = async () => {
       trafficAnomaliesRes,
       reportRes,
       reportAIRes,
+      governanceRes,
       ruleFindingRes,
       auditRes,
       configVersionRes,
@@ -765,6 +779,7 @@ const refresh = async () => {
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
       api.aiReportSummary(minutes, 12),
+      api.aiGovernanceSuggestions(minutes, 8),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
@@ -815,6 +830,7 @@ const refresh = async () => {
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
     reportAISummary.value = reportAIRes.data;
+    aiGovernance.value = governanceRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -856,6 +872,7 @@ const refresh = async () => {
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
       reportAIRes.degraded ||
+      governanceRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
       configVersionRes.degraded;
@@ -2047,6 +2064,42 @@ const refresh = async () => {
       actions: ['先处理严重资产和开放事件。', '对高风险服务补充资产归属和访问策略。', '把本摘要作为巡检报告草案。'],
       generated_at: now
     };
+    aiGovernance.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      minutes: selectedMinutes.value,
+      summary: '基于样例公网访问、暴露服务和高风险资产生成治理建议，所有动作都需要管理员确认后执行。',
+      suggestions: [
+        {
+          id: 'demo-rule-external',
+          type: 'rule',
+          severity: 'critical',
+          title: '沉淀公网会话检测规则',
+          target: '211.93.22.130 -> 10.2.0.12:8081',
+          summary: '公网访问会话突增，建议生成规则草案并人工确认阈值。',
+          confidence: 0.74,
+          evidence: ['公网来源：211.93.22.130', '内部资产：10.2.0.12', '服务端口：8081 / HTTP Alternate'],
+          actions: ['确认访问来源是否可信。', '保存前复核阈值和匹配对象。'],
+          proposed_rule: {
+            id: '',
+            name: 'AI 推荐：公网会话突增',
+            category: '公网访问',
+            metric: 'external_sessions',
+            match: '211.93.22.130 -> 10.2.0.12:8081',
+            operator: 'gte',
+            threshold: 40,
+            severity: 'critical',
+            enabled: true,
+            description: '由 AI 治理建议生成的规则草案，保存前请人工确认。',
+            recommended_action: '核对公网来源、服务端口和防火墙策略。',
+            updated_at: now
+          }
+        }
+      ],
+      generated_at: now
+    };
     systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
     degraded.value = true;
   } finally {
@@ -3064,6 +3117,18 @@ const newRule = () => {
   };
 };
 
+const useGovernanceRule = (suggestion: AIGovernanceSuggestion) => {
+  if (!canWrite.value || !suggestion.proposed_rule) return;
+  ruleEditor.value = { ...suggestion.proposed_rule, id: '' };
+  currentView.value = 'rules';
+};
+
+const reviewGovernanceSilence = (suggestion: AIGovernanceSuggestion) => {
+  if (!canWrite.value || !suggestion.proposed_silence?.subject) return;
+  whitelistSubject.value = suggestion.proposed_silence.subject;
+  currentView.value = 'alerts';
+};
+
 const editRule = (rule: DetectionRule) => {
   if (!canWrite.value) return;
   ruleEditor.value = { ...rule };
@@ -3870,6 +3935,45 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </tr>
             </tbody>
           </table>
+        </section>
+
+        <section class="table-panel ai-governance-panel">
+          <div class="panel-heading">
+            <h2>AI 治理建议</h2>
+            <span>{{ aiGovernance.suggestions.length.toLocaleString() }} 条 / {{ aiGovernance.mode }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ aiGovernance.summary }}</p>
+          <div v-if="aiGovernance.suggestions.length === 0" class="empty-state">暂无治理建议</div>
+          <div v-else class="governance-list">
+            <article v-for="item in aiGovernance.suggestions" :key="item.id" class="governance-card">
+              <div class="governance-card-header">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ item.target }}</span>
+                </div>
+                <b class="severity-pill" :class="item.severity">{{ severityText(item.severity) }} / {{ aiConfidenceText(item.confidence) }}</b>
+              </div>
+              <p>{{ item.summary }}</p>
+              <div class="ai-summary-grid">
+                <div>
+                  <span>证据</span>
+                  <ul>
+                    <li v-for="evidence in item.evidence.slice(0, 4)" :key="`governance-evidence-${item.id}-${evidence}`">{{ evidence }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <span>动作</span>
+                  <ul>
+                    <li v-for="action in item.actions.slice(0, 4)" :key="`governance-action-${item.id}-${action}`">{{ action }}</li>
+                  </ul>
+                </div>
+              </div>
+              <div class="ai-workbench-actions">
+                <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canWrite" @click="useGovernanceRule(item)">填入规则草案</button>
+                <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canWrite" @click="reviewGovernanceSilence(item)">复核白名单</button>
+              </div>
+            </article>
+          </div>
         </section>
 
         <section class="command-grid">
