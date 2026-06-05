@@ -91,6 +91,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/rules", s.detectionRules)
 	mux.HandleFunc("/api/v1/security/rule-findings", s.detectionRuleFindings)
 	mux.HandleFunc("/api/v1/reports/overview", s.reportOverview)
+	mux.HandleFunc("/api/v1/ai/incident-summary", s.aiIncidentSummary)
+	mux.HandleFunc("/api/v1/ai/asset-summary", s.aiAssetSummary)
+	mux.HandleFunc("/api/v1/ai/report-summary", s.aiReportSummary)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -557,6 +560,75 @@ func (s *Server) detectionRuleFindings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) reportOverview(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.ReportOverview(r.Context(), queryMinutes(r), queryLimit(r, 10, 50))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) aiIncidentSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 12, 50))
+	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	incidents, incidentErr := s.store.SecurityIncidents(r.Context(), minutes, max(limit, 20))
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	ruleRows, ruleErr := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, minutes, max(limit, 20))
+	for _, row := range ruleRows {
+		incidents = append(incidents, ruleFindingIncident(row))
+	}
+	incidents = filterSilencedMaps(incidents, runtime.Alerts.SilencedSubjects, "subject")
+	sortIncidentRows(incidents)
+	incident := findAIIncident(incidents, id, subject, kind)
+	if subject == "" {
+		subject = stringValue(incident["subject"])
+	}
+	if kind == "" {
+		kind = stringValue(incident["kind"])
+	}
+	if subject == "" {
+		http.Error(w, "subject or id is required", http.StatusBadRequest)
+		return
+	}
+	contextData, contextErr := s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+	writeJSON(w, map[string]any{
+		"data":     buildAIIncidentSummary(s.aiOptions(), incident, contextData),
+		"degraded": incidentErr != nil || ruleErr != nil || contextErr != nil,
+	})
+}
+
+func (s *Server) aiAssetSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	if ip == "" {
+		http.Error(w, "ip is required", http.StatusBadRequest)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 20, 200))
+	risks, riskErr := s.store.AssetRiskPosture(r.Context(), minutes, limit)
+	profile, profileErr := s.store.IPProfile(r.Context(), ip, minutes)
+	writeJSON(w, map[string]any{
+		"data":     buildAIAssetSummary(s.aiOptions(), ip, findMapByString(risks, "ip", ip), profile),
+		"degraded": riskErr != nil || profileErr != nil,
+	})
+}
+
+func (s *Server) aiReportSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	report, err := s.store.ReportOverview(r.Context(), minutes, s.aiContextLimit(queryLimit(r, 10, 50)))
+	writeJSON(w, map[string]any{
+		"data":     buildAIReportSummary(s.aiOptions(), report),
+		"degraded": err != nil,
+	})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
@@ -1288,6 +1360,304 @@ func configValueText(value any) string {
 	return string(data)
 }
 
+type aiSummaryOptions struct {
+	Enabled  bool
+	Mode     string
+	Provider string
+	Model    string
+}
+
+func (s *Server) aiOptions() aiSummaryOptions {
+	mode := strings.TrimSpace(strings.ToLower(s.config.AIMode))
+	if mode == "" {
+		mode = "local_mock"
+	}
+	provider := strings.TrimSpace(s.config.AIProvider)
+	if provider == "" {
+		provider = mode
+	}
+	model := strings.TrimSpace(s.config.AIModel)
+	if model == "" {
+		model = "nexaflow-local-summary"
+	}
+	return aiSummaryOptions{
+		Enabled:  mode != "disabled",
+		Mode:     mode,
+		Provider: provider,
+		Model:    model,
+	}
+}
+
+func (s *Server) aiContextLimit(limit int) int {
+	if s.config.AIMaxContextRows > 0 && limit > s.config.AIMaxContextRows {
+		return s.config.AIMaxContextRows
+	}
+	return limit
+}
+
+func buildAIIncidentSummary(options aiSummaryOptions, incident, contextData map[string]any) map[string]any {
+	subject := firstString(stringValue(incident["subject"]), stringValue(contextData["subject"]), "未知事件对象")
+	kind := firstString(stringValue(incident["kind"]), stringValue(contextData["kind"]), "unknown")
+	severity := firstString(stringValue(incident["severity"]), maxSeverityFromRows(sliceValue(contextData["insights"])), "info")
+	sessions := sliceValue(contextData["sessions"])
+	insights := sliceValue(contextData["insights"])
+	anomalies := sliceValue(contextData["anomalies"])
+	relations := mapValue(contextData["relations"])
+	relationSummary := mapValue(relations["summary"])
+	bytes := maxUint(uint64Value(incident["bytes"]), uint64Value(relationSummary["bytes"]))
+	findings := []string{
+		fmt.Sprintf("事件对象 %s 当前级别为 %s，关联流量约 %s。", subject, aiSeverityText(severity), formatAIBytes(bytes)),
+		fmt.Sprintf("上下文包含 %d 条关联会话、%d 条风险线索、%d 条异常波动。", len(sessions), len(insights), len(anomalies)),
+	}
+	if len(sessions) > 0 {
+		top := mapValue(sessions[0])
+		findings = append(findings, "首要关联会话为 "+firstString(stringValue(top["key"]), "-")+"，流量 "+formatAIBytes(uint64Value(top["bytes"]))+"。")
+	}
+	if len(anomalies) > 0 {
+		top := mapValue(anomalies[0])
+		findings = append(findings, "最近异常变化："+firstString(stringValue(top["summary"]), firstString(stringValue(top["key"]), "未知异常"))+"。")
+	}
+	evidence := []string{
+		"事件类型：" + aiIncidentKindText(kind),
+		"关联会话数：" + strconv.Itoa(len(sessions)),
+		"关联风险线索：" + strconv.Itoa(len(insights)),
+		"关联异常波动：" + strconv.Itoa(len(anomalies)),
+	}
+	actions := []string{
+		"优先查看事件上下文中的关联会话和关联端口，确认是否为计划内业务流量。",
+		"核对事件对象的资产负责人、业务标签和公网暴露策略。",
+	}
+	if severity == "critical" {
+		actions = append([]string{"先确认是否需要临时收敛访问来源或提高监控级别。"}, actions...)
+	}
+	if !options.Enabled {
+		return disabledAISummary(options, "incident", subject)
+	}
+	return aiSummary(options, "incident", subject, "AI 事件摘要", fmt.Sprintf("%s 触发 %s，系统已关联会话、风险线索和异常波动生成调查结论草案。", subject, aiIncidentKindText(kind)), confidenceByContext(len(sessions)+len(insights)+len(anomalies)), findings, evidence, actions)
+}
+
+func buildAIAssetSummary(options aiSummaryOptions, ip string, risk, profile map[string]any) map[string]any {
+	name := stringValue(risk["name"])
+	if name == "" {
+		name = ip
+	}
+	riskLevel := firstString(stringValue(risk["risk_level"]), "unknown")
+	externalPeers := int64Value(risk["external_peers"])
+	exposedServices := int64Value(risk["exposed_services"])
+	openIncidents := int64Value(risk["open_incidents"])
+	topPairs := sliceValue(profile["top_pairs"])
+	topFlows := sliceValue(profile["top_flows"])
+	findings := []string{
+		fmt.Sprintf("资产 %s 当前风险等级为 %s，风险评分 %d。", name, assetRiskLevelText(riskLevel), int64Value(risk["risk_score"])),
+		fmt.Sprintf("公网对端 %d 个，暴露服务 %d 个，开放事件 %d 个。", externalPeers, exposedServices, openIncidents),
+	}
+	if finding := stringValue(risk["top_finding"]); finding != "" {
+		findings = append(findings, "主要风险原因："+finding+"。")
+	}
+	if len(topFlows) > 0 {
+		top := mapValue(topFlows[0])
+		findings = append(findings, "首要会话："+firstString(stringValue(top["key"]), "-")+"，流量 "+formatAIBytes(uint64Value(top["bytes"]))+"。")
+	}
+	evidence := []string{
+		"总流量：" + formatAIBytes(uint64Value(risk["total_bytes"])),
+		"公网流量：" + formatAIBytes(uint64Value(risk["external_bytes"])),
+		"关联主机对：" + strconv.Itoa(len(topPairs)),
+		"关联会话：" + strconv.Itoa(len(topFlows)),
+	}
+	actions := []string{
+		"补齐资产负责人、业务系统、环境和重要性标签。",
+		"复核公网访问来源、暴露端口和白名单策略。",
+	}
+	if openIncidents > 0 {
+		actions = append([]string{"先处理该资产关联的开放事件，再评估是否需要调整检测规则。"}, actions...)
+	}
+	if !options.Enabled {
+		return disabledAISummary(options, "asset", ip)
+	}
+	return aiSummary(options, "asset", ip, "AI 资产摘要", fmt.Sprintf("%s 的风险主要来自公网暴露、事件关联和历史行为画像，建议按资产归属和暴露面优先处置。", name), confidenceByContext(len(topPairs)+len(topFlows)+int(openIncidents)), findings, evidence, actions)
+}
+
+func buildAIReportSummary(options aiSummaryOptions, report map[string]any) map[string]any {
+	summary := mapValue(report["summary"])
+	assetRisks := sliceValue(report["asset_risks"])
+	incidents := sliceValue(report["incidents"])
+	anomalies := sliceValue(report["anomalies"])
+	exposures := sliceValue(report["exposures"])
+	minutes := int64Value(summary["minutes"])
+	riskSentence := "当前窗口未发现明显严重风险。"
+	if int64Value(summary["critical_assets"]) > 0 || int64Value(summary["critical_incidents"]) > 0 {
+		riskSentence = "当前窗口存在严重资产或严重事件，需要优先处置。"
+	} else if int64Value(summary["high_risk_services"]) > 0 || int64Value(summary["critical_anomalies"]) > 0 {
+		riskSentence = "当前窗口存在高风险服务或严重异常，建议继续下钻确认。"
+	}
+	findings := []string{
+		fmt.Sprintf("观察范围 %d 分钟，总流量 %s，峰值 %.2f Mbps。", minutes, formatAIBytes(uint64Value(summary["bytes"])), float64Value(summary["peak_mbps"])),
+		fmt.Sprintf("资产 %d 个，其中严重资产 %d 个；开放事件 %d 个，其中严重事件 %d 个。", int64Value(summary["asset_count"]), int64Value(summary["critical_assets"]), int64Value(summary["open_incidents"]), int64Value(summary["critical_incidents"])),
+		fmt.Sprintf("异常 %d 个，暴露服务 %d 个，高风险服务 %d 个。", int64Value(summary["anomaly_count"]), int64Value(summary["exposed_services"]), int64Value(summary["high_risk_services"])),
+	}
+	if len(assetRisks) > 0 {
+		top := mapValue(assetRisks[0])
+		findings = append(findings, "最高风险资产："+firstString(stringValue(top["ip"]), "-")+"，原因："+firstString(stringValue(top["top_finding"]), "无显著风险")+"。")
+	}
+	evidence := []string{
+		"资产风险样本：" + strconv.Itoa(len(assetRisks)),
+		"事件样本：" + strconv.Itoa(len(incidents)),
+		"异常样本：" + strconv.Itoa(len(anomalies)),
+		"暴露服务样本：" + strconv.Itoa(len(exposures)),
+	}
+	actions := []string{
+		"先处理严重资产和开放事件，再复核异常波动是否与业务变更相关。",
+		"对高风险服务补充资产归属和访问策略，必要时生成规则或白名单建议。",
+		"把本摘要作为巡检报告草案，结合事件备注补充人工结论。",
+	}
+	if !options.Enabled {
+		return disabledAISummary(options, "report", "overview")
+	}
+	return aiSummary(options, "report", "overview", "AI 巡检摘要", riskSentence, confidenceByContext(len(assetRisks)+len(incidents)+len(anomalies)+len(exposures)), findings, evidence, actions)
+}
+
+func aiSummary(options aiSummaryOptions, kind, subject, title, summary string, confidence float64, findings, evidence, actions []string) map[string]any {
+	return map[string]any{
+		"enabled":      options.Enabled,
+		"mode":         options.Mode,
+		"provider":     options.Provider,
+		"model":        options.Model,
+		"kind":         kind,
+		"subject":      subject,
+		"title":        title,
+		"summary":      summary,
+		"confidence":   confidence,
+		"findings":     findings,
+		"evidence":     evidence,
+		"actions":      actions,
+		"generated_at": time.Now().Unix(),
+	}
+}
+
+func disabledAISummary(options aiSummaryOptions, kind, subject string) map[string]any {
+	return aiSummary(options, kind, subject, "AI 摘要已关闭", "当前 `NEXAFLOW_AI_MODE=disabled`，系统只返回基础上下文，不生成 AI 摘要。", 0, []string{}, []string{}, []string{"设置 NEXAFLOW_AI_MODE=local_mock 可启用本地摘要，或配置外部模型网关。"})
+}
+
+func confidenceByContext(count int) float64 {
+	switch {
+	case count >= 8:
+		return 0.86
+	case count >= 4:
+		return 0.74
+	case count >= 1:
+		return 0.62
+	default:
+		return 0.45
+	}
+}
+
+func findAIIncident(rows []map[string]any, id, subject, kind string) map[string]any {
+	for _, row := range rows {
+		if id != "" && stringValue(row["id"]) == id {
+			return row
+		}
+		if subject != "" && stringValue(row["subject"]) == subject && (kind == "" || stringValue(row["kind"]) == kind) {
+			return row
+		}
+	}
+	return map[string]any{}
+}
+
+func findMapByString(rows []map[string]any, field, value string) map[string]any {
+	for _, row := range rows {
+		if stringValue(row[field]) == value {
+			return row
+		}
+	}
+	return map[string]any{}
+}
+
+func maxSeverityFromRows(rows []any) string {
+	severity := "info"
+	for _, row := range rows {
+		next := stringValue(mapValue(row)["severity"])
+		if severityWeight(next) > severityWeight(severity) {
+			severity = next
+		}
+	}
+	return severity
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func maxUint(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func formatAIBytes(value uint64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	amount := float64(value)
+	unit := units[0]
+	for i := 1; i < len(units) && amount >= 1024; i++ {
+		amount = amount / 1024
+		unit = units[i]
+	}
+	if unit == "B" {
+		return strconv.FormatUint(value, 10) + " B"
+	}
+	return fmt.Sprintf("%.2f %s", amount, unit)
+}
+
+func aiSeverityText(severity string) string {
+	switch severity {
+	case "critical":
+		return "严重"
+	case "warning":
+		return "警告"
+	case "info":
+		return "提示"
+	default:
+		return "未知"
+	}
+}
+
+func aiIncidentKindText(kind string) string {
+	switch kind {
+	case "heavy_flow":
+		return "重流量会话"
+	case "source_fanout":
+		return "源主机扇出"
+	case "external_session_burst":
+		return "公网会话突增"
+	case "threshold_alert":
+		return "阈值告警"
+	case "collector_offline":
+		return "采集离线"
+	case "custom_rule":
+		return "自定义规则命中"
+	default:
+		return kind
+	}
+}
+
+func assetRiskLevelText(level string) string {
+	switch level {
+	case "critical":
+		return "严重"
+	case "warning":
+		return "关注"
+	case "healthy":
+		return "健康"
+	default:
+		return "未知"
+	}
+}
+
 func captureDiagnosticReport(capture, quality map[string]any, minutes int) map[string]any {
 	captureSummary := mapValue(capture["summary"])
 	qualitySummary := mapValue(quality["summary"])
@@ -1536,6 +1906,13 @@ func sliceValue(v any) []any {
 	if items, ok := v.([]any); ok {
 		return items
 	}
+	if rows, ok := v.([]string); ok {
+		items := make([]any, 0, len(rows))
+		for _, row := range rows {
+			items = append(items, row)
+		}
+		return items
+	}
 	if rows, ok := v.([]map[string]any); ok {
 		items := make([]any, 0, len(rows))
 		for _, row := range rows {
@@ -1772,6 +2149,13 @@ func float64Value(v any) float64 {
 	default:
 		return 0
 	}
+}
+
+func boolValue(v any) bool {
+	if value, ok := v.(bool); ok {
+		return value
+	}
+	return false
 }
 
 func uint64Value(v any) uint64 {

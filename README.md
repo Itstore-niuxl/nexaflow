@@ -59,6 +59,8 @@ NEXAFLOW_AUTH_SECRET='<random-session-secret>'
 
 `NEXAFLOW_AUTH_PASSWORD` grants administrator access. `NEXAFLOW_AUTH_READONLY_PASSWORD` grants observer access: dashboards and queries are available, but write operations such as collector switching, rule changes, alert handling, whitelist updates, asset metadata edits, and incident notes are rejected.
 
+AI summaries are available in local deterministic mode by default. Set `NEXAFLOW_AI_MODE=disabled` to hide AI summaries, or configure a provider later through `NEXAFLOW_AI_PROVIDER`, `NEXAFLOW_AI_MODEL`, `NEXAFLOW_AI_BASE_URL`, and `NEXAFLOW_AI_API_KEY`.
+
 Configuration changes are recorded in the `配置版本` page. Administrators can restore a previous runtime configuration snapshot from that page; restore actions are also audited and versioned.
 
 The web console can switch the collector mode and interface from the `采集器` page. The same operation is available from the command line:

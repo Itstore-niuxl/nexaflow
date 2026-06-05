@@ -190,3 +190,57 @@ func TestCaptureDiagnosticReport(t *testing.T) {
 		t.Fatalf("expected recommendations for abnormal layers, got %#v", report["recommendations"])
 	}
 }
+
+func TestBuildAIIncidentSummary(t *testing.T) {
+	summary := buildAIIncidentSummary(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{"subject": "10.2.0.12:8081", "kind": "external_session_burst", "severity": "critical", "bytes": uint64(10485760)},
+		map[string]any{
+			"subject": "10.2.0.12:8081",
+			"sessions": []any{
+				map[string]any{"key": "211.93.22.130 -> 10.2.0.12 / 8081/TCP", "bytes": uint64(7340032), "packets": uint64(6800)},
+			},
+			"insights": []any{
+				map[string]any{"severity": "critical", "summary": "公网会话突增"},
+			},
+			"anomalies": []any{
+				map[string]any{"summary": "新增公网访问流量"},
+			},
+			"relations": map[string]any{
+				"summary": map[string]any{"bytes": uint64(10485760)},
+			},
+		},
+	)
+
+	if !boolValue(summary["enabled"]) {
+		t.Fatal("expected AI summary to be enabled")
+	}
+	if stringValue(summary["kind"]) != "incident" {
+		t.Fatalf("expected incident summary, got %#v", summary)
+	}
+	if len(sliceValue(summary["findings"])) < 3 {
+		t.Fatalf("expected findings with context, got %#v", summary["findings"])
+	}
+	if float64Value(summary["confidence"]) <= 0 {
+		t.Fatalf("expected positive confidence, got %#v", summary["confidence"])
+	}
+}
+
+func TestBuildAIReportSummaryDisabled(t *testing.T) {
+	summary := buildAIReportSummary(
+		aiSummaryOptions{Enabled: false, Mode: "disabled", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{
+			"summary": map[string]any{"minutes": 15, "bytes": uint64(1024)},
+		},
+	)
+
+	if boolValue(summary["enabled"]) {
+		t.Fatal("expected disabled AI summary")
+	}
+	if stringValue(summary["title"]) != "AI 摘要已关闭" {
+		t.Fatalf("expected disabled title, got %#v", summary["title"])
+	}
+	if len(sliceValue(summary["actions"])) == 0 {
+		t.Fatalf("expected disabled mode action, got %#v", summary["actions"])
+	}
+}

@@ -31,6 +31,12 @@ type Config struct {
 	AuthPassword         string
 	AuthReadOnlyPassword string
 	AuthSecret           string
+	AIMode               string
+	AIProvider           string
+	AIModel              string
+	AIBaseURL            string
+	AIAPIKey             string
+	AIMaxContextRows     int
 }
 
 type CaptureRuntime struct {
@@ -75,6 +81,12 @@ func Load() Config {
 		AuthPassword:         env("NEXAFLOW_AUTH_PASSWORD", ""),
 		AuthReadOnlyPassword: env("NEXAFLOW_AUTH_READONLY_PASSWORD", ""),
 		AuthSecret:           env("NEXAFLOW_AUTH_SECRET", ""),
+		AIMode:               env("NEXAFLOW_AI_MODE", "local_mock"),
+		AIProvider:           env("NEXAFLOW_AI_PROVIDER", "local_mock"),
+		AIModel:              env("NEXAFLOW_AI_MODEL", "nexaflow-local-summary"),
+		AIBaseURL:            env("NEXAFLOW_AI_BASE_URL", ""),
+		AIAPIKey:             env("NEXAFLOW_AI_API_KEY", ""),
+		AIMaxContextRows:     envInt("NEXAFLOW_AI_MAX_CONTEXT_ROWS", 12),
 	}
 
 	flag.StringVar(&cfg.APIAddr, "api-addr", cfg.APIAddr, "API listen address")
@@ -92,6 +104,12 @@ func Load() Config {
 	flag.StringVar(&cfg.AuthPassword, "auth-password", cfg.AuthPassword, "optional console login password")
 	flag.StringVar(&cfg.AuthReadOnlyPassword, "auth-readonly-password", cfg.AuthReadOnlyPassword, "optional read-only console login password")
 	flag.StringVar(&cfg.AuthSecret, "auth-secret", cfg.AuthSecret, "optional session signing secret")
+	flag.StringVar(&cfg.AIMode, "ai-mode", cfg.AIMode, "AI mode: disabled, local_mock, openai")
+	flag.StringVar(&cfg.AIProvider, "ai-provider", cfg.AIProvider, "AI provider name")
+	flag.StringVar(&cfg.AIModel, "ai-model", cfg.AIModel, "AI model name")
+	flag.StringVar(&cfg.AIBaseURL, "ai-base-url", cfg.AIBaseURL, "AI provider base URL")
+	flag.StringVar(&cfg.AIAPIKey, "ai-api-key", cfg.AIAPIKey, "AI provider API key")
+	flag.IntVar(&cfg.AIMaxContextRows, "ai-max-context-rows", cfg.AIMaxContextRows, "maximum rows included in AI context")
 	flag.Uint64Var(&cfg.BandwidthMbps, "bandwidth-mbps", cfg.BandwidthMbps, "link bandwidth in Mbps")
 	flag.Float64Var(&cfg.ReplaySpeed, "replay-speed", cfg.ReplaySpeed, "pcap replay speed multiplier")
 	flag.Parse()

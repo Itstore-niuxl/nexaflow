@@ -38,6 +38,7 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AISummary,
   type AuditEvent,
   type AssetMetadata,
   type AssetRiskPosture,
@@ -270,6 +271,21 @@ const emptyReportOverview = (): ReportOverview => ({
   top_services: [],
   recommendations: []
 });
+const emptyAISummary = (kind = 'report', subject = ''): AISummary => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  kind,
+  subject,
+  title: 'AI 摘要生成中',
+  summary: '等待上下文数据加载完成后生成摘要。',
+  confidence: 0,
+  findings: [],
+  evidence: [],
+  actions: [],
+  generated_at: 0
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -282,9 +298,12 @@ const securityIncidents = ref<SecurityIncident[]>([]);
 const incidentContext = ref<SecurityIncidentContext>(emptyIncidentContext());
 const selectedIncident = ref<SecurityIncident | null>(null);
 const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
+const incidentAISummary = ref<AISummary>(emptyAISummary('incident'));
 const incidentNoteText = ref('');
 const savingIncidentNote = ref(false);
 const reportOverview = ref<ReportOverview>(emptyReportOverview());
+const assetAISummary = ref<AISummary>(emptyAISummary('asset'));
+const reportAISummary = ref<AISummary>(emptyAISummary('report'));
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
 const ruleEditor = ref<DetectionRule | null>(null);
@@ -526,6 +545,7 @@ const refresh = async () => {
       trafficChangesRes,
       trafficAnomaliesRes,
       reportRes,
+      reportAIRes,
       ruleFindingRes,
       auditRes,
       configVersionRes
@@ -572,6 +592,7 @@ const refresh = async () => {
       api.trafficChanges(minutes, 30),
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
+      api.aiReportSummary(minutes, 12),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120)
@@ -619,6 +640,7 @@ const refresh = async () => {
     trafficChanges.value = trafficChangesRes.data;
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
+    reportAISummary.value = reportAIRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -657,9 +679,17 @@ const refresh = async () => {
       trafficChangesRes.degraded ||
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
+      reportAIRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
       configVersionRes.degraded;
+    if (assetRisks.value[0]) {
+      const assetAIRes = await api.aiAssetSummary(assetRisks.value[0].ip, minutes, 20);
+      assetAISummary.value = assetAIRes.data;
+      nextDegraded = nextDegraded || assetAIRes.degraded;
+    } else {
+      assetAISummary.value = emptyAISummary('asset');
+    }
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -1489,6 +1519,36 @@ const refresh = async () => {
         { label: '关联会话复盘', description: '查看同一来源的会话数量、目的端口扩散和最近出现时间' }
       ]
     };
+    incidentAISummary.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      kind: 'incident',
+      subject: '211.93.22.130 -> 10.2.0.12',
+      title: 'AI 事件摘要',
+      summary: '公网对端对内部 Web 服务产生会话突增，建议优先核对访问来源、服务用途和防火墙策略。',
+      confidence: 0.74,
+      findings: ['事件对象关联公网会话突增，存在 40 条会话样本。', '关联资产 10.2.0.12 存在公网暴露和高风险服务。', '首要会话流量约 6.68 MB。'],
+      evidence: ['事件类型：公网会话突增', '关联会话数：1', '关联风险线索：1'],
+      actions: ['核对公网来源是否为业务白名单。', '检查 10.2.0.12 的端口暴露策略。', '必要时生成规则或临时收敛访问来源。'],
+      generated_at: now
+    };
+    assetAISummary.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      kind: 'asset',
+      subject: '10.2.0.12',
+      title: 'AI 资产摘要',
+      summary: '示例 Web 服务的风险主要来自公网暴露、开放事件和高风险服务，应先确认负责人和暴露策略。',
+      confidence: 0.74,
+      findings: ['资产风险等级为严重，风险评分 86。', '公网对端 2 个，暴露服务 3 个，开放事件 2 个。', '主要风险原因来自公网会话突增事件。'],
+      evidence: ['总流量：91.55 MB', '公网流量：34.33 MB', '关联事件：2'],
+      actions: ['补齐资产负责人和业务标签。', '复核公网访问来源和白名单策略。', '先处理该资产关联的开放事件。'],
+      generated_at: now
+    };
     trafficAnalysis.value = {
       minutes: selectedMinutes.value,
       baseline: {
@@ -1671,6 +1731,21 @@ const refresh = async () => {
         { level: 'critical', title: '优先处置严重资产', detail: '10.2.0.12 存在公网访问、事件和高风险服务，需要确认暴露策略' },
         { level: 'warning', title: '补齐资产归属', detail: '未归属资产需要补充负责人和业务标签，便于后续事件流转' }
       ]
+    };
+    reportAISummary.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      kind: 'report',
+      subject: 'overview',
+      title: 'AI 巡检摘要',
+      summary: '当前窗口存在严重资产和开放事件，建议优先围绕公网暴露资产完成事件确认和归属补齐。',
+      confidence: 0.86,
+      findings: ['观察范围内存在严重资产 1 个。', '开放事件 2 个，其中严重事件 1 个。', '高风险服务与公网访问同时存在。'],
+      evidence: ['资产风险样本：2', '事件样本：2', '暴露服务样本：2'],
+      actions: ['先处理严重资产和开放事件。', '对高风险服务补充资产归属和访问策略。', '把本摘要作为巡检报告草案。'],
+      generated_at: now
     };
     degraded.value = true;
   } finally {
@@ -2153,6 +2228,8 @@ const dataQualityStatusText = (status: string) => {
   return labels[status] ?? status;
 };
 
+const aiConfidenceText = (confidence: number) => `${(confidence * 100).toFixed(0)}% 置信度`;
+
 const capacityRiskText = (risk: string) => {
   const labels: Record<string, string> = {
     healthy: '健康',
@@ -2444,14 +2521,16 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   selectedIncident.value = incident;
   loadingIncidentContext.value = true;
   try {
-    const [contextResult, timelineResult] = await Promise.all([
+    const [contextResult, timelineResult, aiResult] = await Promise.all([
       api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12),
-      api.incidentTimeline(incident.id, 50)
+      api.incidentTimeline(incident.id, 50),
+      api.aiIncidentSummary(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12)
     ]);
     incidentContext.value = contextResult.data;
     incidentTimeline.value = timelineResult.data;
+    incidentAISummary.value = aiResult.data;
     incidentNoteText.value = '';
-    degraded.value = contextResult.degraded || timelineResult.degraded;
+    degraded.value = contextResult.degraded || timelineResult.degraded || aiResult.degraded;
   } finally {
     loadingIncidentContext.value = false;
   }
@@ -4682,6 +4761,27 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </div>
           </article>
         </section>
+        <section class="ai-summary-card">
+          <div class="panel-heading">
+            <h2>{{ assetAISummary.title }}</h2>
+            <span>{{ assetAISummary.mode }} / {{ aiConfidenceText(assetAISummary.confidence) }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ assetAISummary.summary }}</p>
+          <div class="ai-summary-grid">
+            <div>
+              <span>关键发现</span>
+              <ul>
+                <li v-for="item in assetAISummary.findings" :key="`asset-finding-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+            <div>
+              <span>建议动作</span>
+              <ul>
+                <li v-for="item in assetAISummary.actions" :key="`asset-action-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
+        </section>
         <section class="command-grid">
           <HorizontalBarChart title="资产风险评分" eyebrow="Risk Score" :items="assetRiskScoreItems" unit="count" />
           <HorizontalBarChart title="资产风险等级" eyebrow="Risk Level" :items="assetRiskLevelItems" unit="count" />
@@ -4873,6 +4973,27 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <div>
               <span>关联会话</span>
               <strong>{{ incidentContext.sessions.length.toLocaleString() }}</strong>
+            </div>
+          </div>
+          <div class="ai-summary-card compact">
+            <div class="panel-heading">
+              <h2>{{ incidentAISummary.title }}</h2>
+              <span>{{ incidentAISummary.mode }} / {{ aiConfidenceText(incidentAISummary.confidence) }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ incidentAISummary.summary }}</p>
+            <div class="ai-summary-grid">
+              <div>
+                <span>调查发现</span>
+                <ul>
+                  <li v-for="item in incidentAISummary.findings" :key="`incident-finding-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+              <div>
+                <span>下一步</span>
+                <ul>
+                  <li v-for="item in incidentAISummary.actions" :key="`incident-action-${item}`">{{ item }}</li>
+                </ul>
+              </div>
             </div>
           </div>
           <div class="playbook-list">
@@ -5538,6 +5659,27 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ reportOverview.summary.peak_mbps.toFixed(2) }} Mbps</strong>
             </div>
           </article>
+        </section>
+        <section class="ai-summary-card">
+          <div class="panel-heading">
+            <h2>{{ reportAISummary.title }}</h2>
+            <span>{{ reportAISummary.mode }} / {{ aiConfidenceText(reportAISummary.confidence) }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ reportAISummary.summary }}</p>
+          <div class="ai-summary-grid">
+            <div>
+              <span>巡检发现</span>
+              <ul>
+                <li v-for="item in reportAISummary.findings" :key="`report-finding-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+            <div>
+              <span>处置建议</span>
+              <ul>
+                <li v-for="item in reportAISummary.actions" :key="`report-action-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
         </section>
         <section class="command-grid">
           <HorizontalBarChart title="报表资产风险评分" eyebrow="Asset Risk" :items="reportAssetRiskItems" unit="count" />

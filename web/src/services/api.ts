@@ -648,6 +648,22 @@ export interface ReportOverview {
   recommendations: ReportRecommendation[];
 }
 
+export interface AISummary {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  kind: string;
+  subject: string;
+  title: string;
+  summary: string;
+  confidence: number;
+  findings: string[];
+  evidence: string[];
+  actions: string[];
+  generated_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -946,6 +962,19 @@ export const api = {
   },
   async reportOverview(minutes = 15, limit = 10) {
     return json<{ data: ReportOverview; degraded: boolean }>(`/api/v1/reports/overview?minutes=${minutes}&limit=${limit}`);
+  },
+  async aiIncidentSummary(subject: string, kind = '', id = '', minutes = 15, limit = 12) {
+    return json<{ data: AISummary; degraded: boolean }>(
+      `/api/v1/ai/incident-summary?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async aiAssetSummary(ip: string, minutes = 15, limit = 20) {
+    return json<{ data: AISummary; degraded: boolean }>(
+      `/api/v1/ai/asset-summary?ip=${encodeURIComponent(ip)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async aiReportSummary(minutes = 15, limit = 10) {
+    return json<{ data: AISummary; degraded: boolean }>(`/api/v1/ai/report-summary?minutes=${minutes}&limit=${limit}`);
   },
   async detectionRules() {
     return json<{ data: DetectionRule[] }>('/api/v1/security/rules');
