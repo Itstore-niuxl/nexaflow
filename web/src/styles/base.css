@@ -1472,6 +1472,15 @@ td {
   gap: 14px;
 }
 
+.ai-rule-effectiveness-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.compact-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .governance-list {
   display: grid;
   gap: 12px;
@@ -1536,6 +1545,15 @@ td {
   color: #24324a;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.ai-action-panel span,
+.ai-action-panel small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .incident-context-summary {

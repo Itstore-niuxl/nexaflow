@@ -43,6 +43,7 @@ import {
   type AIGovernanceSuggestion,
   type AIIncidentInvestigation,
   type AIQueryResult,
+  type AIRuleEffectiveness,
   type AISummary,
   type AuditEvent,
   type AssetMetadata,
@@ -407,6 +408,26 @@ const emptyAIGovernanceSuggestions = (): AIGovernanceSuggestions => ({
   suggestions: [],
   generated_at: 0
 });
+const emptyAIRuleEffectiveness = (): AIRuleEffectiveness => ({
+  enabled: false,
+  mode: 'local_mock',
+  provider: 'local_mock',
+  model: 'nexaflow-local-summary',
+  summary: {
+    minutes: 15,
+    rule_count: 0,
+    enabled_rules: 0,
+    disabled_rules: 0,
+    total_hits: 0,
+    critical_hits: 0,
+    noisy_rules: 0,
+    quiet_rules: 0,
+    health: '等待规则数据'
+  },
+  rules: [],
+  tuning_suggestions: [],
+  generated_at: 0
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -429,6 +450,7 @@ const reportAISummary = ref<AISummary>(emptyAISummary('report'));
 const aiQuestion = ref('最近 30 分钟哪个公网 IP 访问最多？');
 const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
 const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
+const aiRuleEffectiveness = ref<AIRuleEffectiveness>(emptyAIRuleEffectiveness());
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
@@ -730,6 +752,7 @@ const refresh = async () => {
       reportRes,
       reportAIRes,
       governanceRes,
+      ruleEffectivenessRes,
       ruleFindingRes,
       auditRes,
       configVersionRes,
@@ -780,6 +803,7 @@ const refresh = async () => {
       api.reportOverview(minutes, 12),
       api.aiReportSummary(minutes, 12),
       api.aiGovernanceSuggestions(minutes, 8),
+      api.aiRuleEffectiveness(minutes, 120),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
@@ -831,6 +855,7 @@ const refresh = async () => {
     reportOverview.value = reportRes.data;
     reportAISummary.value = reportAIRes.data;
     aiGovernance.value = governanceRes.data;
+    aiRuleEffectiveness.value = ruleEffectivenessRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -873,6 +898,7 @@ const refresh = async () => {
       reportRes.degraded ||
       reportAIRes.degraded ||
       governanceRes.degraded ||
+      ruleEffectivenessRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
       configVersionRes.degraded;
@@ -2100,6 +2126,65 @@ const refresh = async () => {
       ],
       generated_at: now
     };
+    aiRuleEffectiveness.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      summary: {
+        minutes: selectedMinutes.value,
+        rule_count: 3,
+        enabled_rules: 3,
+        disabled_rules: 0,
+        total_hits: 18,
+        critical_hits: 2,
+        noisy_rules: 1,
+        quiet_rules: 1,
+        health: '存在噪声规则'
+      },
+      rules: [
+        {
+          id: 'rule-external-session-burst',
+          name: '公网会话突增',
+          category: '公网访问',
+          metric: 'external_sessions',
+          match: '10.2.0.12',
+          operator: 'gte',
+          threshold: 40,
+          severity: 'warning',
+          enabled_rule: true,
+          minutes: selectedMinutes.value,
+          hit_count: 12,
+          critical_count: 0,
+          warning_count: 12,
+          unique_subjects: 1,
+          duplicate_ratio: 0.92,
+          silenced_hits: 0,
+          total_bytes: 7000000,
+          peak_value: 46,
+          top_subject: '211.93.22.130 -> 10.2.0.12:8081',
+          noise_level: 'noisy',
+          score: 62,
+          summary: '规则命中 12 次，唯一对象 1 个，重复率 92%，存在告警噪声风险。',
+          recommendations: ['提高阈值或收窄匹配对象。', '对重复命中的稳定业务流量先做白名单复核。'],
+          sample_findings: [],
+          generated_at: now
+        }
+      ],
+      tuning_suggestions: [
+        {
+          rule_id: 'rule-external-session-burst',
+          rule_name: '公网会话突增',
+          noise_level: 'noisy',
+          severity: 'warning',
+          title: '复核规则：公网会话突增',
+          summary: '重复命中偏高，建议调高阈值或按对象聚合事件。',
+          actions: ['提高阈值或收窄匹配对象。', '对重复命中的稳定业务流量先做白名单复核。'],
+          score: 62
+        }
+      ],
+      generated_at: now
+    };
     systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
     degraded.value = true;
   } finally {
@@ -2549,6 +2634,13 @@ const criticalRuleFindingCount = computed(() => ruleFindings.value.filter((row) 
 const ruleFindingRuleItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => row.rule_name, () => 1, () => 0));
 const ruleFindingSeverityItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => severityText(row.severity), () => 1, () => 0));
 const ruleFindingMetricItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => ruleMetricText(row.metric), (row) => row.bytes || row.value, (row) => row.packets));
+const aiRuleEffectivenessItems = computed(() =>
+  aiRuleEffectiveness.value.rules.map((row) => ({
+    key: `${row.name} / ${ruleNoiseText(row.noise_level)}`,
+    bytes: row.score,
+    packets: row.hit_count
+  }))
+);
 const incidentSeverityItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => severityText(row.severity), () => 1, () => 0));
 const incidentSourceItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => row.source, () => 1, () => 0));
 const incidentCategoryItems = computed(() => aggregateTopItems(securityIncidents.value, (row) => row.category, (row) => row.bytes, (row) => row.packets));
@@ -2793,6 +2885,15 @@ const incidentKindText = (kind: string) => {
 };
 
 const ruleMetricText = (metric: string) => ruleMetricOptions.find((item) => item.value === metric)?.label ?? metric;
+
+const ruleNoiseText = (level: string) => {
+  if (level === 'noisy') return '噪声偏高';
+  if (level === 'quiet') return '静默';
+  if (level === 'critical') return '严重命中';
+  if (level === 'focused') return '聚焦';
+  if (level === 'disabled') return '未启用';
+  return '活跃';
+};
 
 const alertStatusText = (status: string) => {
   const labels: Record<string, string> = {
@@ -3974,6 +4075,86 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </div>
             </article>
           </div>
+        </section>
+
+        <section class="table-panel ai-rule-effectiveness-panel">
+          <div class="panel-heading">
+            <h2>AI 规则效果评估</h2>
+            <span>{{ aiRuleEffectiveness.summary.health }} / {{ aiRuleEffectiveness.mode }}</span>
+          </div>
+          <section class="metrics-grid compact-metrics">
+            <article class="metric">
+              <Settings2 :size="20" />
+              <div>
+                <span>启用规则</span>
+                <strong>{{ aiRuleEffectiveness.summary.enabled_rules }} / {{ aiRuleEffectiveness.summary.rule_count }}</strong>
+              </div>
+            </article>
+            <article class="metric">
+              <Activity :size="20" />
+              <div>
+                <span>命中总数</span>
+                <strong>{{ aiRuleEffectiveness.summary.total_hits.toLocaleString() }}</strong>
+              </div>
+            </article>
+            <article class="metric">
+              <AlertTriangle :size="20" />
+              <div>
+                <span>噪声规则</span>
+                <strong>{{ aiRuleEffectiveness.summary.noisy_rules.toLocaleString() }}</strong>
+              </div>
+            </article>
+            <article class="metric">
+              <Shield :size="20" />
+              <div>
+                <span>严重命中</span>
+                <strong>{{ aiRuleEffectiveness.summary.critical_hits.toLocaleString() }}</strong>
+              </div>
+            </article>
+          </section>
+          <section class="command-grid">
+            <HorizontalBarChart title="规则效果评分" eyebrow="Rule Score" :items="aiRuleEffectivenessItems" unit="count" />
+            <section class="ai-action-panel">
+              <div class="panel-heading">
+                <h2>调优建议</h2>
+                <span>{{ aiRuleEffectiveness.tuning_suggestions.length.toLocaleString() }} 项</span>
+              </div>
+              <div v-if="aiRuleEffectiveness.tuning_suggestions.length === 0" class="empty-state">暂无调优建议</div>
+              <article v-for="item in aiRuleEffectiveness.tuning_suggestions.slice(0, 5)" :key="`rule-tuning-${item.rule_id}-${item.noise_level}`">
+                <strong>{{ item.title }}</strong>
+                <span>{{ ruleNoiseText(item.noise_level) }} / 评分 {{ item.score }}</span>
+                <small>{{ item.summary }}</small>
+              </article>
+            </section>
+          </section>
+          <div v-if="aiRuleEffectiveness.rules.length === 0" class="empty-state">暂无检测规则</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>规则</th>
+                <th>状态</th>
+                <th>命中</th>
+                <th>对象</th>
+                <th>重复率</th>
+                <th>评分</th>
+                <th>建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in aiRuleEffectiveness.rules.slice(0, 8)" :key="`rule-effect-${row.id}`">
+                <td>
+                  <strong>{{ row.name }}</strong>
+                  <span class="cell-subtle">{{ ruleMetricText(row.metric) }} / {{ row.match || '全部对象' }}</span>
+                </td>
+                <td><span class="severity-pill" :class="row.severity">{{ ruleNoiseText(row.noise_level) }}</span></td>
+                <td>{{ row.hit_count.toLocaleString() }} / 严重 {{ row.critical_count.toLocaleString() }}</td>
+                <td>{{ row.unique_subjects.toLocaleString() }} / 静默 {{ row.silenced_hits.toLocaleString() }}</td>
+                <td>{{ (row.duplicate_ratio * 100).toFixed(0) }}%</td>
+                <td>{{ row.score }}</td>
+                <td>{{ row.recommendations[0] || row.summary }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
 
         <section class="command-grid">

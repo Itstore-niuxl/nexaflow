@@ -817,6 +817,66 @@ export interface AIGovernanceSuggestions {
   generated_at: number;
 }
 
+export interface AIRuleEffectivenessRow {
+  id: string;
+  name: string;
+  category: string;
+  metric: string;
+  match: string;
+  operator: string;
+  threshold: number;
+  severity: string;
+  enabled_rule: boolean;
+  minutes: number;
+  hit_count: number;
+  critical_count: number;
+  warning_count: number;
+  unique_subjects: number;
+  duplicate_ratio: number;
+  silenced_hits: number;
+  total_bytes: number;
+  peak_value: number;
+  top_subject: string;
+  noise_level: string;
+  score: number;
+  summary: string;
+  recommendations: string[];
+  sample_findings: RuleFinding[];
+  generated_at: number;
+}
+
+export interface AIRuleTuningSuggestion {
+  rule_id: string;
+  rule_name: string;
+  noise_level: string;
+  severity: string;
+  title: string;
+  summary: string;
+  actions: string[];
+  score: number;
+}
+
+export interface AIRuleEffectiveness {
+  enabled: boolean;
+  mode: string;
+  provider: string;
+  model: string;
+  summary: {
+    minutes: number;
+    rule_count: number;
+    enabled_rules: number;
+    disabled_rules: number;
+    total_hits: number;
+    critical_hits: number;
+    noisy_rules: number;
+    quiet_rules: number;
+    health: string;
+  };
+  rules: AIRuleEffectivenessRow[];
+  tuning_suggestions: AIRuleTuningSuggestion[];
+  generated_at: number;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1251,6 +1311,11 @@ export const api = {
   async aiGovernanceSuggestions(minutes = 15, limit = 8) {
     return json<{ data: AIGovernanceSuggestions; degraded: boolean }>(
       `/api/v1/ai/governance-suggestions?minutes=${minutes}&limit=${limit}`
+    );
+  },
+  async aiRuleEffectiveness(minutes = 15, limit = 100) {
+    return json<{ data: AIRuleEffectiveness; degraded: boolean }>(
+      `/api/v1/ai/rule-effectiveness?minutes=${minutes}&limit=${limit}`
     );
   },
   async detectionRules() {

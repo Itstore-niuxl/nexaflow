@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"nexaflow/internal/config"
+	"nexaflow/internal/model"
 )
 
 func TestAuthTokenCarriesRole(t *testing.T) {
@@ -394,5 +395,62 @@ func TestBuildAIGovernanceSuggestions(t *testing.T) {
 	}
 	if !hasAsset {
 		t.Fatalf("expected asset governance suggestion, got %#v", suggestions)
+	}
+}
+
+func TestBuildAIRuleEffectiveness(t *testing.T) {
+	rules := []model.DetectionRule{
+		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},
+		{ID: "rule-quiet", Name: "SSH 新增流量", Category: "行为基线", Metric: "service_bytes", Operator: "gte", Threshold: 1024, Severity: "critical", Enabled: true},
+		{ID: "rule-disabled", Name: "旧规则", Category: "历史", Metric: "flow_bytes", Operator: "gte", Threshold: 1024, Severity: "warning", Enabled: false},
+	}
+	findings := []map[string]any{
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(40), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(41), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(42), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(43), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(44), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(45), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(46), "bytes": uint64(7340032), "packets": uint64(6800)},
+		{"rule_id": "rule-noisy", "rule_name": "公网会话突增", "subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "warning", "value": float64(47), "bytes": uint64(7340032), "packets": uint64(6800)},
+	}
+
+	result := buildAIRuleEffectiveness(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		rules,
+		findings,
+		config.Alerts{SilencedSubjects: []string{"211.93.22.130 -> 10.2.0.12:8081"}},
+		15,
+	)
+	summary := mapValue(result["summary"])
+	if int64Value(summary["rule_count"]) != 3 {
+		t.Fatalf("expected three rules, got %#v", summary)
+	}
+	if int64Value(summary["noisy_rules"]) != 1 {
+		t.Fatalf("expected one noisy rule, got %#v", summary)
+	}
+	rows := sliceValue(result["rules"])
+	if len(rows) != 3 {
+		t.Fatalf("expected rule rows, got %#v", rows)
+	}
+	var noisy map[string]any
+	for _, item := range rows {
+		row := mapValue(item)
+		if stringValue(row["id"]) == "rule-noisy" {
+			noisy = row
+			break
+		}
+	}
+	if noisy == nil {
+		t.Fatalf("expected noisy rule row, got %#v", rows)
+	}
+	if stringValue(noisy["noise_level"]) != "noisy" {
+		t.Fatalf("expected noisy rule, got %#v", noisy)
+	}
+	if int64Value(noisy["silenced_hits"]) == 0 {
+		t.Fatalf("expected silenced hits, got %#v", noisy)
+	}
+	if len(sliceValue(result["tuning_suggestions"])) == 0 {
+		t.Fatalf("expected tuning suggestions, got %#v", result)
 	}
 }

@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/query", s.aiQuery)
 	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
 	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
+	mux.HandleFunc("/api/v1/ai/rule-effectiveness", s.aiRuleEffectiveness)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -734,6 +735,19 @@ func (s *Server) aiGovernanceSuggestions(w http.ResponseWriter, r *http.Request)
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	suggestions := buildAIGovernanceSuggestions(s.aiOptions(), report, runtime.Alerts, minutes, limit)
 	writeJSON(w, map[string]any{"data": suggestions, "degraded": reportErr != nil})
+}
+
+func (s *Server) aiRuleEffectiveness(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 100, 500))
+	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	findings, err := s.store.DetectionRuleFindings(r.Context(), runtime.Alerts.DetectionRules, minutes, limit)
+	result := buildAIRuleEffectiveness(s.aiOptions(), runtime.Alerts.DetectionRules, findings, runtime.Alerts, minutes)
+	writeJSON(w, map[string]any{"data": result, "degraded": err != nil})
 }
 
 func (s *Server) collectors(w http.ResponseWriter, r *http.Request) {
@@ -2100,6 +2114,254 @@ func buildAIGovernanceSuggestions(options aiSummaryOptions, report map[string]an
 		"summary":      fmt.Sprintf("基于最近 %d 分钟数据生成 %d 条治理建议，所有建议均需管理员人工确认后执行。", minutes, len(suggestions)),
 		"suggestions":  suggestions,
 		"generated_at": time.Now().Unix(),
+	}
+}
+
+func buildAIRuleEffectiveness(options aiSummaryOptions, rules []model.DetectionRule, findings []map[string]any, alerts config.Alerts, minutes int) map[string]any {
+	rows := make([]map[string]any, 0, len(rules))
+	tuning := []map[string]any{}
+	totalHits := 0
+	criticalHits := 0
+	noisyRules := 0
+	quietRules := 0
+	disabledRules := 0
+	for _, rule := range rules {
+		ruleFindings := findingsForRule(findings, rule)
+		row := buildAIRuleEffectivenessRow(rule, ruleFindings, alerts, minutes)
+		rows = append(rows, row)
+		hits := int(int64Value(row["hit_count"]))
+		totalHits += hits
+		criticalHits += int(int64Value(row["critical_count"]))
+		switch stringValue(row["noise_level"]) {
+		case "noisy":
+			noisyRules++
+		case "quiet":
+			quietRules++
+		}
+		if !rule.Enabled {
+			disabledRules++
+		}
+		tuning = append(tuning, ruleTuningSuggestions(row)...)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return float64Value(rows[i]["score"]) > float64Value(rows[j]["score"])
+	})
+	summary := map[string]any{
+		"minutes":        minutes,
+		"rule_count":     len(rules),
+		"enabled_rules":  len(rules) - disabledRules,
+		"disabled_rules": disabledRules,
+		"total_hits":     totalHits,
+		"critical_hits":  criticalHits,
+		"noisy_rules":    noisyRules,
+		"quiet_rules":    quietRules,
+		"health":         ruleHealthText(len(rules), totalHits, noisyRules, quietRules),
+	}
+	return map[string]any{
+		"enabled":            options.Enabled,
+		"mode":               options.Mode,
+		"provider":           options.Provider,
+		"model":              options.Model,
+		"summary":            summary,
+		"rules":              rows,
+		"tuning_suggestions": tuning,
+		"generated_at":       time.Now().Unix(),
+	}
+}
+
+func buildAIRuleEffectivenessRow(rule model.DetectionRule, findings []map[string]any, alerts config.Alerts, minutes int) map[string]any {
+	subjects := map[string]int{}
+	criticalCount := 0
+	warningCount := 0
+	silencedCount := 0
+	totalBytes := uint64(0)
+	peakValue := 0.0
+	topSubject := ""
+	for _, finding := range findings {
+		subject := stringValue(finding["subject"])
+		if subject == "" {
+			subject = stringValue(finding["id"])
+		}
+		subjects[subject]++
+		if subjects[subject] == 1 && topSubject == "" {
+			topSubject = subject
+		}
+		switch stringValue(finding["severity"]) {
+		case "critical":
+			criticalCount++
+		case "warning":
+			warningCount++
+		}
+		if isSilencedSubject(subject, alerts.SilencedSubjects) {
+			silencedCount++
+		}
+		totalBytes += uint64Value(finding["bytes"])
+		peakValue = maxFloat(peakValue, float64Value(finding["value"]))
+	}
+	hitCount := len(findings)
+	uniqueSubjects := len(subjects)
+	duplicateRatio := 0.0
+	if hitCount > 0 {
+		duplicateRatio = 1 - float64(uniqueSubjects)/float64(hitCount)
+	}
+	noiseLevel := ruleNoiseLevel(rule.Enabled, hitCount, uniqueSubjects, criticalCount, duplicateRatio)
+	score := ruleEffectivenessScore(rule.Enabled, hitCount, uniqueSubjects, criticalCount, duplicateRatio, silencedCount)
+	return map[string]any{
+		"id":              rule.ID,
+		"name":            rule.Name,
+		"category":        rule.Category,
+		"metric":          rule.Metric,
+		"match":           rule.Match,
+		"operator":        rule.Operator,
+		"threshold":       rule.Threshold,
+		"severity":        rule.Severity,
+		"enabled_rule":    rule.Enabled,
+		"minutes":         minutes,
+		"hit_count":       hitCount,
+		"critical_count":  criticalCount,
+		"warning_count":   warningCount,
+		"unique_subjects": uniqueSubjects,
+		"duplicate_ratio": duplicateRatio,
+		"silenced_hits":   silencedCount,
+		"total_bytes":     totalBytes,
+		"peak_value":      peakValue,
+		"top_subject":     topSubject,
+		"noise_level":     noiseLevel,
+		"score":           score,
+		"summary":         ruleEffectivenessSummary(rule, hitCount, uniqueSubjects, criticalCount, duplicateRatio, noiseLevel),
+		"recommendations": ruleEffectivenessActions(rule, hitCount, uniqueSubjects, criticalCount, duplicateRatio, silencedCount, noiseLevel),
+		"sample_findings": findings[:min(len(findings), 3)],
+		"generated_at":    time.Now().Unix(),
+	}
+}
+
+func findingsForRule(findings []map[string]any, rule model.DetectionRule) []map[string]any {
+	rows := []map[string]any{}
+	for _, finding := range findings {
+		if stringValue(finding["rule_id"]) == rule.ID || stringValue(finding["rule_name"]) == rule.Name {
+			rows = append(rows, finding)
+		}
+	}
+	return rows
+}
+
+func ruleNoiseLevel(enabled bool, hits, uniqueSubjects, criticalCount int, duplicateRatio float64) string {
+	switch {
+	case !enabled:
+		return "disabled"
+	case hits == 0:
+		return "quiet"
+	case duplicateRatio >= 0.65 && hits >= 8:
+		return "noisy"
+	case hits >= 30 && criticalCount == 0:
+		return "noisy"
+	case criticalCount > 0:
+		return "critical"
+	case uniqueSubjects <= 3 && hits <= 10:
+		return "focused"
+	default:
+		return "active"
+	}
+}
+
+func ruleEffectivenessScore(enabled bool, hits, uniqueSubjects, criticalCount int, duplicateRatio float64, silencedCount int) int {
+	if !enabled {
+		return 20
+	}
+	score := 55
+	if hits == 0 {
+		score = 45
+	}
+	if hits > 0 {
+		score += min(hits*2, 20)
+	}
+	if criticalCount > 0 {
+		score += min(criticalCount*6, 18)
+	}
+	if uniqueSubjects > 0 && uniqueSubjects <= 5 {
+		score += 8
+	}
+	if duplicateRatio >= 0.65 {
+		score -= 20
+	}
+	if silencedCount > 0 {
+		score -= min(silencedCount*3, 18)
+	}
+	return max(0, min(score, 100))
+}
+
+func ruleEffectivenessSummary(rule model.DetectionRule, hits, uniqueSubjects, criticalCount int, duplicateRatio float64, noiseLevel string) string {
+	if !rule.Enabled {
+		return "规则当前未启用，不参与实时检测。"
+	}
+	if hits == 0 {
+		return "规则在当前观察窗口内没有命中，需要结合业务预期判断是否过严或场景暂未出现。"
+	}
+	if noiseLevel == "noisy" {
+		return fmt.Sprintf("规则命中 %d 次，唯一对象 %d 个，重复率 %.0f%%，存在告警噪声风险。", hits, uniqueSubjects, duplicateRatio*100)
+	}
+	if criticalCount > 0 {
+		return fmt.Sprintf("规则命中 %d 次，其中严重命中 %d 次，建议优先复核首要对象。", hits, criticalCount)
+	}
+	return fmt.Sprintf("规则命中 %d 次，覆盖 %d 个对象，当前处于可观察状态。", hits, uniqueSubjects)
+}
+
+func ruleEffectivenessActions(rule model.DetectionRule, hits, uniqueSubjects, criticalCount int, duplicateRatio float64, silencedCount int, noiseLevel string) []string {
+	switch noiseLevel {
+	case "disabled":
+		return []string{"确认该规则是否仍需要保留；如属于核心检测场景，启用前先复核阈值和匹配对象。"}
+	case "quiet":
+		return []string{"保持观察或扩大时间窗口；如果长期无命中，评估是否降低阈值或删除无效规则。"}
+	case "noisy":
+		return []string{"提高阈值或收窄匹配对象。", "对重复命中的稳定业务流量先做白名单复核。", "检查规则说明和处置动作是否足够明确。"}
+	case "critical":
+		return []string{"优先查看严重命中的对象画像和事件上下文。", "确认是否需要生成事件备注或升级处置。"}
+	default:
+		actions := []string{"保持规则启用，并定期复核命中对象和误报情况。"}
+		if silencedCount > 0 {
+			actions = append(actions, "当前存在静默命中，建议审计白名单是否仍有效。")
+		}
+		if duplicateRatio > 0.35 && hits > uniqueSubjects {
+			actions = append(actions, "重复命中偏高，可考虑按对象聚合事件或调高阈值。")
+		}
+		if criticalCount == 0 && rule.Severity == "critical" {
+			actions = append(actions, "规则级别为严重但当前无严重命中，建议复核级别设置。")
+		}
+		return actions
+	}
+}
+
+func ruleTuningSuggestions(row map[string]any) []map[string]any {
+	noiseLevel := stringValue(row["noise_level"])
+	if noiseLevel == "" || noiseLevel == "active" || noiseLevel == "focused" {
+		return []map[string]any{}
+	}
+	title := "复核规则：" + firstString(stringValue(row["name"]), stringValue(row["id"]), "-")
+	suggestion := map[string]any{
+		"rule_id":     stringValue(row["id"]),
+		"rule_name":   stringValue(row["name"]),
+		"noise_level": noiseLevel,
+		"severity":    firstString(stringValue(row["severity"]), "info"),
+		"title":       title,
+		"summary":     stringValue(row["summary"]),
+		"actions":     sliceValue(row["recommendations"]),
+		"score":       int64Value(row["score"]),
+	}
+	return []map[string]any{suggestion}
+}
+
+func ruleHealthText(ruleCount, totalHits, noisyRules, quietRules int) string {
+	switch {
+	case ruleCount == 0:
+		return "未配置检测规则"
+	case noisyRules > 0:
+		return "存在噪声规则"
+	case totalHits == 0:
+		return "规则静默观察"
+	case quietRules == ruleCount:
+		return "整体偏静默"
+	default:
+		return "规则运行正常"
 	}
 }
 
