@@ -84,7 +84,11 @@ CREATE TABLE IF NOT EXISTS nexaflow.capture_quality_5s
     tx_bytes UInt64,
     tx_packets UInt64,
     tx_dropped UInt64,
-    tx_errors UInt64
+    tx_errors UInt64,
+    packet_queue_len UInt64 DEFAULT 0,
+    packet_queue_capacity UInt64 DEFAULT 0,
+    window_queue_len UInt64 DEFAULT 0,
+    window_queue_capacity UInt64 DEFAULT 0
 )
 ENGINE = MergeTree
 PARTITION BY toDate(ts)

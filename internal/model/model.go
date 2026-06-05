@@ -26,17 +26,21 @@ type LinkWindow struct {
 }
 
 type CaptureQualityWindow struct {
-	Ts        int64  `json:"ts"`
-	SourceID  string `json:"source_id"`
-	Iface     string `json:"iface"`
-	RxBytes   uint64 `json:"rx_bytes"`
-	RxPackets uint64 `json:"rx_packets"`
-	RxDropped uint64 `json:"rx_dropped"`
-	RxErrors  uint64 `json:"rx_errors"`
-	TxBytes   uint64 `json:"tx_bytes"`
-	TxPackets uint64 `json:"tx_packets"`
-	TxDropped uint64 `json:"tx_dropped"`
-	TxErrors  uint64 `json:"tx_errors"`
+	Ts                  int64  `json:"ts"`
+	SourceID            string `json:"source_id"`
+	Iface               string `json:"iface"`
+	RxBytes             uint64 `json:"rx_bytes"`
+	RxPackets           uint64 `json:"rx_packets"`
+	RxDropped           uint64 `json:"rx_dropped"`
+	RxErrors            uint64 `json:"rx_errors"`
+	TxBytes             uint64 `json:"tx_bytes"`
+	TxPackets           uint64 `json:"tx_packets"`
+	TxDropped           uint64 `json:"tx_dropped"`
+	TxErrors            uint64 `json:"tx_errors"`
+	PacketQueueLen      uint64 `json:"packet_queue_len"`
+	PacketQueueCapacity uint64 `json:"packet_queue_capacity"`
+	WindowQueueLen      uint64 `json:"window_queue_len"`
+	WindowQueueCapacity uint64 `json:"window_queue_capacity"`
 }
 
 type TopItem struct {

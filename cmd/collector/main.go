@@ -56,7 +56,12 @@ func main() {
 			log.Println("collector stopped")
 			return
 		case win := <-windows:
-			captureStats.apply(&win)
+			captureStats.apply(&win, queueSnapshot{
+				packetLen:      len(packets),
+				packetCapacity: cap(packets),
+				windowLen:      len(windows),
+				windowCapacity: cap(windows),
+			})
 			if err := ch.WriteWindow(ctx, win); err != nil {
 				log.Printf("clickhouse write failed: %v", err)
 				if initErr := ch.Init(ctx); initErr != nil {
@@ -139,34 +144,46 @@ type interfaceStatsTracker struct {
 	last map[string]interfaceStats
 }
 
+type queueSnapshot struct {
+	packetLen      int
+	packetCapacity int
+	windowLen      int
+	windowCapacity int
+}
+
 func newInterfaceStatsTracker() *interfaceStatsTracker {
 	return &interfaceStatsTracker{last: map[string]interfaceStats{}}
 }
 
-func (t *interfaceStatsTracker) apply(win *model.WindowResult) {
-	if win == nil || strings.TrimSpace(win.Iface) == "" || win.Iface == "any" {
+func (t *interfaceStatsTracker) apply(win *model.WindowResult, queues queueSnapshot) {
+	if win == nil {
 		return
 	}
-	current, err := readInterfaceStats(win.Iface)
-	if err != nil {
-		return
-	}
-	previous := t.last[win.Iface]
-	t.last[win.Iface] = current
 	quality := model.CaptureQualityWindow{
-		Ts:       win.Ts,
-		SourceID: win.SourceID,
-		Iface:    win.Iface,
+		Ts:                  win.Ts,
+		SourceID:            win.SourceID,
+		Iface:               win.Iface,
+		PacketQueueLen:      uint64(queues.packetLen),
+		PacketQueueCapacity: uint64(queues.packetCapacity),
+		WindowQueueLen:      uint64(queues.windowLen),
+		WindowQueueCapacity: uint64(queues.windowCapacity),
 	}
-	if previous.known {
-		quality.RxBytes = deltaCounter(current.rxBytes, previous.rxBytes)
-		quality.RxPackets = deltaCounter(current.rxPackets, previous.rxPackets)
-		quality.RxDropped = deltaCounter(current.rxDropped, previous.rxDropped)
-		quality.RxErrors = deltaCounter(current.rxErrors, previous.rxErrors)
-		quality.TxBytes = deltaCounter(current.txBytes, previous.txBytes)
-		quality.TxPackets = deltaCounter(current.txPackets, previous.txPackets)
-		quality.TxDropped = deltaCounter(current.txDropped, previous.txDropped)
-		quality.TxErrors = deltaCounter(current.txErrors, previous.txErrors)
+	if strings.TrimSpace(win.Iface) != "" && win.Iface != "any" {
+		current, err := readInterfaceStats(win.Iface)
+		if err == nil {
+			previous := t.last[win.Iface]
+			t.last[win.Iface] = current
+			if previous.known {
+				quality.RxBytes = deltaCounter(current.rxBytes, previous.rxBytes)
+				quality.RxPackets = deltaCounter(current.rxPackets, previous.rxPackets)
+				quality.RxDropped = deltaCounter(current.rxDropped, previous.rxDropped)
+				quality.RxErrors = deltaCounter(current.rxErrors, previous.rxErrors)
+				quality.TxBytes = deltaCounter(current.txBytes, previous.txBytes)
+				quality.TxPackets = deltaCounter(current.txPackets, previous.txPackets)
+				quality.TxDropped = deltaCounter(current.txDropped, previous.txDropped)
+				quality.TxErrors = deltaCounter(current.txErrors, previous.txErrors)
+			}
+		}
 	}
 	win.Link.Drops += quality.RxDropped + quality.RxErrors
 	win.Capture = &quality

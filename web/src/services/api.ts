@@ -151,6 +151,9 @@ export interface CaptureQualitySummary {
   tx_packets: number;
   tx_dropped: number;
   tx_errors: number;
+  packet_queue_len: number;
+  window_queue_len: number;
+  queue_pressure: number;
   drop_ratio: number;
   error_ratio: number;
   source_count: number;
@@ -170,6 +173,13 @@ export interface CaptureQualitySource {
   tx_packets: number;
   tx_dropped: number;
   tx_errors: number;
+  packet_queue_len: number;
+  packet_queue_capacity: number;
+  window_queue_len: number;
+  window_queue_capacity: number;
+  packet_queue_pressure: number;
+  window_queue_pressure: number;
+  queue_pressure: number;
   first_window_ts: number;
   latest_window_ts: number;
   freshness_seconds: number;

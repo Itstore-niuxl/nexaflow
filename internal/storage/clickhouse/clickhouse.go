@@ -115,12 +115,20 @@ TTL ts + INTERVAL 7 DAY`,
     tx_bytes UInt64,
     tx_packets UInt64,
     tx_dropped UInt64,
-    tx_errors UInt64
+    tx_errors UInt64,
+    packet_queue_len UInt64 DEFAULT 0,
+    packet_queue_capacity UInt64 DEFAULT 0,
+    window_queue_len UInt64 DEFAULT 0,
+    window_queue_capacity UInt64 DEFAULT 0
 )
 ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (source_id, iface, ts)
 TTL ts + INTERVAL 7 DAY`,
+		`ALTER TABLE ` + s.database + `.capture_quality_5s ADD COLUMN IF NOT EXISTS packet_queue_len UInt64 DEFAULT 0`,
+		`ALTER TABLE ` + s.database + `.capture_quality_5s ADD COLUMN IF NOT EXISTS packet_queue_capacity UInt64 DEFAULT 0`,
+		`ALTER TABLE ` + s.database + `.capture_quality_5s ADD COLUMN IF NOT EXISTS window_queue_len UInt64 DEFAULT 0`,
+		`ALTER TABLE ` + s.database + `.capture_quality_5s ADD COLUMN IF NOT EXISTS window_queue_capacity UInt64 DEFAULT 0`,
 		`CREATE TABLE IF NOT EXISTS ` + s.database + `.link_traffic_1m
 (
     ts DateTime,
@@ -544,6 +552,10 @@ func (s *Store) CaptureQuality(ctx context.Context, minutes, limit int) (map[str
     sum(tx_packets) AS tx_packets,
     sum(tx_dropped) AS tx_dropped,
     sum(tx_errors) AS tx_errors,
+    max(packet_queue_len) AS packet_queue_len,
+    max(packet_queue_capacity) AS packet_queue_capacity,
+    max(window_queue_len) AS window_queue_len,
+    max(window_queue_capacity) AS window_queue_capacity,
     toUnixTimestamp(min(ts)) AS first_window_ts,
     toUnixTimestamp(max(ts)) AS latest_window_ts
 FROM %s.capture_quality_5s
@@ -573,6 +585,9 @@ FORMAT JSON`, s.database, minutes, limit)
 		"tx_packets":       uint64(0),
 		"tx_dropped":       uint64(0),
 		"tx_errors":        uint64(0),
+		"packet_queue_len": uint64(0),
+		"window_queue_len": uint64(0),
+		"queue_pressure":   float64(0),
 		"source_count":     len(parsed.Data),
 		"interface_count":  countDistinctStrings(parsed.Data, "iface"),
 		"latest_window_ts": int64(0),
@@ -588,6 +603,18 @@ FORMAT JSON`, s.database, minutes, limit)
 		row["freshness_seconds"] = now - int64Value(row["latest_window_ts"])
 		row["drop_ratio"] = ratioFloat(float64(uintValue(row["rx_dropped"])+uintValue(row["tx_dropped"])), float64(uintValue(row["rx_packets"])+uintValue(row["tx_packets"])))
 		row["error_ratio"] = ratioFloat(float64(uintValue(row["rx_errors"])+uintValue(row["tx_errors"])), float64(uintValue(row["rx_packets"])+uintValue(row["tx_packets"])))
+		row["packet_queue_pressure"] = ratioFloat(float64(uintValue(row["packet_queue_len"])), float64(uintValue(row["packet_queue_capacity"])))
+		row["window_queue_pressure"] = ratioFloat(float64(uintValue(row["window_queue_len"])), float64(uintValue(row["window_queue_capacity"])))
+		row["queue_pressure"] = maxFloat(floatValue(row["packet_queue_pressure"]), floatValue(row["window_queue_pressure"]))
+		if uintValue(row["packet_queue_len"]) > uintValue(summary["packet_queue_len"]) {
+			summary["packet_queue_len"] = uintValue(row["packet_queue_len"])
+		}
+		if uintValue(row["window_queue_len"]) > uintValue(summary["window_queue_len"]) {
+			summary["window_queue_len"] = uintValue(row["window_queue_len"])
+		}
+		if floatValue(row["queue_pressure"]) > floatValue(summary["queue_pressure"]) {
+			summary["queue_pressure"] = floatValue(row["queue_pressure"])
+		}
 		row["status"] = captureQualityRowStatus(row)
 	}
 	summary["drop_ratio"] = ratioFloat(float64(uintValue(summary["rx_dropped"])+uintValue(summary["tx_dropped"])), float64(uintValue(summary["rx_packets"])+uintValue(summary["tx_packets"])))
@@ -2759,7 +2786,7 @@ func (s *Store) insertCaptureQuality(ctx context.Context, row *model.CaptureQual
 		return nil
 	}
 	q := "INSERT INTO " + s.database + ".capture_quality_5s FORMAT JSONEachRow"
-	return s.execBody(ctx, q, fmt.Sprintf(`{"ts":%q,"source_id":%q,"iface":%q,"rx_bytes":%d,"rx_packets":%d,"rx_dropped":%d,"rx_errors":%d,"tx_bytes":%d,"tx_packets":%d,"tx_dropped":%d,"tx_errors":%d}`+"\n",
+	return s.execBody(ctx, q, fmt.Sprintf(`{"ts":%q,"source_id":%q,"iface":%q,"rx_bytes":%d,"rx_packets":%d,"rx_dropped":%d,"rx_errors":%d,"tx_bytes":%d,"tx_packets":%d,"tx_dropped":%d,"tx_errors":%d,"packet_queue_len":%d,"packet_queue_capacity":%d,"window_queue_len":%d,"window_queue_capacity":%d}`+"\n",
 		formatTime(row.Ts),
 		row.SourceID,
 		row.Iface,
@@ -2771,6 +2798,10 @@ func (s *Store) insertCaptureQuality(ctx context.Context, row *model.CaptureQual
 		row.TxPackets,
 		row.TxDropped,
 		row.TxErrors,
+		row.PacketQueueLen,
+		row.PacketQueueCapacity,
+		row.WindowQueueLen,
+		row.WindowQueueCapacity,
 	))
 }
 
@@ -2962,23 +2993,30 @@ func demoCaptureQuality(minutes int) map[string]any {
 	now := time.Now().Unix()
 	sources := []map[string]any{
 		{
-			"source_id":         "dev-source-01",
-			"iface":             "mock0",
-			"windows":           int64(170),
-			"rx_bytes":          uint64(158000000),
-			"rx_packets":        uint64(98000),
-			"rx_dropped":        uint64(0),
-			"rx_errors":         uint64(0),
-			"tx_bytes":          uint64(12000000),
-			"tx_packets":        uint64(9000),
-			"tx_dropped":        uint64(0),
-			"tx_errors":         uint64(0),
-			"first_window_ts":   now - int64(minutes*60),
-			"latest_window_ts":  now - 5,
-			"freshness_seconds": int64(5),
-			"drop_ratio":        0.0,
-			"error_ratio":       0.0,
-			"status":            "healthy",
+			"source_id":             "dev-source-01",
+			"iface":                 "mock0",
+			"windows":               int64(170),
+			"rx_bytes":              uint64(158000000),
+			"rx_packets":            uint64(98000),
+			"rx_dropped":            uint64(0),
+			"rx_errors":             uint64(0),
+			"tx_bytes":              uint64(12000000),
+			"tx_packets":            uint64(9000),
+			"tx_dropped":            uint64(0),
+			"tx_errors":             uint64(0),
+			"packet_queue_len":      uint64(18),
+			"packet_queue_capacity": uint64(10000),
+			"window_queue_len":      uint64(0),
+			"window_queue_capacity": uint64(32),
+			"first_window_ts":       now - int64(minutes*60),
+			"latest_window_ts":      now - 5,
+			"freshness_seconds":     int64(5),
+			"drop_ratio":            0.0,
+			"error_ratio":           0.0,
+			"packet_queue_pressure": 0.0018,
+			"window_queue_pressure": 0.0,
+			"queue_pressure":        0.0018,
+			"status":                "healthy",
 		},
 	}
 	return map[string]any{
@@ -2995,6 +3033,9 @@ func demoCaptureQuality(minutes int) map[string]any {
 			"tx_packets":       uint64(9000),
 			"tx_dropped":       uint64(0),
 			"tx_errors":        uint64(0),
+			"packet_queue_len": uint64(18),
+			"window_queue_len": uint64(0),
+			"queue_pressure":   0.0018,
 			"drop_ratio":       0.0,
 			"error_ratio":      0.0,
 			"source_count":     len(sources),
@@ -4443,7 +4484,10 @@ func captureQualityRowStatus(row map[string]any) string {
 	if uintValue(row["rx_errors"])+uintValue(row["tx_errors"]) > 0 || floatValue(row["error_ratio"]) > 0.001 {
 		return "critical"
 	}
-	if uintValue(row["rx_dropped"])+uintValue(row["tx_dropped"]) > 0 || floatValue(row["drop_ratio"]) > 0.001 || int64Value(row["freshness_seconds"]) > 12 {
+	if floatValue(row["queue_pressure"]) >= 0.90 {
+		return "critical"
+	}
+	if uintValue(row["rx_dropped"])+uintValue(row["tx_dropped"]) > 0 || floatValue(row["drop_ratio"]) > 0.001 || floatValue(row["queue_pressure"]) >= 0.70 || int64Value(row["freshness_seconds"]) > 12 {
 		return "warning"
 	}
 	return "healthy"
@@ -4466,13 +4510,16 @@ func captureQualityStatus(sources []map[string]any) string {
 func captureQualityRecommendations(status string, summary map[string]any, sources []map[string]any) []map[string]string {
 	items := []map[string]string{}
 	if status == "healthy" {
-		items = append(items, map[string]string{"level": "info", "title": "接口采集稳定", "detail": "当前网卡 RX/TX 丢包和错误计数未出现异常增量"})
+		items = append(items, map[string]string{"level": "info", "title": "采集链路稳定", "detail": "当前网卡 RX/TX 丢包、错误计数和用户态队列积压未出现明显异常"})
 	}
 	if uintValue(summary["rx_errors"])+uintValue(summary["tx_errors"]) > 0 {
 		items = append(items, map[string]string{"level": "critical", "title": "检查接口错误", "detail": "观察窗口内出现 RX/TX errors，建议检查网卡链路、驱动、交换机端口和物理连接"})
 	}
 	if uintValue(summary["rx_dropped"])+uintValue(summary["tx_dropped"]) > 0 {
 		items = append(items, map[string]string{"level": "warning", "title": "检查接口丢包", "detail": "观察窗口内出现 RX/TX dropped，建议核对镜像口流量、容器权限、CPU 和采集处理能力"})
+	}
+	if floatValue(summary["queue_pressure"]) >= 0.70 {
+		items = append(items, map[string]string{"level": "warning", "title": "关注用户态队列积压", "detail": "采集或聚合队列占用超过 70%，建议提升 collector CPU、扩大队列容量或降低采集过滤范围"})
 	}
 	for _, source := range sources {
 		if stringValue(source["status"]) != "healthy" {
@@ -4484,6 +4531,13 @@ func captureQualityRecommendations(status string, summary map[string]any, source
 		items = append(items, map[string]string{"level": "info", "title": "继续观察", "detail": "当前采集接口未出现丢包或错误增量"})
 	}
 	return items
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func countDistinctStrings(rows []map[string]any, key string) int {

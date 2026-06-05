@@ -65,6 +65,7 @@ func TestCaptureQualityRowStatus(t *testing.T) {
 		"tx_errors":         uint64(0),
 		"drop_ratio":        0.0,
 		"error_ratio":       0.0,
+		"queue_pressure":    0.0,
 		"freshness_seconds": int64(5),
 	}
 	if status := captureQualityRowStatus(healthy); status != "healthy" {
@@ -80,6 +81,7 @@ func TestCaptureQualityRowStatus(t *testing.T) {
 		"tx_errors":         uint64(0),
 		"drop_ratio":        0.0005,
 		"error_ratio":       0.0,
+		"queue_pressure":    0.0,
 		"freshness_seconds": int64(5),
 	}
 	if status := captureQualityRowStatus(dropped); status != "warning" {
@@ -95,9 +97,26 @@ func TestCaptureQualityRowStatus(t *testing.T) {
 		"tx_errors":         uint64(0),
 		"drop_ratio":        0.0,
 		"error_ratio":       0.0005,
+		"queue_pressure":    0.0,
 		"freshness_seconds": int64(5),
 	}
 	if status := captureQualityRowStatus(errors); status != "critical" {
 		t.Fatalf("expected critical, got %s", status)
+	}
+
+	queue := map[string]any{
+		"rx_packets":        uint64(1000),
+		"tx_packets":        uint64(1000),
+		"rx_dropped":        uint64(0),
+		"tx_dropped":        uint64(0),
+		"rx_errors":         uint64(0),
+		"tx_errors":         uint64(0),
+		"drop_ratio":        0.0,
+		"error_ratio":       0.0,
+		"queue_pressure":    0.95,
+		"freshness_seconds": int64(5),
+	}
+	if status := captureQualityRowStatus(queue); status != "critical" {
+		t.Fatalf("expected critical queue pressure, got %s", status)
 	}
 }

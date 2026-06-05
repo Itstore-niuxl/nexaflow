@@ -140,6 +140,9 @@ const emptyCaptureQuality = (): CaptureQuality => ({
     tx_packets: 0,
     tx_dropped: 0,
     tx_errors: 0,
+    packet_queue_len: 0,
+    window_queue_len: 0,
+    queue_pressure: 0,
     drop_ratio: 0,
     error_ratio: 0,
     source_count: 0,
@@ -783,6 +786,9 @@ const refresh = async () => {
         tx_packets: 9000,
         tx_dropped: 0,
         tx_errors: 0,
+        packet_queue_len: 18,
+        window_queue_len: 0,
+        queue_pressure: 0.0018,
         drop_ratio: 0,
         error_ratio: 0,
         source_count: 1,
@@ -802,6 +808,13 @@ const refresh = async () => {
           tx_packets: 9000,
           tx_dropped: 0,
           tx_errors: 0,
+          packet_queue_len: 18,
+          packet_queue_capacity: 10000,
+          window_queue_len: 0,
+          window_queue_capacity: 32,
+          packet_queue_pressure: 0.0018,
+          window_queue_pressure: 0,
+          queue_pressure: 0.0018,
           first_window_ts: now - selectedMinutes.value * 60,
           latest_window_ts: now - 5,
           freshness_seconds: 5,
@@ -1699,6 +1712,13 @@ const captureQualityErrorItems = computed(() =>
     key: `${row.source_id} / ${row.iface}`,
     bytes: row.rx_errors + row.tx_errors,
     packets: row.windows
+  }))
+);
+const captureQualityQueueItems = computed(() =>
+  captureQuality.value.sources.map((row) => ({
+    key: `${row.source_id} / ${row.iface}`,
+    bytes: Math.round((row.queue_pressure || 0) * 100),
+    packets: row.packet_queue_len + row.window_queue_len
   }))
 );
 const capacityTrendSeries = computed(() => capacityPlanning.value.trend.map((row) => ({ ts: row.ts, bytes: row.bytes, packets: row.packets })));
@@ -2734,6 +2754,21 @@ const exportDataQuality = () => {
       formatTime(row.latest_window_ts),
       ''
     ]),
+    ...captureQuality.value.sources.map((row) => [
+      '采集队列',
+      row.source_id,
+      row.iface,
+      dataQualityStatusText(row.status),
+      String(row.windows),
+      String(row.queue_pressure || 0),
+      String(row.freshness_seconds),
+      String(row.rx_bytes + row.tx_bytes),
+      String(row.rx_packets + row.tx_packets),
+      String(row.rx_dropped + row.tx_dropped),
+      formatTime(row.first_window_ts),
+      formatTime(row.latest_window_ts),
+      `packet ${row.packet_queue_len}/${row.packet_queue_capacity}; window ${row.window_queue_len}/${row.window_queue_capacity}`
+    ]),
     ...dataQuality.value.gaps.map((row) => [
       '断档',
       row.source_id,
@@ -3253,6 +3288,13 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ (captureQuality.summary.rx_errors + captureQuality.summary.tx_errors).toLocaleString() }}</strong>
             </div>
           </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>用户态队列压力</span>
+              <strong>{{ ((captureQuality.summary.queue_pressure || 0) * 100).toFixed(1) }}%</strong>
+            </div>
+          </article>
         </section>
         <section class="command-grid">
           <HorizontalBarChart title="接口 RX/TX 流量" eyebrow="Interface Traffic" :items="captureQualityTrafficItems" />
@@ -3260,6 +3302,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
         <section class="command-grid">
           <HorizontalBarChart title="接口 Errors" eyebrow="Interface Errors" :items="captureQualityErrorItems" unit="count" />
+          <HorizontalBarChart title="用户态队列压力" eyebrow="Queue Pressure" :items="captureQualityQueueItems" unit="count" />
           <section class="table-panel report-recommendations">
             <div class="panel-heading">
               <h2>接口质量建议</h2>
@@ -3317,6 +3360,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <th>TX 包</th>
                 <th>TX Dropped</th>
                 <th>TX Errors</th>
+                <th>Packet 队列</th>
+                <th>Window 队列</th>
+                <th>队列压力</th>
                 <th>最近窗口</th>
               </tr>
             </thead>
@@ -3334,6 +3380,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ row.tx_packets.toLocaleString() }}</td>
                 <td>{{ row.tx_dropped.toLocaleString() }}</td>
                 <td>{{ row.tx_errors.toLocaleString() }}</td>
+                <td>{{ row.packet_queue_len.toLocaleString() }} / {{ row.packet_queue_capacity.toLocaleString() }}</td>
+                <td>{{ row.window_queue_len.toLocaleString() }} / {{ row.window_queue_capacity.toLocaleString() }}</td>
+                <td>{{ ((row.queue_pressure || 0) * 100).toFixed(1) }}%</td>
                 <td>{{ formatTime(row.latest_window_ts) }}</td>
               </tr>
             </tbody>
