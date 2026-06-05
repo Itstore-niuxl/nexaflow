@@ -1435,6 +1435,32 @@ td {
   color: #2563eb;
 }
 
+.ai-workbench-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ai-action-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.ai-action-panel article {
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-left: 4px solid #2563eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.ai-action-panel strong {
+  color: #24324a;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .incident-context-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

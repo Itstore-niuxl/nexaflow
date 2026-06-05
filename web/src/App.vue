@@ -22,6 +22,7 @@ import {
   ServerCog,
   Settings2,
   Shield,
+  Sparkles,
   Waypoints
 } from '@lucide/vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
@@ -407,6 +408,7 @@ const navGroups = [
   {
     title: '分析',
     items: [
+      { id: 'ai', label: 'AI 分析', icon: Sparkles },
       { id: 'analysis', label: '流向分析', icon: Route },
       { id: 'anomalies', label: '异常波动', icon: AlertTriangle },
       { id: 'service-analytics', label: '应用分析', icon: ServerCog },
@@ -449,6 +451,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   quality: { title: '数据质量', subtitle: '核对采集窗口覆盖率、断档、延迟、采集源和网卡健康状态' },
   capacity: { title: '容量趋势', subtitle: '评估带宽余量、峰值增长、P95 利用率和容量风险对象' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
+  ai: { title: 'AI 分析', subtitle: '集中查看巡检、事件和资产 AI 摘要，快速进入调查闭环' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
   'service-analytics': { title: '应用分析', subtitle: '按应用服务聚合类别、风险、增长、端口和会话样例' },
@@ -689,6 +692,14 @@ const refresh = async () => {
       nextDegraded = nextDegraded || assetAIRes.degraded;
     } else {
       assetAISummary.value = emptyAISummary('asset');
+    }
+    if (securityIncidents.value[0]) {
+      const incident = securityIncidents.value[0];
+      const incidentAIRes = await api.aiIncidentSummary(incident.subject, incident.kind, incident.id, minutes, 12);
+      incidentAISummary.value = incidentAIRes.data;
+      nextDegraded = nextDegraded || incidentAIRes.degraded;
+    } else {
+      incidentAISummary.value = emptyAISummary('incident');
     }
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
@@ -2129,6 +2140,12 @@ const reportExposureRiskItems = computed(() =>
 const reportExternalDirectionItems = computed(() =>
   aggregateTopItems(reportOverview.value.external_access, (row) => row.direction, (row) => row.bytes, (row) => row.packets)
 );
+const aiActionItems = computed(() =>
+  [...reportAISummary.value.actions, ...incidentAISummary.value.actions, ...assetAISummary.value.actions]
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((item, index) => ({ key: item, bytes: 8 - index, packets: 1 }))
+);
 const incidentContextSessionItems = computed(() => incidentContext.value.sessions.map((row) => ({ key: row.key, bytes: row.bytes, packets: row.packets })));
 const incidentContextInsightItems = computed(() =>
   incidentContext.value.insights.map((row) => ({
@@ -2534,6 +2551,22 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   } finally {
     loadingIncidentContext.value = false;
   }
+};
+
+const openPrimaryIncidentContext = async () => {
+  const incident = securityIncidents.value[0];
+  currentView.value = 'incidents';
+  if (incident) {
+    await loadIncidentContext(incident);
+  }
+};
+
+const openPrimaryAssetProfile = async () => {
+  const asset = assetRisks.value[0];
+  if (!asset) return;
+  profileIP.value = asset.ip;
+  currentView.value = 'profile';
+  await loadProfile();
 };
 
 const updateIncidentStatus = async (incident: SecurityIncident, status: string) => {
@@ -3327,6 +3360,177 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TopNTable title="目的 IP 排行" :items="topDst" />
           <TopNTable title="目的端口排行" :items="topPorts" />
           <TopNTable title="协议排行" :items="topProtocols" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'ai'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Sparkles :size="22" />
+            <div>
+              <span>AI 模式</span>
+              <strong>{{ reportAISummary.mode || 'local_mock' }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>巡检置信度</span>
+              <strong>{{ aiConfidenceText(reportAISummary.confidence) }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>开放事件</span>
+              <strong>{{ openIncidentCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Shield :size="22" />
+            <div>
+              <span>严重资产</span>
+              <strong>{{ criticalAssetRiskCount.toLocaleString() }}</strong>
+            </div>
+          </article>
+        </section>
+
+        <section class="ai-workbench-actions">
+          <button class="command-button" type="button" @click="openPrimaryIncidentContext">查看首要事件上下文</button>
+          <button class="command-button" type="button" @click="openPrimaryAssetProfile">查看最高风险资产</button>
+          <button class="command-button" type="button" @click="currentView = 'reports'">进入报表中心</button>
+        </section>
+
+        <section class="command-grid">
+          <section class="ai-summary-card featured">
+            <div class="panel-heading">
+              <h2>{{ reportAISummary.title }}</h2>
+              <span>{{ reportAISummary.mode }} / {{ aiConfidenceText(reportAISummary.confidence) }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ reportAISummary.summary }}</p>
+            <div class="ai-summary-grid">
+              <div>
+                <span>巡检发现</span>
+                <ul>
+                  <li v-for="item in reportAISummary.findings" :key="`ai-report-finding-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+              <div>
+                <span>处置建议</span>
+                <ul>
+                  <li v-for="item in reportAISummary.actions" :key="`ai-report-action-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>{{ incidentAISummary.title }}</h2>
+              <span>{{ incidentAISummary.mode }} / {{ aiConfidenceText(incidentAISummary.confidence) }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ incidentAISummary.summary }}</p>
+            <div class="ai-summary-grid">
+              <div>
+                <span>调查发现</span>
+                <ul>
+                  <li v-for="item in incidentAISummary.findings" :key="`ai-incident-finding-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+              <div>
+                <span>下一步</span>
+                <ul>
+                  <li v-for="item in incidentAISummary.actions" :key="`ai-incident-action-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="command-grid">
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>{{ assetAISummary.title }}</h2>
+              <span>{{ assetAISummary.mode }} / {{ aiConfidenceText(assetAISummary.confidence) }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ assetAISummary.summary }}</p>
+            <div class="ai-summary-grid">
+              <div>
+                <span>关键发现</span>
+                <ul>
+                  <li v-for="item in assetAISummary.findings" :key="`ai-asset-finding-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+              <div>
+                <span>建议动作</span>
+                <ul>
+                  <li v-for="item in assetAISummary.actions" :key="`ai-asset-action-${item}`">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+          </section>
+          <section class="table-panel ai-action-panel">
+            <div class="panel-heading">
+              <h2>AI 行动清单</h2>
+              <span>{{ aiActionItems.length.toLocaleString() }} 项</span>
+            </div>
+            <div v-if="aiActionItems.length === 0" class="empty-state">暂无行动建议</div>
+            <article v-for="item in aiActionItems" :key="`ai-action-${item.key}`">
+              <strong>{{ item.key }}</strong>
+            </article>
+          </section>
+        </section>
+
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>首要事件</h2>
+              <span>{{ securityIncidents.length.toLocaleString() }} 条 / {{ rangeLabel }}</span>
+            </div>
+            <div v-if="securityIncidents.length === 0" class="empty-state">暂无事件</div>
+            <table v-else>
+              <thead>
+                <tr>
+                  <th>对象</th>
+                  <th>级别</th>
+                  <th>摘要</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="incident in securityIncidents.slice(0, 5)" :key="incident.id">
+                  <td>{{ incident.subject }}</td>
+                  <td><span class="severity-pill" :class="incident.severity">{{ severityText(incident.severity) }}</span></td>
+                  <td>{{ incident.summary }}</td>
+                  <td><button class="inline-button" type="button" @click="loadIncidentContext(incident); currentView = 'incidents'">上下文</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>重点资产</h2>
+              <span>{{ assetRisks.length.toLocaleString() }} 个 / {{ rangeLabel }}</span>
+            </div>
+            <div v-if="assetRisks.length === 0" class="empty-state">暂无资产风险数据</div>
+            <table v-else>
+              <thead>
+                <tr>
+                  <th>资产</th>
+                  <th>等级</th>
+                  <th>评分</th>
+                  <th>主要原因</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="asset in assetRisks.slice(0, 5)" :key="asset.ip">
+                  <td>{{ asset.ip }}</td>
+                  <td><span class="severity-pill" :class="asset.risk_level">{{ assetRiskLevelText(asset.risk_level) }}</span></td>
+                  <td>{{ asset.risk_score }}</td>
+                  <td>{{ asset.top_finding || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
         </section>
       </template>
 
