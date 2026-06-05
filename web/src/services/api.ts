@@ -51,10 +51,25 @@ export interface AuditEvent {
   client_ip: string;
 }
 
+export interface ConfigVersion {
+  id: string;
+  ts: number;
+  actor: string;
+  scope: string;
+  target: string;
+  action: string;
+  summary: string;
+  config: string;
+  config_text?: string;
+  client_ip: string;
+}
+
 export interface AuthStatus {
   enabled: boolean;
   authenticated: boolean;
   actor: string;
+  role?: string;
+  can_write?: boolean;
 }
 
 export interface NetworkInterface {
@@ -984,5 +999,21 @@ export const api = {
   },
   async auditEvents(limit = 80) {
     return json<{ data: AuditEvent[]; degraded: boolean }>(`/api/v1/system/audit-events?limit=${limit}`);
+  },
+  async configVersions(scope = '', limit = 80) {
+    return json<{ data: ConfigVersion[]; degraded: boolean }>(
+      `/api/v1/system/config-versions?scope=${encodeURIComponent(scope)}&limit=${limit}`
+    );
+  },
+  async restoreConfigVersion(id: string) {
+    const response = await fetch('/api/v1/system/config-versions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: CollectorConfig; version: ConfigVersion }>;
   }
 };

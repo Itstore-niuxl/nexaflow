@@ -125,3 +125,20 @@ ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (ts, action, actor)
 TTL ts + INTERVAL 365 DAY;
+
+CREATE TABLE IF NOT EXISTS nexaflow.config_versions
+(
+    id String,
+    ts DateTime,
+    actor LowCardinality(String),
+    scope LowCardinality(String),
+    target String,
+    action LowCardinality(String),
+    summary String,
+    config String,
+    client_ip String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (scope, target, ts)
+TTL ts + INTERVAL 365 DAY;

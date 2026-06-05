@@ -273,6 +273,22 @@ ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (ts, action, actor)
 TTL ts + INTERVAL 365 DAY`,
+		`CREATE TABLE IF NOT EXISTS ` + s.database + `.config_versions
+(
+    id String,
+    ts DateTime,
+    actor LowCardinality(String),
+    scope LowCardinality(String),
+    target String,
+    action LowCardinality(String),
+    summary String,
+    config String,
+    client_ip String
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (scope, target, ts)
+TTL ts + INTERVAL 365 DAY`,
 	}
 	for _, q := range queries {
 		if err := s.exec(ctx, q); err != nil {
@@ -743,6 +759,124 @@ FORMAT JSON`, s.database, limit)
 		row["detail_text"] = stringValue(row["detail"])
 	}
 	return parsed.Data, nil
+}
+
+func (s *Store) RecordConfigVersion(ctx context.Context, actor, scope, target, action, summary string, config any, clientIP string) error {
+	actor = strings.TrimSpace(actor)
+	scope = strings.TrimSpace(scope)
+	target = strings.TrimSpace(target)
+	action = strings.TrimSpace(action)
+	summary = strings.TrimSpace(summary)
+	clientIP = strings.TrimSpace(clientIP)
+	if actor == "" {
+		actor = "operator"
+	}
+	if scope == "" {
+		return fmt.Errorf("config scope is required")
+	}
+	if target == "" {
+		target = "-"
+	}
+	if action == "" {
+		action = "config.update"
+	}
+	if summary == "" {
+		summary = action + " " + target
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	q := "INSERT INTO " + s.database + ".config_versions FORMAT JSONEachRow"
+	return s.execBody(ctx, q, fmt.Sprintf(`{"id":%q,"ts":%q,"actor":%q,"scope":%q,"target":%q,"action":%q,"summary":%q,"config":%q,"client_ip":%q}`+"\n",
+		"cfg-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		formatTime(now),
+		actor,
+		scope,
+		target,
+		action,
+		summary,
+		string(configJSON),
+		clientIP,
+	))
+}
+
+func (s *Store) ConfigVersions(ctx context.Context, scope string, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+	where := ""
+	if strings.TrimSpace(scope) != "" {
+		where = "WHERE scope = '" + escape(strings.TrimSpace(scope)) + "'"
+	}
+	q := fmt.Sprintf(`SELECT
+    id,
+    toUnixTimestamp(ts) AS ts,
+    actor,
+    scope,
+    target,
+    action,
+    summary,
+    config,
+    client_ip
+FROM %s.config_versions
+%s
+ORDER BY ts DESC
+LIMIT %d
+FORMAT JSON`, s.database, where, limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return demoConfigVersions(), err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return demoConfigVersions(), err
+	}
+	for _, row := range parsed.Data {
+		row["config_text"] = stringValue(row["config"])
+	}
+	return parsed.Data, nil
+}
+
+func (s *Store) ConfigVersion(ctx context.Context, id string) (map[string]any, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("config version id is required")
+	}
+	q := fmt.Sprintf(`SELECT
+    id,
+    toUnixTimestamp(ts) AS ts,
+    actor,
+    scope,
+    target,
+    action,
+    summary,
+    config,
+    client_ip
+FROM %s.config_versions
+WHERE id = '%s'
+ORDER BY ts DESC
+LIMIT 1
+FORMAT JSON`, s.database, escape(id))
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	if len(parsed.Data) == 0 {
+		return nil, fmt.Errorf("config version %q not found", id)
+	}
+	row := parsed.Data[0]
+	row["config_text"] = stringValue(row["config"])
+	return row, nil
 }
 
 func (s *Store) AlertStatusOverrides(ctx context.Context) (map[string]string, error) {
@@ -3185,6 +3319,38 @@ func demoAuditEvents() []map[string]any {
 			"summary":     "保存检测规则：公网会话突增",
 			"detail":      `{"metric":"external_sessions","threshold":30}`,
 			"detail_text": `{"metric":"external_sessions","threshold":30}`,
+			"client_ip":   "127.0.0.1",
+		},
+	}
+}
+
+func demoConfigVersions() []map[string]any {
+	now := time.Now().Unix()
+	collectorConfig := `{"mode":"live_pcap","iface":"eth0","source_id":"live_pcap-eth0","bpf_filter":"ip or ip6","session_topn":500}`
+	alertConfig := `{"flow_bytes":20480,"flow_share":0.3,"source_packets":50,"link_utilization":0.8,"silenced_subjects":["dst_port:22"]}`
+	return []map[string]any{
+		{
+			"id":          "cfg-demo-collector",
+			"ts":          now - 180,
+			"actor":       "operator",
+			"scope":       "collector",
+			"target":      "dev-collector-01",
+			"action":      "collector.config.update",
+			"summary":     "更新采集器配置：live_pcap / eth0",
+			"config":      collectorConfig,
+			"config_text": collectorConfig,
+			"client_ip":   "127.0.0.1",
+		},
+		{
+			"id":          "cfg-demo-alerts",
+			"ts":          now - 420,
+			"actor":       "operator",
+			"scope":       "alerts",
+			"target":      "dev-collector-01",
+			"action":      "alert.silence.add",
+			"summary":     "加入白名单/静默名单：dst_port:22",
+			"config":      alertConfig,
+			"config_text": alertConfig,
 			"client_ip":   "127.0.0.1",
 		},
 	}

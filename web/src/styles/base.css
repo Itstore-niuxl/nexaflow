@@ -991,6 +991,7 @@ td {
 .rules-table table,
 .rule-finding-table table,
 .audit-table table,
+.config-version-table table,
 .data-quality-table table,
 .capture-quality-table table,
 .data-gap-table table,
@@ -1026,12 +1027,22 @@ td {
   min-width: 1420px;
 }
 
+.config-version-table table {
+  min-width: 1780px;
+}
+
 .audit-table th:nth-child(4),
 .audit-table td:nth-child(4),
 .audit-table th:nth-child(5),
 .audit-table td:nth-child(5),
 .audit-table th:nth-child(7),
-.audit-table td:nth-child(7) {
+.audit-table td:nth-child(7),
+.config-version-table th:nth-child(3),
+.config-version-table td:nth-child(3),
+.config-version-table th:nth-child(6),
+.config-version-table td:nth-child(6),
+.config-version-table th:nth-child(8),
+.config-version-table td:nth-child(8) {
   white-space: normal;
   word-break: break-all;
 }

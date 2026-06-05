@@ -26,6 +26,17 @@ const authCookieName = "nexaflow_session"
 type contextKey string
 
 const actorContextKey contextKey = "actor"
+const roleContextKey contextKey = "role"
+
+const (
+	authRoleAdmin  = "admin"
+	authRoleViewer = "viewer"
+)
+
+type authIdentity struct {
+	Actor string
+	Role  string
+}
 
 type Server struct {
 	store  *clickhouse.Store
@@ -89,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/data-quality", s.dataQuality)
 	mux.HandleFunc("/api/v1/system/capture-quality", s.captureQuality)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
+	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
 	return cors(s.authRequired(mux))
 }
 
@@ -491,6 +503,7 @@ func (s *Server) detectionRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.configSnapshot(r, "rules", strings.TrimSpace(body.ID), "detection_rule.upsert", "保存检测规则："+strings.TrimSpace(body.Name), config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
 		s.audit(r, "detection_rule.upsert", strings.TrimSpace(body.ID), "保存检测规则："+strings.TrimSpace(body.Name), map[string]any{
 			"id":        body.ID,
 			"name":      body.Name,
@@ -522,6 +535,7 @@ func (s *Server) detectionRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.configSnapshot(r, "rules", id, "detection_rule.delete", "删除检测规则："+id, config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
 		s.audit(r, "detection_rule.delete", id, "删除检测规则："+id, map[string]any{"id": id})
 		writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.DetectionRules})
 	default:
@@ -604,6 +618,7 @@ func (s *Server) collectorConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.configSnapshot(r, "collector", s.config.CollectorID, "collector.config.update", "更新采集器配置："+body.Mode+" / "+body.Iface, config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
 	s.audit(r, "collector.config.update", s.config.CollectorID, "更新采集器配置："+body.Mode+" / "+body.Iface, map[string]any{
 		"collector_id": s.config.CollectorID,
 		"mode":         body.Mode,
@@ -700,6 +715,7 @@ func (s *Server) alertConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.configSnapshot(r, "alerts", s.config.CollectorID, "alert.config.update", "更新告警阈值配置", config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
 	s.audit(r, "alert.config.update", s.config.CollectorID, "更新告警阈值配置", map[string]any{
 		"flow_bytes":       runtime.Alerts.FlowBytes,
 		"flow_share":       runtime.Alerts.FlowShare,
@@ -746,6 +762,7 @@ func (s *Server) alertSilences(w http.ResponseWriter, r *http.Request) {
 		action = "alert.silence.remove"
 		summary = "移出白名单/静默名单：" + subject
 	}
+	s.configSnapshot(r, "alerts", subject, action, summary, config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
 	s.audit(r, action, subject, summary, map[string]any{"subject": subject})
 	writeJSON(w, map[string]any{"data": config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)).Alerts.SilencedSubjects})
 }
@@ -785,20 +802,85 @@ func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
+func (s *Server) configVersions(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		data, err := s.store.ConfigVersions(r.Context(), strings.TrimSpace(r.URL.Query().Get("scope")), queryLimit(r, 80, 500))
+		writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(body.ID)
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.ConfigVersion(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	var runtime config.CaptureRuntime
+	if err := json.Unmarshal([]byte(stringValue(version["config"])), &runtime); err != nil {
+		http.Error(w, "invalid config snapshot: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	restored := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+	target := stringValue(version["target"])
+	if target == "" {
+		target = s.config.CollectorID
+	}
+	scope := stringValue(version["scope"])
+	if scope == "" {
+		scope = "runtime"
+	}
+	summary := "恢复配置版本：" + id
+	s.configSnapshot(r, scope, target, "config.version.restore", summary, restored)
+	s.audit(r, "config.version.restore", target, summary, map[string]any{
+		"version_id": id,
+		"scope":      scope,
+		"source_ts":  version["ts"],
+		"source":     version["summary"],
+	})
+	writeJSON(w, map[string]any{"data": restored, "version": version})
+}
+
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	enabled := s.authEnabled()
 	authenticated := true
 	actor := "operator"
+	role := authRoleAdmin
 	if enabled {
-		actor, authenticated = s.verifyAuthRequest(r)
+		identity, ok := s.verifyAuthRequest(r)
+		authenticated = ok
+		actor = identity.Actor
+		role = identity.Role
 	}
 	if actor == "" {
 		actor = "operator"
+	}
+	if role == "" {
+		role = authRoleAdmin
 	}
 	writeJSON(w, map[string]any{"data": map[string]any{
 		"enabled":       enabled,
 		"authenticated": authenticated,
 		"actor":         actor,
+		"role":          role,
+		"can_write":     !enabled || (authenticated && role == authRoleAdmin),
 	}})
 }
 
@@ -808,7 +890,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authEnabled() {
-		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator"}})
+		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator", "role": authRoleAdmin, "can_write": true}})
 		return
 	}
 	var body struct {
@@ -819,7 +901,8 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(s.config.AuthPassword)) != 1 {
+	role := s.loginRole(body.Password)
+	if role == "" {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
@@ -827,12 +910,12 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "operator"
 	}
-	if err := s.setAuthCookie(w, actor); err != nil {
+	if err := s.setAuthCookie(w, actor, role); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.login", "console", "控制台登录："+actor, map[string]any{"actor": actor}, auditClientIP(r))
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": actor}})
+	_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.login", "console", "控制台登录："+actor, map[string]any{"actor": actor, "role": role}, auditClientIP(r))
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": actor, "role": role, "can_write": role == authRoleAdmin}})
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
@@ -840,9 +923,12 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	actor, _ := s.verifyAuthRequest(r)
-	if actor == "" {
-		actor = "operator"
+	identity, _ := s.verifyAuthRequest(r)
+	if identity.Actor == "" {
+		identity.Actor = "operator"
+	}
+	if identity.Role == "" {
+		identity.Role = authRoleAdmin
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName,
@@ -853,9 +939,9 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	if s.authEnabled() {
-		_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.logout", "console", "控制台退出："+actor, map[string]any{"actor": actor}, auditClientIP(r))
+		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.logout", "console", "控制台退出："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
 	}
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": ""}})
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": "", "role": "", "can_write": false}})
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {
@@ -864,21 +950,55 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		actor, ok := s.verifyAuthRequest(r)
+		identity, ok := s.verifyAuthRequest(r)
 		if !ok {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorContextKey, actor)))
+		if requestNeedsWriteAccess(r) && identity.Role != authRoleAdmin {
+			http.Error(w, "admin role required", http.StatusForbidden)
+			return
+		}
+		ctx := context.WithValue(r.Context(), actorContextKey, identity.Actor)
+		ctx = context.WithValue(ctx, roleContextKey, identity.Role)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func (s *Server) authEnabled() bool {
-	return strings.TrimSpace(s.config.AuthPassword) != ""
+	return strings.TrimSpace(s.config.AuthPassword) != "" || strings.TrimSpace(s.config.AuthReadOnlyPassword) != ""
 }
 
-func (s *Server) setAuthCookie(w http.ResponseWriter, actor string) error {
-	token, err := s.signAuthToken(actor, time.Now().Add(12*time.Hour).Unix())
+func (s *Server) loginRole(password string) string {
+	if strings.TrimSpace(s.config.AuthPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.AuthPassword)) == 1 {
+		return authRoleAdmin
+	}
+	if strings.TrimSpace(s.config.AuthReadOnlyPassword) != "" && subtle.ConstantTimeCompare([]byte(password), []byte(s.config.AuthReadOnlyPassword)) == 1 {
+		return authRoleViewer
+	}
+	return ""
+}
+
+func requestNeedsWriteAccess(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return strings.HasPrefix(r.URL.Path, "/api/v1/")
+	}
+}
+
+func normalizeAuthRole(role string) string {
+	switch strings.TrimSpace(role) {
+	case authRoleViewer:
+		return authRoleViewer
+	default:
+		return authRoleAdmin
+	}
+}
+
+func (s *Server) setAuthCookie(w http.ResponseWriter, actor, role string) error {
+	token, err := s.signAuthToken(actor, role, time.Now().Add(12*time.Hour).Unix())
 	if err != nil {
 		return err
 	}
@@ -893,47 +1013,54 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, actor string) error {
 	return nil
 }
 
-func (s *Server) signAuthToken(actor string, expires int64) (string, error) {
-	payload := actor + "|" + strconv.FormatInt(expires, 10)
+func (s *Server) signAuthToken(actor, role string, expires int64) (string, error) {
+	role = normalizeAuthRole(role)
+	payload := actor + "|" + role + "|" + strconv.FormatInt(expires, 10)
 	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	sig := s.authSignature(encodedPayload)
 	return encodedPayload + "." + sig, nil
 }
 
-func (s *Server) verifyAuthRequest(r *http.Request) (string, bool) {
+func (s *Server) verifyAuthRequest(r *http.Request) (authIdentity, bool) {
 	cookie, err := r.Cookie(authCookieName)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
-		return "", false
+		return authIdentity{}, false
 	}
 	return s.verifyAuthToken(cookie.Value)
 }
 
-func (s *Server) verifyAuthToken(token string) (string, bool) {
+func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", false
+		return authIdentity{}, false
 	}
 	expected := s.authSignature(parts[0])
 	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
-		return "", false
+		return authIdentity{}, false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", false
+		return authIdentity{}, false
 	}
 	payload := strings.Split(string(raw), "|")
-	if len(payload) != 2 {
-		return "", false
+	if len(payload) != 2 && len(payload) != 3 {
+		return authIdentity{}, false
 	}
-	expires, err := strconv.ParseInt(payload[1], 10, 64)
+	role := authRoleAdmin
+	expiresRaw := payload[1]
+	if len(payload) == 3 {
+		role = normalizeAuthRole(payload[1])
+		expiresRaw = payload[2]
+	}
+	expires, err := strconv.ParseInt(expiresRaw, 10, 64)
 	if err != nil || expires < time.Now().Unix() {
-		return "", false
+		return authIdentity{}, false
 	}
 	actor := strings.TrimSpace(payload[0])
 	if actor == "" {
 		actor = "operator"
 	}
-	return actor, true
+	return authIdentity{Actor: actor, Role: role}, true
 }
 
 func (s *Server) authSignature(payload string) string {
@@ -1005,6 +1132,10 @@ func queryLimit(r *http.Request, fallback, max int) int {
 
 func (s *Server) audit(r *http.Request, action, target, summary string, detail map[string]any) {
 	_ = s.store.RecordAuditEvent(r.Context(), auditActor(r), action, target, summary, detail, auditClientIP(r))
+}
+
+func (s *Server) configSnapshot(r *http.Request, scope, target, action, summary string, snapshot any) {
+	_ = s.store.RecordConfigVersion(r.Context(), auditActor(r), scope, target, action, summary, snapshot, auditClientIP(r))
 }
 
 func auditActor(r *http.Request) string {

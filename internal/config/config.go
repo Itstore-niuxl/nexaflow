@@ -12,24 +12,25 @@ import (
 )
 
 type Config struct {
-	APIAddr       string
-	Mode          string
-	SourceID      string
-	CollectorID   string
-	Iface         string
-	Window        time.Duration
-	SessionTopN   int
-	RedisAddr     string
-	ClickHouseURL string
-	Database      string
-	BandwidthMbps uint64
-	BPFFilter     string
-	PcapFile      string
-	ReplaySpeed   float64
-	RuntimePath   string
-	HostNetPath   string
-	AuthPassword  string
-	AuthSecret    string
+	APIAddr              string
+	Mode                 string
+	SourceID             string
+	CollectorID          string
+	Iface                string
+	Window               time.Duration
+	SessionTopN          int
+	RedisAddr            string
+	ClickHouseURL        string
+	Database             string
+	BandwidthMbps        uint64
+	BPFFilter            string
+	PcapFile             string
+	ReplaySpeed          float64
+	RuntimePath          string
+	HostNetPath          string
+	AuthPassword         string
+	AuthReadOnlyPassword string
+	AuthSecret           string
 }
 
 type CaptureRuntime struct {
@@ -55,24 +56,25 @@ type Alerts struct {
 
 func Load() Config {
 	cfg := Config{
-		APIAddr:       env("NEXAFLOW_API_ADDR", "0.0.0.0:8080"),
-		Mode:          env("NEXAFLOW_MODE", "mock"),
-		SourceID:      env("NEXAFLOW_SOURCE_ID", "dev-source-01"),
-		CollectorID:   env("NEXAFLOW_COLLECTOR_ID", "dev-collector-01"),
-		Iface:         env("NEXAFLOW_IFACE", "mock0"),
-		Window:        envDuration("NEXAFLOW_WINDOW", 5*time.Second),
-		SessionTopN:   envInt("NEXAFLOW_SESSION_TOPN", 500),
-		RedisAddr:     env("NEXAFLOW_REDIS_ADDR", "127.0.0.1:6379"),
-		ClickHouseURL: env("NEXAFLOW_CLICKHOUSE_URL", "http://127.0.0.1:8123"),
-		Database:      env("NEXAFLOW_CLICKHOUSE_DB", "nexaflow"),
-		BandwidthMbps: envUint64("NEXAFLOW_BANDWIDTH_MBPS", 1000),
-		BPFFilter:     env("NEXAFLOW_BPF_FILTER", "ip or ip6"),
-		PcapFile:      env("NEXAFLOW_PCAP_FILE", "/var/lib/nexaflow/replay.pcap"),
-		ReplaySpeed:   envFloat64("NEXAFLOW_REPLAY_SPEED", 1),
-		RuntimePath:   env("NEXAFLOW_RUNTIME_CONFIG", "/var/lib/nexaflow/collector_config.json"),
-		HostNetPath:   env("NEXAFLOW_HOST_NET_PATH", "/host/sys/class/net"),
-		AuthPassword:  env("NEXAFLOW_AUTH_PASSWORD", ""),
-		AuthSecret:    env("NEXAFLOW_AUTH_SECRET", ""),
+		APIAddr:              env("NEXAFLOW_API_ADDR", "0.0.0.0:8080"),
+		Mode:                 env("NEXAFLOW_MODE", "mock"),
+		SourceID:             env("NEXAFLOW_SOURCE_ID", "dev-source-01"),
+		CollectorID:          env("NEXAFLOW_COLLECTOR_ID", "dev-collector-01"),
+		Iface:                env("NEXAFLOW_IFACE", "mock0"),
+		Window:               envDuration("NEXAFLOW_WINDOW", 5*time.Second),
+		SessionTopN:          envInt("NEXAFLOW_SESSION_TOPN", 500),
+		RedisAddr:            env("NEXAFLOW_REDIS_ADDR", "127.0.0.1:6379"),
+		ClickHouseURL:        env("NEXAFLOW_CLICKHOUSE_URL", "http://127.0.0.1:8123"),
+		Database:             env("NEXAFLOW_CLICKHOUSE_DB", "nexaflow"),
+		BandwidthMbps:        envUint64("NEXAFLOW_BANDWIDTH_MBPS", 1000),
+		BPFFilter:            env("NEXAFLOW_BPF_FILTER", "ip or ip6"),
+		PcapFile:             env("NEXAFLOW_PCAP_FILE", "/var/lib/nexaflow/replay.pcap"),
+		ReplaySpeed:          envFloat64("NEXAFLOW_REPLAY_SPEED", 1),
+		RuntimePath:          env("NEXAFLOW_RUNTIME_CONFIG", "/var/lib/nexaflow/collector_config.json"),
+		HostNetPath:          env("NEXAFLOW_HOST_NET_PATH", "/host/sys/class/net"),
+		AuthPassword:         env("NEXAFLOW_AUTH_PASSWORD", ""),
+		AuthReadOnlyPassword: env("NEXAFLOW_AUTH_READONLY_PASSWORD", ""),
+		AuthSecret:           env("NEXAFLOW_AUTH_SECRET", ""),
 	}
 
 	flag.StringVar(&cfg.APIAddr, "api-addr", cfg.APIAddr, "API listen address")
@@ -88,6 +90,7 @@ func Load() Config {
 	flag.StringVar(&cfg.PcapFile, "pcap-file", cfg.PcapFile, "pcap file for pcap_replay mode")
 	flag.StringVar(&cfg.RuntimePath, "runtime-config", cfg.RuntimePath, "collector runtime config path")
 	flag.StringVar(&cfg.AuthPassword, "auth-password", cfg.AuthPassword, "optional console login password")
+	flag.StringVar(&cfg.AuthReadOnlyPassword, "auth-readonly-password", cfg.AuthReadOnlyPassword, "optional read-only console login password")
 	flag.StringVar(&cfg.AuthSecret, "auth-secret", cfg.AuthSecret, "optional session signing secret")
 	flag.Uint64Var(&cfg.BandwidthMbps, "bandwidth-mbps", cfg.BandwidthMbps, "link bandwidth in Mbps")
 	flag.Float64Var(&cfg.ReplaySpeed, "replay-speed", cfg.ReplaySpeed, "pcap replay speed multiplier")

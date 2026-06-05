@@ -47,6 +47,7 @@ import {
   type CaptureQuality,
   type Collector,
   type CollectorConfig,
+  type ConfigVersion,
   type DataQuality,
   type DimensionPoint,
   type DetectionRule,
@@ -98,6 +99,7 @@ const topECN = ref<TopItem[]>([]);
 const collectors = ref<Collector[]>([]);
 const alerts = ref<AlertEvent[]>([]);
 const auditEvents = ref<AuditEvent[]>([]);
+const configVersions = ref<ConfigVersion[]>([]);
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -322,7 +324,7 @@ const capacityPlanning = ref<CapacityPlanning>(emptyCapacityPlanning());
 const degraded = ref(false);
 const loading = ref(false);
 const authChecking = ref(true);
-const authStatus = ref<AuthStatus>({ enabled: false, authenticated: true, actor: 'operator' });
+const authStatus = ref<AuthStatus>({ enabled: false, authenticated: true, actor: 'operator', role: 'admin', can_write: true });
 const loginActor = ref('operator');
 const loginPassword = ref('');
 const loginError = ref('');
@@ -331,6 +333,7 @@ const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
 const savingRule = ref(false);
+const restoringConfigVersion = ref('');
 const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
 const currentView = ref('dashboard');
@@ -398,6 +401,7 @@ const navGroups = [
       { id: 'search', label: '检索分析', icon: Search },
       { id: 'history', label: '历史回放', icon: History },
       { id: 'audit', label: '审计日志', icon: ClipboardList },
+      { id: 'config-versions', label: '配置版本', icon: History },
       { id: 'collectors', label: '采集器', icon: Settings2 }
     ]
   }
@@ -429,11 +433,17 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   search: { title: '检索分析', subtitle: '按 IP、端口、主机对或会话关键字检索流量对象' },
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
   audit: { title: '审计日志', subtitle: '追踪配置变更、事件处置、规则调整和白名单操作' },
+  'config-versions': { title: '配置版本', subtitle: '回溯采集、告警、规则和白名单的运行时配置快照' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
 };
 
 const pageTitle = computed(() => viewMeta[currentView.value]?.title ?? '流量总览');
 const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? '近实时流量、采集健康和关键对象排行');
+const canWrite = computed(() => !authStatus.value.enabled || authStatus.value.can_write !== false);
+const authRoleText = computed(() => {
+  if (!authStatus.value.enabled) return '免登录';
+  return authStatus.value.role === 'viewer' ? '观察员' : '管理员';
+});
 const rangeSeconds = computed(() => selectedMinutes.value * 60);
 const rangeLabel = computed(() => {
   if (selectedMinutes.value >= 1440) return '24 小时';
@@ -499,7 +509,8 @@ const refresh = async () => {
       trafficAnomaliesRes,
       reportRes,
       ruleFindingRes,
-      auditRes
+      auditRes,
+      configVersionRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -543,7 +554,8 @@ const refresh = async () => {
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
       api.ruleFindings(minutes, 100),
-      api.auditEvents(120)
+      api.auditEvents(120),
+      api.configVersions('', 120)
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -589,6 +601,7 @@ const refresh = async () => {
     reportOverview.value = reportRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
+    configVersions.value = configVersionRes.data;
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -624,7 +637,8 @@ const refresh = async () => {
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
       ruleFindingRes.degraded ||
-      auditRes.degraded;
+      auditRes.degraded ||
+      configVersionRes.degraded;
     if (!profileIP.value && srcRes.data[0]) {
       profileIP.value = srcRes.data[0].key;
     }
@@ -897,6 +911,30 @@ const refresh = async () => {
         target: 'rule-external-session-burst',
         summary: '保存检测规则：公网会话突增',
         detail: '{"metric":"external_sessions","threshold":30}',
+        client_ip: '127.0.0.1'
+      }
+    ];
+    configVersions.value = [
+      {
+        id: 'cfg-demo-collector',
+        ts: now - 180,
+        actor: 'operator',
+        scope: 'collector',
+        target: 'dev-collector-01',
+        action: 'collector.config.update',
+        summary: '更新采集器配置：live_pcap / eth0',
+        config: '{"mode":"live_pcap","iface":"eth0","source_id":"live_pcap-eth0","bpf_filter":"ip or ip6","session_topn":500}',
+        client_ip: '127.0.0.1'
+      },
+      {
+        id: 'cfg-demo-alerts',
+        ts: now - 420,
+        actor: 'operator',
+        scope: 'alerts',
+        target: 'dst_port:22',
+        action: 'alert.silence.add',
+        summary: '加入白名单/静默名单：dst_port:22',
+        config: '{"flow_bytes":20480,"flow_share":0.3,"source_packets":50,"link_utilization":0.8,"silenced_subjects":["dst_port:22"]}',
         client_ip: '127.0.0.1'
       }
     ];
@@ -1927,6 +1965,9 @@ const alertStatusItems = computed(() => aggregateTopItems(alerts.value, (row) =>
 const auditActionItems = computed(() => aggregateTopItems(auditEvents.value, (row) => auditActionText(row.action), () => 1, () => 0));
 const auditActorItems = computed(() => aggregateTopItems(auditEvents.value, (row) => row.actor || 'operator', () => 1, () => 0));
 const auditTargetItems = computed(() => aggregateTopItems(auditEvents.value, (row) => row.target || '-', () => 1, () => 0));
+const configScopeItems = computed(() => aggregateTopItems(configVersions.value, (row) => configScopeText(row.scope), () => 1, () => 0));
+const configActionItems = computed(() => aggregateTopItems(configVersions.value, (row) => auditActionText(row.action), () => 1, () => 0));
+const configActorItems = computed(() => aggregateTopItems(configVersions.value, (row) => row.actor || 'operator', () => 1, () => 0));
 const enabledRuleCount = computed(() => detectionRules.value.filter((row) => row.enabled).length);
 const criticalRuleFindingCount = computed(() => ruleFindings.value.filter((row) => row.severity === 'critical').length);
 const ruleFindingRuleItems = computed(() => aggregateTopItems(ruleFindings.value, (row) => row.rule_name, () => 1, () => 0));
@@ -2174,12 +2215,24 @@ const auditActionText = (action: string) => {
     'detection_rule.upsert': '检测规则保存',
     'detection_rule.delete': '检测规则删除',
     'collector.config.update': '采集配置更新',
+    'config.version.restore': '配置版本恢复',
     'alert.status.update': '告警状态更新',
     'alert.config.update': '告警阈值更新',
     'alert.silence.add': '加入白名单',
     'alert.silence.remove': '移出白名单'
   };
   return labels[action] ?? action;
+};
+
+const configScopeText = (scope: string) => {
+  const labels: Record<string, string> = {
+    collector: '采集器配置',
+    alerts: '告警配置',
+    rules: '检测规则',
+    assets: '资产配置',
+    runtime: '运行时配置'
+  };
+  return labels[scope] ?? (scope || '-');
 };
 
 const serviceRiskText = (risk: string) => {
@@ -2233,6 +2286,7 @@ const setView = (view: string) => {
 };
 
 const applyCaptureConfig = async () => {
+  if (!canWrite.value) return;
   switching.value = true;
   try {
     const config: CollectorConfig = {
@@ -2358,6 +2412,7 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
 };
 
 const updateIncidentStatus = async (incident: SecurityIncident, status: string) => {
+  if (!canWrite.value) return;
   handlingAlert.value = true;
   try {
     await api.updateIncidentStatus(incident.id, status);
@@ -2379,6 +2434,7 @@ const updateIncidentStatus = async (incident: SecurityIncident, status: string) 
 };
 
 const saveIncidentNote = async () => {
+  if (!canWrite.value) return;
   const note = incidentNoteText.value.trim();
   if (!selectedIncident.value || !note) return;
   savingIncidentNote.value = true;
@@ -2414,6 +2470,7 @@ const loadDimensionTrend = async () => {
 };
 
 const newRule = () => {
+  if (!canWrite.value) return;
   ruleEditor.value = {
     id: '',
     name: '',
@@ -2431,10 +2488,12 @@ const newRule = () => {
 };
 
 const editRule = (rule: DetectionRule) => {
+  if (!canWrite.value) return;
   ruleEditor.value = { ...rule };
 };
 
 const saveRule = async () => {
+  if (!canWrite.value) return;
   if (!ruleEditor.value || !ruleEditor.value.name.trim() || !ruleEditor.value.metric || ruleEditor.value.threshold <= 0) return;
   savingRule.value = true;
   try {
@@ -2451,6 +2510,7 @@ const saveRule = async () => {
 };
 
 const deleteRule = async (rule: DetectionRule) => {
+  if (!canWrite.value) return;
   savingRule.value = true;
   try {
     const result = await api.deleteDetectionRule(rule.id);
@@ -2468,6 +2528,7 @@ const deleteRule = async (rule: DetectionRule) => {
 };
 
 const toggleRule = async (rule: DetectionRule) => {
+  if (!canWrite.value) return;
   const next = { ...rule, enabled: !rule.enabled };
   const result = await api.saveDetectionRule(next);
   detectionRules.value = result.data;
@@ -2478,6 +2539,7 @@ const toggleRule = async (rule: DetectionRule) => {
 };
 
 const saveAlertConfig = async () => {
+  if (!canWrite.value) return;
   savingAlerts.value = true;
   try {
     const result = await api.updateAlertConfig(alertConfig.value);
@@ -2488,7 +2550,21 @@ const saveAlertConfig = async () => {
   }
 };
 
+const restoreConfigVersion = async (version: ConfigVersion) => {
+  if (!canWrite.value || !version.id) return;
+  const confirmed = window.confirm(`恢复配置版本 ${version.id}？当前运行时配置会被该快照覆盖。`);
+  if (!confirmed) return;
+  restoringConfigVersion.value = version.id;
+  try {
+    await api.restoreConfigVersion(version.id);
+    await refresh();
+  } finally {
+    restoringConfigVersion.value = '';
+  }
+};
+
 const updateAlertStatus = async (alert: AlertEvent, status: string) => {
+  if (!canWrite.value) return;
   handlingAlert.value = true;
   try {
     await api.updateAlertStatus(alert.id, status);
@@ -2499,6 +2575,7 @@ const updateAlertStatus = async (alert: AlertEvent, status: string) => {
 };
 
 const silenceSubject = async (subject: string) => {
+  if (!canWrite.value) return;
   if (!subject.trim()) return;
   handlingAlert.value = true;
   try {
@@ -2518,6 +2595,7 @@ const addWhitelistSubject = async () => {
 };
 
 const removeSilence = async (subject: string) => {
+  if (!canWrite.value) return;
   handlingAlert.value = true;
   try {
     const result = await api.removeAlertSilence(subject);
@@ -2529,6 +2607,7 @@ const removeSilence = async (subject: string) => {
 };
 
 const editAsset = (asset: AssetRow) => {
+  if (!canWrite.value) return;
   assetEditor.value = {
     ip: asset.ip,
     name: asset.name || '',
@@ -2544,6 +2623,7 @@ const editAsset = (asset: AssetRow) => {
 };
 
 const saveAssetMetadata = async () => {
+  if (!canWrite.value) return;
   if (!assetEditor.value) return;
   savingAsset.value = true;
   try {
@@ -3002,7 +3082,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </div>
         <div class="topbar-actions">
           <div class="status-chip auth-chip">
-            <span>{{ authStatus.enabled ? authStatus.actor : '免登录' }}</span>
+            <span>{{ authStatus.enabled ? `${authStatus.actor} / ${authRoleText}` : authRoleText }}</span>
             <button v-if="authStatus.enabled" type="button" @click="logout">退出</button>
           </div>
           <div class="status-chip" :class="{ warning: degraded }">
@@ -4311,7 +4391,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                     <button
                       class="inline-button"
                       type="button"
-                      :disabled="handlingAlert || isExposureSilenced(row)"
+                      :disabled="handlingAlert || isExposureSilenced(row) || !canWrite"
                       @click="silenceSubject(exposureSubject(row))"
                     >
                       {{ isExposureSilenced(row) ? '已忽略' : '忽略端口' }}
@@ -4406,7 +4486,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </label>
           </div>
           <div class="form-actions">
-            <button type="button" :disabled="savingAsset" @click="saveAssetMetadata">{{ savingAsset ? '保存中...' : '保存台账' }}</button>
+            <button type="button" :disabled="savingAsset || !canWrite" @click="saveAssetMetadata">{{ savingAsset ? '保存中...' : '保存台账' }}</button>
             <button type="button" :disabled="savingAsset" @click="assetEditor = null">取消</button>
           </div>
         </section>
@@ -4442,7 +4522,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ formatTime(asset.last_seen) }}</td>
                 <td>
                   <div class="row-actions">
-                    <button class="inline-button" type="button" @click="editAsset(asset)">编辑</button>
+                    <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset(asset)">编辑</button>
                     <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
                   </div>
                 </td>
@@ -4535,7 +4615,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td class="action-cell">
                   <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
                   <button class="inline-button" type="button" @click="searchTerm = asset.ip; currentView = 'search'; runSearch()">检索</button>
-                  <button class="inline-button" type="button" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
+                  <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
                 </td>
               </tr>
             </tbody>
@@ -4606,7 +4686,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ item.packets.toLocaleString() }}</td>
                 <td>{{ item.score }}</td>
                 <td>
-                  <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(item.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(item.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -4687,7 +4767,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <span>处置备注</span>
               <input v-model="incidentNoteText" placeholder="记录排查进展、责任人、结论或后续动作" @keyup.enter="saveIncidentNote" />
             </label>
-            <button type="button" :disabled="savingIncidentNote || !incidentNoteText.trim()" @click="saveIncidentNote">
+            <button type="button" :disabled="savingIncidentNote || !incidentNoteText.trim() || !canWrite" @click="saveIncidentNote">
               {{ savingIncidentNote ? '保存中...' : '添加备注' }}
             </button>
           </div>
@@ -4773,10 +4853,10 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td class="action-cell">
                   <button class="inline-button" type="button" :disabled="loadingIncidentContext" @click="loadIncidentContext(incident)">上下文</button>
                   <button class="inline-button" type="button" @click="inspectIncident(incident)">追踪</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'ack'" @click="updateIncidentStatus(incident, 'ack')">确认</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'resolved'" @click="updateIncidentStatus(incident, 'resolved')">恢复</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'open'" @click="updateIncidentStatus(incident, 'open')">重开</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(incident.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'ack' || !canWrite" @click="updateIncidentStatus(incident, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'resolved' || !canWrite" @click="updateIncidentStatus(incident, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'open' || !canWrite" @click="updateIncidentStatus(incident, 'open')">重开</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(incident.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -5001,7 +5081,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
 
       <template v-else-if="currentView === 'rules'">
         <section class="toolbar-panel">
-          <button class="command-button" type="button" @click="newRule">新增规则</button>
+          <button class="command-button" type="button" :disabled="!canWrite" @click="newRule">新增规则</button>
           <button type="button" @click="exportRuleFindings">导出命中</button>
           <div class="toolbar-summary">
             {{ rangeLabel }} / {{ detectionRules.length.toLocaleString() }} 条规则 / {{ ruleFindings.length.toLocaleString() }} 条命中
@@ -5102,7 +5182,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             </label>
           </div>
           <div class="form-actions">
-            <button type="button" :disabled="savingRule || !ruleEditor.name.trim() || ruleEditor.threshold <= 0" @click="saveRule">
+            <button type="button" :disabled="savingRule || !ruleEditor.name.trim() || ruleEditor.threshold <= 0 || !canWrite" @click="saveRule">
               {{ savingRule ? '保存中...' : '保存规则' }}
             </button>
             <button type="button" :disabled="savingRule" @click="ruleEditor = null">取消</button>
@@ -5141,9 +5221,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ rule.enabled ? '启用' : '停用' }}</td>
                 <td>{{ rule.recommended_action }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" @click="editRule(rule)">编辑</button>
-                  <button class="inline-button" type="button" @click="toggleRule(rule)">{{ rule.enabled ? '停用' : '启用' }}</button>
-                  <button class="inline-button" type="button" :disabled="savingRule" @click="deleteRule(rule)">删除</button>
+                  <button class="inline-button" type="button" :disabled="!canWrite" @click="editRule(rule)">编辑</button>
+                  <button class="inline-button" type="button" :disabled="!canWrite" @click="toggleRule(rule)">{{ rule.enabled ? '停用' : '启用' }}</button>
+                  <button class="inline-button" type="button" :disabled="savingRule || !canWrite" @click="deleteRule(rule)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -5207,7 +5287,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <span>链路利用率阈值</span>
             <input v-model.number="alertLinkUtilPercent" type="number" min="1" max="100" />
           </label>
-          <button type="button" :disabled="savingAlerts" @click="saveAlertConfig">
+          <button type="button" :disabled="savingAlerts || !canWrite" @click="saveAlertConfig">
             {{ savingAlerts ? '保存中...' : '保存阈值' }}
           </button>
         </section>
@@ -5225,7 +5305,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <span>对象</span>
               <input v-model="whitelistSubject" placeholder="输入 IP、会话、采集源或风险线索对象" @keyup.enter="addWhitelistSubject" />
             </label>
-            <button type="button" :disabled="handlingAlert || !whitelistSubject.trim()" @click="addWhitelistSubject">加入白名单</button>
+            <button type="button" :disabled="handlingAlert || !whitelistSubject.trim() || !canWrite" @click="addWhitelistSubject">加入白名单</button>
           </div>
           <div class="whitelist-list">
             <button
@@ -5233,7 +5313,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               :key="subject"
               type="button"
               class="silence-chip"
-              :disabled="handlingAlert"
+              :disabled="handlingAlert || !canWrite"
               @click="removeSilence(subject)"
             >
               {{ subject }} ×
@@ -5263,9 +5343,9 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ alert.summary }}</td>
                 <td>{{ formatTime(alert.last_seen) }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'ack'" @click="updateAlertStatus(alert, 'ack')">确认</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved'" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert" @click="silenceSubject(alert.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'ack' || !canWrite" @click="updateAlertStatus(alert, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved' || !canWrite" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(alert.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -5577,6 +5657,80 @@ const exportCSV = (filename: string, rows: string[][]) => {
         </section>
       </template>
 
+      <template v-else-if="currentView === 'config-versions'">
+        <section class="metric-grid">
+          <article class="metric-card">
+            <span>配置版本</span>
+            <strong>{{ configVersions.length.toLocaleString() }}</strong>
+            <small>最近运行时配置快照</small>
+          </article>
+          <article class="metric-card">
+            <span>配置范围</span>
+            <strong>{{ configScopeItems.length.toLocaleString() }}</strong>
+            <small>{{ configScopeItems[0]?.key ?? '-' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>变更动作</span>
+            <strong>{{ configActionItems.length.toLocaleString() }}</strong>
+            <small>{{ configActionItems[0]?.key ?? '-' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>最近快照</span>
+            <strong>{{ formatTime(configVersions[0]?.ts ?? 0) }}</strong>
+            <small>{{ configVersions[0]?.summary ?? '-' }}</small>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="配置范围分布" eyebrow="Scope" :items="configScopeItems" />
+          <HorizontalBarChart title="配置动作分布" eyebrow="Config Action" :items="configActionItems" />
+          <HorizontalBarChart title="操作人分布" eyebrow="Actor" :items="configActorItems" />
+        </section>
+        <section class="table-panel config-version-table">
+          <div class="section-heading">
+            <h2>配置快照历史</h2>
+            <span>{{ configVersions.length.toLocaleString() }} 条记录</span>
+          </div>
+          <div v-if="configVersions.length === 0" class="empty-state">暂无配置版本记录</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>范围</th>
+                <th>目标</th>
+                <th>动作</th>
+                <th>操作人</th>
+                <th>摘要</th>
+                <th>来源 IP</th>
+                <th>配置快照</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="version in configVersions" :key="version.id">
+                <td>{{ formatTime(version.ts) }}</td>
+                <td>{{ configScopeText(version.scope) }}</td>
+                <td :title="version.target">{{ version.target }}</td>
+                <td>{{ auditActionText(version.action) }}</td>
+                <td>{{ version.actor || 'operator' }}</td>
+                <td>{{ version.summary }}</td>
+                <td>{{ version.client_ip || '-' }}</td>
+                <td :title="version.config_text || version.config">{{ version.config_text || version.config || '-' }}</td>
+                <td class="action-cell">
+                  <button
+                    class="inline-button"
+                    type="button"
+                    :disabled="!canWrite || restoringConfigVersion === version.id"
+                    @click="restoreConfigVersion(version)"
+                  >
+                    {{ restoringConfigVersion === version.id ? '恢复中...' : '恢复' }}
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </template>
+
       <template v-else>
         <section class="toolbar-panel capture-control">
           <label>
@@ -5611,7 +5765,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <span>会话保留量</span>
             <input v-model.number="selectedSessionTopN" type="number" min="20" max="5000" step="50" />
           </label>
-          <button type="button" :disabled="switching" @click="applyCaptureConfig">
+          <button type="button" :disabled="switching || !canWrite" @click="applyCaptureConfig">
             {{ switching ? '切换中...' : '应用采集配置' }}
           </button>
         </section>
