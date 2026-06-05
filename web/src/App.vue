@@ -45,6 +45,7 @@ import {
   type AssetRiskPosture,
   type AssetRow,
   type AuthStatus,
+  type BehaviorBaseline,
   type CapacityPlanning,
   type CaptureDiagnostics,
   type CaptureQuality,
@@ -310,6 +311,51 @@ const ruleFindings = ref<RuleFinding[]>([]);
 const ruleEditor = ref<DetectionRule | null>(null);
 const trafficChanges = ref<TrafficChange[]>([]);
 const trafficAnomalies = ref<TrafficAnomaly[]>([]);
+const emptyBehaviorBaseline = (): BehaviorBaseline => ({
+  generated_at: 0,
+  minutes: 15,
+  baseline_minutes: 60,
+  window_count: 0,
+  baseline_strategy: 'dynamic_window',
+  link: {
+    dimension: 'link',
+    dimension_title: '链路',
+    key: '链路总流量',
+    current_bytes: 0,
+    current_packets: 0,
+    baseline_bytes: 0,
+    baseline_packets: 0,
+    p95_bytes: 0,
+    peak_bytes: 0,
+    peak_packets: 0,
+    delta_bytes: 0,
+    deviation_ratio: 0,
+    change_ratio: 0,
+    samples: 0,
+    status: 'learning',
+    severity: 'info',
+    score: 0,
+    summary: '等待基线样本生成。',
+    dimension_source: 'link'
+  },
+  summary: {
+    total_deviations: 0,
+    critical_count: 0,
+    warning_count: 0,
+    new_count: 0,
+    learning_count: 0,
+    stable_count: 0,
+    top_key: '',
+    top_dimension: '',
+    top_deviation: 0,
+    link_status: 'learning',
+    link_deviation: 0,
+    link_current_bytes: 0
+  },
+  deviations: [],
+  recommendations: []
+});
+const behaviorBaseline = ref<BehaviorBaseline>(emptyBehaviorBaseline());
 const trafficAnalysis = ref<TrafficAnalysis>({
   minutes: 15,
   baseline: {
@@ -409,6 +455,7 @@ const navGroups = [
     title: '分析',
     items: [
       { id: 'ai', label: 'AI 分析', icon: Sparkles },
+      { id: 'baseline', label: '行为基线', icon: Radar },
       { id: 'analysis', label: '流向分析', icon: Route },
       { id: 'anomalies', label: '异常波动', icon: AlertTriangle },
       { id: 'service-analytics', label: '应用分析', icon: ServerCog },
@@ -452,6 +499,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   capacity: { title: '容量趋势', subtitle: '评估带宽余量、峰值增长、P95 利用率和容量风险对象' },
   traffic: { title: '流量剖析', subtitle: '观察基线、峰值、P95、方向、协议、端口和包长结构' },
   ai: { title: 'AI 分析', subtitle: '集中查看巡检、事件和资产 AI 摘要，快速进入调查闭环' },
+  baseline: { title: '行为基线', subtitle: '用历史同长度窗口对比当前对象，识别新增、偏离和样本不足的流量行为' },
   analysis: { title: '流向分析', subtitle: '按主机对、会话、端口和协议拆解实时流量路径' },
   anomalies: { title: '异常波动', subtitle: '对比当前窗口和上一周期，识别链路、对象、端口、协议和服务突变' },
   'service-analytics': { title: '应用分析', subtitle: '按应用服务聚合类别、风险、增长、端口和会话样例' },
@@ -544,6 +592,7 @@ const refresh = async () => {
       securityRes,
       incidentRes,
       trafficAnalysisRes,
+      behaviorBaselineRes,
       capacityRes,
       trafficChangesRes,
       trafficAnomaliesRes,
@@ -591,6 +640,7 @@ const refresh = async () => {
       api.securityInsights(minutes, 100),
       api.securityIncidents(minutes, 120),
       api.trafficAnalysis(minutes),
+      api.behaviorBaseline(minutes, 0, 12),
       api.capacityPlanning(minutes, 12),
       api.trafficChanges(minutes, 30),
       api.trafficAnomalies(minutes, 40),
@@ -639,6 +689,7 @@ const refresh = async () => {
     securityInsights.value = securityRes.data;
     securityIncidents.value = incidentRes.data;
     trafficAnalysis.value = trafficAnalysisRes.data;
+    behaviorBaseline.value = behaviorBaselineRes.data;
     capacityPlanning.value = capacityRes.data;
     trafficChanges.value = trafficChangesRes.data;
     trafficAnomalies.value = trafficAnomaliesRes.data;
@@ -678,6 +729,7 @@ const refresh = async () => {
       securityRes.degraded ||
       incidentRes.degraded ||
       trafficAnalysisRes.degraded ||
+      behaviorBaselineRes.degraded ||
       capacityRes.degraded ||
       trafficChangesRes.degraded ||
       trafficAnomaliesRes.degraded ||
@@ -1587,6 +1639,117 @@ const refresh = async () => {
         { key: '内网东西向', bytes: 26000000, packets: 22000 }
       ]
     };
+    behaviorBaseline.value = {
+      generated_at: now,
+      minutes: selectedMinutes.value,
+      baseline_minutes: 120,
+      window_count: 8,
+      baseline_strategy: 'dynamic_window',
+      link: {
+        dimension: 'link',
+        dimension_title: '链路',
+        key: '链路总流量',
+        current_bytes: 158000000,
+        current_packets: 98000,
+        baseline_bytes: 85000000,
+        baseline_packets: 54000,
+        p95_bytes: 120000000,
+        peak_bytes: 140000000,
+        peak_packets: 76000,
+        delta_bytes: 73000000,
+        deviation_ratio: 1.32,
+        change_ratio: 0.86,
+        samples: 8,
+        status: 'elevated',
+        severity: 'warning',
+        score: 66,
+        summary: '链路总流量高于历史常态，当前 150.68 MB，历史均值 81.06 MB',
+        dimension_source: 'link'
+      },
+      summary: {
+        total_deviations: 3,
+        critical_count: 1,
+        warning_count: 2,
+        new_count: 1,
+        learning_count: 0,
+        stable_count: 0,
+        top_key: 'SSH',
+        top_dimension: '应用服务',
+        top_deviation: 999,
+        link_status: 'elevated',
+        link_deviation: 1.32,
+        link_current_bytes: 158000000
+      },
+      deviations: [
+        {
+          dimension: 'service',
+          dimension_title: '应用服务',
+          key: 'SSH',
+          current_bytes: 18000000,
+          current_packets: 7200,
+          baseline_bytes: 0,
+          baseline_packets: 0,
+          p95_bytes: 0,
+          peak_bytes: 0,
+          peak_packets: 0,
+          delta_bytes: 18000000,
+          deviation_ratio: 999,
+          change_ratio: 999,
+          samples: 0,
+          status: 'new',
+          severity: 'critical',
+          score: 72,
+          summary: '应用服务 SSH 在近 15 分钟首次进入当前 Top 对象，当前流量 17.17 MB',
+          dimension_source: 'service'
+        },
+        {
+          dimension: 'src_ip',
+          dimension_title: '源 IP',
+          key: '10.10.1.42',
+          current_bytes: 68000000,
+          current_packets: 21000,
+          baseline_bytes: 22000000,
+          baseline_packets: 9000,
+          p95_bytes: 32000000,
+          peak_bytes: 41000000,
+          peak_packets: 13000,
+          delta_bytes: 46000000,
+          deviation_ratio: 2.13,
+          change_ratio: 2.09,
+          samples: 8,
+          status: 'elevated',
+          severity: 'warning',
+          score: 78,
+          summary: '源 IP 10.10.1.42 高于历史常态，当前 64.85 MB，历史均值 20.98 MB',
+          dimension_source: 'ip'
+        },
+        {
+          dimension: 'dst_port',
+          dimension_title: '目的端口',
+          key: '443',
+          current_bytes: 88000000,
+          current_packets: 48000,
+          baseline_bytes: 52000000,
+          baseline_packets: 31000,
+          p95_bytes: 70000000,
+          peak_bytes: 79000000,
+          peak_packets: 38000,
+          delta_bytes: 36000000,
+          deviation_ratio: 1.26,
+          change_ratio: 0.69,
+          samples: 8,
+          status: 'stable',
+          severity: 'info',
+          score: 60,
+          summary: '目的端口 443 与历史基线接近，当前 83.92 MB',
+          dimension_source: 'dst_port'
+        }
+      ],
+      recommendations: [
+        { level: 'warning', title: '复核链路级偏离', detail: '链路总流量高于历史常态，先确认是否存在计划内业务峰值。' },
+        { level: 'critical', title: '优先调查新增服务', detail: 'SSH 在基线外新增，建议下钻端口画像和会话来源。' }
+      ]
+    };
     capacityPlanning.value = {
       generated_at: now,
       minutes: selectedMinutes.value,
@@ -1900,6 +2063,32 @@ const capacityPortGrowthItems = computed(() =>
 );
 const capacityServiceGrowthItems = computed(() =>
   capacityPlanning.value.top_service_growth.map((row) => ({ key: row.key, bytes: Math.max(0, row.delta_bytes), packets: Math.max(0, row.delta_packets) }))
+);
+const baselineDeviationItems = computed(() =>
+  behaviorBaseline.value.deviations
+    .filter((row) => row.severity !== 'info' || row.status !== 'stable')
+    .slice(0, 12)
+    .map((row) => ({
+      key: `${row.dimension_title} / ${row.key}`,
+      bytes: Math.max(0, row.delta_bytes),
+      packets: row.score
+    }))
+);
+const baselineSeverityItems = computed(() =>
+  aggregateTopItems(
+    behaviorBaseline.value.deviations,
+    (row) => severityText(row.severity),
+    () => 1,
+    () => 0
+  )
+);
+const baselineStatusItems = computed(() =>
+  aggregateTopItems(
+    behaviorBaseline.value.deviations,
+    (row) => baselineStatusText(row.status),
+    () => 1,
+    () => 0
+  )
 );
 
 const profileTotalBytes = computed(() => ipProfile.value.inbound_bytes + ipProfile.value.outbound_bytes);
@@ -2272,6 +2461,17 @@ const severityText = (severity: string) => {
     critical: '严重'
   };
   return labels[severity] ?? severity;
+};
+
+const baselineStatusText = (status: string) => {
+  const labels: Record<string, string> = {
+    stable: '稳定',
+    elevated: '偏高',
+    critical: '严重偏离',
+    new: '新增',
+    learning: '学习中'
+  };
+  return labels[status] ?? status;
 };
 
 const changeDimensionText = (dimension: string) => {
@@ -4317,6 +4517,118 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <TopNTable title="会话排行" :items="topFlows" />
           <TopNTable title="目的端口排行" :items="topPorts" />
           <TopNTable title="协议排行" :items="topProtocols" />
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'baseline'">
+        <section class="metrics-grid">
+          <article class="metric">
+            <Radar :size="22" />
+            <div>
+              <span>基线窗口</span>
+              <strong>{{ behaviorBaseline.window_count.toLocaleString() }} 组</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重偏离</span>
+              <strong>{{ behaviorBaseline.summary.critical_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Activity :size="22" />
+            <div>
+              <span>新增对象</span>
+              <strong>{{ behaviorBaseline.summary.new_count.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Database :size="22" />
+            <div>
+              <span>链路当前</span>
+              <strong>{{ formatBytes(behaviorBaseline.summary.link_current_bytes) }}</strong>
+            </div>
+          </article>
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="基线偏离排行" eyebrow="Baseline Deviation" :items="baselineDeviationItems" />
+          <HorizontalBarChart title="偏离级别分布" eyebrow="Severity" :items="baselineSeverityItems" unit="count" />
+        </section>
+        <section class="command-grid">
+          <HorizontalBarChart title="行为状态分布" eyebrow="Behavior State" :items="baselineStatusItems" unit="count" />
+          <section class="table-panel report-recommendations">
+            <div class="panel-heading">
+              <h2>基线建议</h2>
+              <span>{{ behaviorBaseline.recommendations.length.toLocaleString() }} 条</span>
+            </div>
+            <article v-for="item in behaviorBaseline.recommendations" :key="`${item.level}-${item.title}`" class="report-recommendation">
+              <span class="severity-pill" :class="item.level">{{ severityText(item.level) }}</span>
+              <strong>{{ item.title }}</strong>
+              <p>{{ item.detail }}</p>
+            </article>
+          </section>
+        </section>
+        <section class="main-grid">
+          <section class="collector-panel">
+            <h2>链路行为基线</h2>
+            <div class="kv-list">
+              <div><span>状态</span><strong>{{ baselineStatusText(behaviorBaseline.link.status) }}</strong></div>
+              <div><span>当前流量</span><strong>{{ formatBytes(behaviorBaseline.link.current_bytes) }}</strong></div>
+              <div><span>历史均值</span><strong>{{ formatBytes(behaviorBaseline.link.baseline_bytes) }}</strong></div>
+              <div><span>历史 P95</span><strong>{{ formatBytes(behaviorBaseline.link.p95_bytes) }}</strong></div>
+              <div><span>偏离倍数</span><strong>{{ behaviorBaseline.link.deviation_ratio.toFixed(2) }}x</strong></div>
+              <div><span>样本数</span><strong>{{ behaviorBaseline.link.samples.toLocaleString() }}</strong></div>
+            </div>
+          </section>
+          <section class="collector-panel">
+            <h2>最高偏离对象</h2>
+            <div class="kv-list">
+              <div><span>维度</span><strong>{{ behaviorBaseline.summary.top_dimension || '-' }}</strong></div>
+              <div><span>对象</span><strong>{{ behaviorBaseline.summary.top_key || '-' }}</strong></div>
+              <div><span>偏离倍数</span><strong>{{ behaviorBaseline.summary.top_deviation.toFixed(2) }}x</strong></div>
+              <div><span>警告对象</span><strong>{{ behaviorBaseline.summary.warning_count.toLocaleString() }}</strong></div>
+              <div><span>学习样本</span><strong>{{ behaviorBaseline.summary.learning_count.toLocaleString() }}</strong></div>
+              <div><span>基线跨度</span><strong>{{ behaviorBaseline.baseline_minutes.toLocaleString() }} 分钟</strong></div>
+            </div>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table anomaly-table">
+          <div class="panel-heading">
+            <h2>行为基线明细</h2>
+            <span>{{ rangeLabel }} / 历史 {{ behaviorBaseline.baseline_minutes.toLocaleString() }} 分钟</span>
+          </div>
+          <div v-if="behaviorBaseline.deviations.length === 0" class="empty-state">暂无行为基线数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>维度</th>
+                <th>状态</th>
+                <th>级别</th>
+                <th>当前流量</th>
+                <th>历史均值</th>
+                <th>P95</th>
+                <th>偏离</th>
+                <th>样本</th>
+                <th>解释</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in behaviorBaseline.deviations" :key="`${row.dimension}-${row.key}`">
+                <td>{{ row.key }}</td>
+                <td>{{ row.dimension_title }}</td>
+                <td>{{ baselineStatusText(row.status) }}</td>
+                <td><span class="severity-pill" :class="row.severity">{{ severityText(row.severity) }}</span></td>
+                <td>{{ formatBytes(row.current_bytes) }}</td>
+                <td>{{ formatBytes(row.baseline_bytes) }}</td>
+                <td>{{ formatBytes(row.p95_bytes) }}</td>
+                <td>{{ row.deviation_ratio.toFixed(2) }}x</td>
+                <td>{{ row.samples.toLocaleString() }}</td>
+                <td>{{ row.summary }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
       </template>
 

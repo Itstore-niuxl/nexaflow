@@ -1641,6 +1641,57 @@ func (s *Store) TrafficAnalysis(ctx context.Context, minutes int) (map[string]an
 	return analysis, firstErr(baselineErr, protocolErr, portErr, packetLenErr, matrixErr)
 }
 
+func (s *Store) BehaviorBaseline(ctx context.Context, minutes, baselineMinutes, limit int) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if baselineMinutes < minutes*2 {
+		baselineMinutes = minutes * 8
+	}
+	generatedAt := time.Now().Unix()
+	link, linkErr := s.linkBehaviorBaseline(ctx, minutes, baselineMinutes)
+	dimensions := []map[string]string{
+		{"label": "src_ip", "dimension": "ip", "direction": "src", "title": "源 IP"},
+		{"label": "dst_ip", "dimension": "ip", "direction": "dst", "title": "目的 IP"},
+		{"label": "dst_port", "dimension": "dst_port", "direction": "src", "title": "目的端口"},
+		{"label": "service", "dimension": "service", "direction": "src", "title": "应用服务"},
+		{"label": "protocol", "dimension": "protocol", "direction": "src", "title": "协议"},
+	}
+	rows := []map[string]any{}
+	var err error
+	for _, spec := range dimensions {
+		items, itemErr := s.dimensionBehaviorBaseline(ctx, spec["label"], spec["dimension"], spec["direction"], spec["title"], minutes, baselineMinutes, limit)
+		rows = append(rows, items...)
+		err = firstErr(err, itemErr)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if baselineSeverityWeight(stringValue(rows[i]["severity"])) != baselineSeverityWeight(stringValue(rows[j]["severity"])) {
+			return baselineSeverityWeight(stringValue(rows[i]["severity"])) > baselineSeverityWeight(stringValue(rows[j]["severity"]))
+		}
+		if floatValue(rows[i]["deviation_ratio"]) != floatValue(rows[j]["deviation_ratio"]) {
+			return floatValue(rows[i]["deviation_ratio"]) > floatValue(rows[j]["deviation_ratio"])
+		}
+		return int64Value(rows[i]["delta_bytes"]) > int64Value(rows[j]["delta_bytes"])
+	})
+	maxRows := limit * len(dimensions)
+	if len(rows) > maxRows {
+		rows = rows[:maxRows]
+	}
+	summary := baselineProfileSummary(link, rows)
+	data := map[string]any{
+		"generated_at":      generatedAt,
+		"minutes":           minutes,
+		"baseline_minutes":  baselineMinutes,
+		"window_count":      baselineWindowCount(baselineMinutes, minutes),
+		"link":              link,
+		"summary":           summary,
+		"deviations":        rows,
+		"recommendations":   baselineRecommendations(summary, link, rows),
+		"baseline_strategy": "dynamic_window",
+	}
+	return data, firstErr(linkErr, err)
+}
+
 func (s *Store) CapacityPlanning(ctx context.Context, minutes, limit int, bandwidthMbps uint64) (map[string]any, error) {
 	if limit <= 0 {
 		limit = 10
@@ -2569,6 +2620,145 @@ FORMAT JSON`, s.database, endMinutesAgo, startMinutesAgo)
 	return row, nil
 }
 
+func (s *Store) linkBehaviorBaseline(ctx context.Context, minutes, baselineMinutes int) (map[string]any, error) {
+	current, currentErr := s.linkWindowTotal(ctx, 0, minutes)
+	seconds := max(minutes*60, 60)
+	q := fmt.Sprintf(`SELECT
+    ifNull(avg(bytes), 0) AS baseline_bytes,
+    ifNull(quantileExact(0.95)(bytes), 0) AS p95_bytes,
+    ifNull(max(bytes), 0) AS peak_bytes,
+    ifNull(avg(packets), 0) AS baseline_packets,
+    ifNull(max(packets), 0) AS peak_packets,
+    count() AS samples
+FROM
+(
+    SELECT
+        intDiv(toUnixTimestamp(ts), %d) AS bucket,
+        sum(bytes) AS bytes,
+        sum(packets) AS packets
+    FROM %s.link_traffic_5s
+    WHERE ts >= now() - INTERVAL %d MINUTE
+        AND ts < now() - INTERVAL %d MINUTE
+    GROUP BY bucket
+)
+FORMAT JSON`, seconds, s.database, baselineMinutes+minutes, minutes)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return baselineRow("link", "链路总流量", "link", "链路", current, map[string]any{}, minutes), firstErr(currentErr, err)
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return baselineRow("link", "链路总流量", "link", "链路", current, map[string]any{}, minutes), firstErr(currentErr, err)
+	}
+	history := map[string]any{}
+	if len(parsed.Data) > 0 {
+		history = parsed.Data[0]
+	}
+	return baselineRow("link", "链路总流量", "link", "链路", current, history, minutes), currentErr
+}
+
+func (s *Store) dimensionBehaviorBaseline(ctx context.Context, label, dimension, direction, title string, minutes, baselineMinutes, limit int) ([]map[string]any, error) {
+	current, currentErr := s.topNWindow(ctx, dimension, direction, 0, minutes, limit)
+	if len(current) == 0 {
+		return []map[string]any{}, currentErr
+	}
+	keys := make([]string, 0, len(current))
+	for _, item := range current {
+		keys = append(keys, item.Key)
+	}
+	history, historyErr := s.dimensionHistoryBaseline(ctx, dimension, direction, keys, minutes, baselineMinutes)
+	rows := make([]map[string]any, 0, len(current))
+	for _, item := range current {
+		rows = append(rows, baselineRow(label, item.Key, dimension, title, item, history[item.Key], minutes))
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if baselineSeverityWeight(stringValue(rows[i]["severity"])) != baselineSeverityWeight(stringValue(rows[j]["severity"])) {
+			return baselineSeverityWeight(stringValue(rows[i]["severity"])) > baselineSeverityWeight(stringValue(rows[j]["severity"]))
+		}
+		if floatValue(rows[i]["deviation_ratio"]) != floatValue(rows[j]["deviation_ratio"]) {
+			return floatValue(rows[i]["deviation_ratio"]) > floatValue(rows[j]["deviation_ratio"])
+		}
+		return uintValue(rows[i]["current_bytes"]) > uintValue(rows[j]["current_bytes"])
+	})
+	return rows, firstErr(currentErr, historyErr)
+}
+
+func (s *Store) dimensionHistoryBaseline(ctx context.Context, dimension, direction string, keys []string, minutes, baselineMinutes int) (map[string]map[string]any, error) {
+	if len(keys) == 0 {
+		return map[string]map[string]any{}, nil
+	}
+	seconds := max(minutes*60, 60)
+	var q string
+	if dimension == "ip" {
+		q = fmt.Sprintf(`SELECT
+    key,
+    ifNull(avg(bytes), 0) AS baseline_bytes,
+    ifNull(quantileExact(0.95)(bytes), 0) AS p95_bytes,
+    ifNull(max(bytes), 0) AS peak_bytes,
+    ifNull(avg(packets), 0) AS baseline_packets,
+    ifNull(max(packets), 0) AS peak_packets,
+    count() AS samples
+FROM
+(
+    SELECT
+        intDiv(toUnixTimestamp(ts), %d) AS bucket,
+        ip AS key,
+        sum(bytes) AS bytes,
+        sum(packets) AS packets
+    FROM %s.ip_traffic_5s
+    WHERE ts >= now() - INTERVAL %d MINUTE
+        AND ts < now() - INTERVAL %d MINUTE
+        AND direction = '%s'
+        AND ip IN (%s)
+    GROUP BY bucket, key
+)
+GROUP BY key
+FORMAT JSON`, seconds, s.database, baselineMinutes+minutes, minutes, escape(direction), sqlStringList(keys))
+	} else {
+		q = fmt.Sprintf(`SELECT
+    key,
+    ifNull(avg(bytes), 0) AS baseline_bytes,
+    ifNull(quantileExact(0.95)(bytes), 0) AS p95_bytes,
+    ifNull(max(bytes), 0) AS peak_bytes,
+    ifNull(avg(packets), 0) AS baseline_packets,
+    ifNull(max(packets), 0) AS peak_packets,
+    count() AS samples
+FROM
+(
+    SELECT
+        intDiv(toUnixTimestamp(ts), %d) AS bucket,
+        dim_key AS key,
+        sum(bytes) AS bytes,
+        sum(packets) AS packets
+    FROM %s.dimension_traffic_5s
+    WHERE ts >= now() - INTERVAL %d MINUTE
+        AND ts < now() - INTERVAL %d MINUTE
+        AND dimension = '%s'
+        AND dim_key IN (%s)
+    GROUP BY bucket, key
+)
+GROUP BY key
+FORMAT JSON`, seconds, s.database, baselineMinutes+minutes, minutes, escape(dimension), sqlStringList(keys))
+	}
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return map[string]map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return map[string]map[string]any{}, err
+	}
+	rows := map[string]map[string]any{}
+	for _, row := range parsed.Data {
+		rows[stringValue(row["key"])] = row
+	}
+	return rows, nil
+}
+
 func (s *Store) capacityMinuteTrend(ctx context.Context, minutes int) ([]map[string]any, error) {
 	q := fmt.Sprintf(`SELECT
     toUnixTimestamp(toStartOfMinute(ts)) AS ts,
@@ -3073,6 +3263,23 @@ func formatTime(ts int64) string {
 
 func escape(v string) string {
 	return strings.ReplaceAll(v, "'", "''")
+}
+
+func sqlStringList(values []string) string {
+	parts := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		parts = append(parts, "'"+escape(value)+"'")
+	}
+	if len(parts) == 0 {
+		return "''"
+	}
+	return strings.Join(parts, ",")
 }
 
 func demoSummary() map[string]any {
@@ -5554,6 +5761,189 @@ func changeRatio(current, previous uint64) float64 {
 		return 999
 	}
 	return float64(int64(current)-int64(previous)) / float64(previous)
+}
+
+func baselineRow(label, key, dimension, title string, current model.TopItem, history map[string]any, minutes int) map[string]any {
+	baselineBytes := floatValue(history["baseline_bytes"])
+	p95Bytes := floatValue(history["p95_bytes"])
+	peakBytes := floatValue(history["peak_bytes"])
+	baselinePackets := floatValue(history["baseline_packets"])
+	peakPackets := floatValue(history["peak_packets"])
+	samples := int64Value(history["samples"])
+	deviation := ratio(float64(current.Bytes), baselineBytes)
+	if deviation == 0 {
+		deviation = ratio(float64(current.Bytes), p95Bytes)
+	}
+	if deviation == 0 && current.Bytes > 0 && baselineBytes <= 0 && p95Bytes <= 0 {
+		deviation = 999
+	}
+	deltaBytes := int64(current.Bytes) - int64(baselineBytes)
+	status, severity := baselineStatus(current.Bytes, baselineBytes, p95Bytes, samples)
+	score := baselineScore(current.Bytes, baselineBytes, p95Bytes, samples)
+	return map[string]any{
+		"dimension":        label,
+		"dimension_title":  title,
+		"key":              key,
+		"current_bytes":    current.Bytes,
+		"current_packets":  current.Packets,
+		"baseline_bytes":   uint64(math.Max(0, baselineBytes)),
+		"baseline_packets": uint64(math.Max(0, baselinePackets)),
+		"p95_bytes":        uint64(math.Max(0, p95Bytes)),
+		"peak_bytes":       uint64(math.Max(0, peakBytes)),
+		"peak_packets":     uint64(math.Max(0, peakPackets)),
+		"delta_bytes":      deltaBytes,
+		"deviation_ratio":  deviation,
+		"change_ratio":     changeRatio(current.Bytes, uint64(math.Max(0, baselineBytes))),
+		"samples":          samples,
+		"status":           status,
+		"severity":         severity,
+		"score":            score,
+		"summary":          baselineSummaryText(title, key, current.Bytes, baselineBytes, p95Bytes, samples, status, minutes),
+		"dimension_source": dimension,
+	}
+}
+
+func baselineStatus(current uint64, baselineBytes, p95Bytes float64, samples int64) (string, string) {
+	if current == 0 {
+		return "stable", "info"
+	}
+	if samples == 0 {
+		if current >= 50*1024*1024 {
+			return "new", "critical"
+		}
+		return "new", "warning"
+	}
+	if samples < 3 {
+		return "learning", "info"
+	}
+	compareBytes := p95Bytes
+	if compareBytes <= 0 {
+		compareBytes = baselineBytes
+	}
+	if compareBytes <= 0 {
+		return "new", "warning"
+	}
+	deviation := float64(current) / compareBytes
+	deltaBytes := float64(current) - baselineBytes
+	switch {
+	case deviation >= 3 || deltaBytes >= 200*1024*1024:
+		return "critical", "critical"
+	case deviation >= 1.8 || deltaBytes >= 50*1024*1024:
+		return "elevated", "warning"
+	default:
+		return "stable", "info"
+	}
+}
+
+func baselineScore(current uint64, baselineBytes, p95Bytes float64, samples int64) int {
+	if current == 0 {
+		return 0
+	}
+	if samples == 0 {
+		return int(math.Min(100, 55+float64(current)/(1024*1024)))
+	}
+	compareBytes := p95Bytes
+	if compareBytes <= 0 {
+		compareBytes = baselineBytes
+	}
+	deviation := ratio(float64(current), compareBytes)
+	score := 35 + deviation*20
+	if float64(current)-baselineBytes > 50*1024*1024 {
+		score += 15
+	}
+	return int(math.Min(100, math.Max(1, score)))
+}
+
+func baselineSummaryText(title, key string, current uint64, baselineBytes, p95Bytes float64, samples int64, status string, minutes int) string {
+	switch status {
+	case "new":
+		return fmt.Sprintf("%s %s 在近 %d 分钟首次进入当前 Top 对象，当前流量 %s", title, key, minutes, formatBytesText(current))
+	case "learning":
+		return fmt.Sprintf("%s %s 历史样本不足，仅有 %d 个基线窗口，当前流量 %s", title, key, samples, formatBytesText(current))
+	case "critical":
+		return fmt.Sprintf("%s %s 明显偏离历史基线，当前 %s，高于 P95 %s", title, key, formatBytesText(current), formatBytesText(uint64(math.Max(0, p95Bytes))))
+	case "elevated":
+		return fmt.Sprintf("%s %s 高于历史常态，当前 %s，历史均值 %s", title, key, formatBytesText(current), formatBytesText(uint64(math.Max(0, baselineBytes))))
+	default:
+		return fmt.Sprintf("%s %s 与历史基线接近，当前 %s", title, key, formatBytesText(current))
+	}
+}
+
+func baselineProfileSummary(link map[string]any, rows []map[string]any) map[string]any {
+	summary := map[string]any{
+		"total_deviations":   len(rows),
+		"critical_count":     int64(0),
+		"warning_count":      int64(0),
+		"new_count":          int64(0),
+		"learning_count":     int64(0),
+		"stable_count":       int64(0),
+		"top_key":            "",
+		"top_dimension":      "",
+		"top_deviation":      float64(0),
+		"link_status":        stringValue(link["status"]),
+		"link_deviation":     floatValue(link["deviation_ratio"]),
+		"link_current_bytes": uintValue(link["current_bytes"]),
+	}
+	for _, row := range rows {
+		switch stringValue(row["severity"]) {
+		case "critical":
+			summary["critical_count"] = int64Value(summary["critical_count"]) + 1
+		case "warning":
+			summary["warning_count"] = int64Value(summary["warning_count"]) + 1
+		default:
+			summary["stable_count"] = int64Value(summary["stable_count"]) + 1
+		}
+		switch stringValue(row["status"]) {
+		case "new":
+			summary["new_count"] = int64Value(summary["new_count"]) + 1
+		case "learning":
+			summary["learning_count"] = int64Value(summary["learning_count"]) + 1
+		}
+		if floatValue(row["deviation_ratio"]) > floatValue(summary["top_deviation"]) {
+			summary["top_deviation"] = floatValue(row["deviation_ratio"])
+			summary["top_key"] = stringValue(row["key"])
+			summary["top_dimension"] = stringValue(row["dimension_title"])
+		}
+	}
+	return summary
+}
+
+func baselineRecommendations(summary map[string]any, link map[string]any, rows []map[string]any) []map[string]string {
+	items := []map[string]string{}
+	if stringValue(link["severity"]) == "critical" || stringValue(link["severity"]) == "warning" {
+		items = append(items, map[string]string{"level": stringValue(link["severity"]), "title": "复核链路级偏离", "detail": stringValue(link["summary"])})
+	}
+	if int64Value(summary["critical_count"]) > 0 {
+		items = append(items, map[string]string{"level": "critical", "title": "优先调查严重偏离对象", "detail": fmt.Sprintf("存在 %d 个对象严重偏离历史基线，先从 %s %s 开始下钻会话和资产画像", int64Value(summary["critical_count"]), stringValue(summary["top_dimension"]), stringValue(summary["top_key"]))})
+	}
+	if int64Value(summary["new_count"]) > 0 {
+		items = append(items, map[string]string{"level": "warning", "title": "确认新增活跃对象", "detail": fmt.Sprintf("近当前窗口发现 %d 个历史基线外对象，建议确认是否为业务变更、扫描或临时任务", int64Value(summary["new_count"]))})
+	}
+	if len(rows) > 0 && len(items) < 3 {
+		items = append(items, map[string]string{"level": "info", "title": "沉淀基线样本", "detail": "基线采用历史同长度窗口动态计算，采集时间越长，P95 和新增对象判断越稳定"})
+	}
+	if len(items) == 0 {
+		items = append(items, map[string]string{"level": "info", "title": "行为基线稳定", "detail": "当前 Top 对象与历史基线接近，可以继续观察异常波动和事件中心"})
+	}
+	return items
+}
+
+func baselineSeverityWeight(severity string) int {
+	switch severity {
+	case "critical":
+		return 3
+	case "warning":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func baselineWindowCount(baselineMinutes, minutes int) int {
+	if minutes <= 0 {
+		return 0
+	}
+	return baselineMinutes / minutes
 }
 
 func bytesToMbps(bytes, seconds float64) float64 {

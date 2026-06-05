@@ -784,6 +784,59 @@ export interface TrafficAnomaly {
   score: number;
 }
 
+export interface BaselineDeviation {
+  dimension: string;
+  dimension_title: string;
+  key: string;
+  current_bytes: number;
+  current_packets: number;
+  baseline_bytes: number;
+  baseline_packets: number;
+  p95_bytes: number;
+  peak_bytes: number;
+  peak_packets: number;
+  delta_bytes: number;
+  deviation_ratio: number;
+  change_ratio: number;
+  samples: number;
+  status: string;
+  severity: string;
+  score: number;
+  summary: string;
+  dimension_source: string;
+}
+
+export interface BaselineRecommendation {
+  level: string;
+  title: string;
+  detail: string;
+}
+
+export interface BehaviorBaseline {
+  generated_at: number;
+  minutes: number;
+  baseline_minutes: number;
+  window_count: number;
+  baseline_strategy: string;
+  link: BaselineDeviation;
+  summary: {
+    total_deviations: number;
+    critical_count: number;
+    warning_count: number;
+    new_count: number;
+    learning_count: number;
+    stable_count: number;
+    top_key: string;
+    top_dimension: string;
+    top_deviation: number;
+    link_status: string;
+    link_deviation: number;
+    link_current_bytes: number;
+  };
+  deviations: BaselineDeviation[];
+  recommendations: BaselineRecommendation[];
+}
+
 const json = async <T>(url: string): Promise<T> => {
   const response = await fetch(url);
   if (!response.ok) {
@@ -1008,6 +1061,12 @@ export const api = {
   },
   async trafficAnalysis(minutes = 15) {
     return json<{ data: TrafficAnalysis; degraded: boolean }>(`/api/v1/traffic/analysis?minutes=${minutes}`);
+  },
+  async behaviorBaseline(minutes = 15, baselineMinutes = 0, limit = 10) {
+    const baselineQuery = baselineMinutes > 0 ? `&baseline_minutes=${baselineMinutes}` : '';
+    return json<{ data: BehaviorBaseline; degraded: boolean }>(
+      `/api/v1/traffic/baseline-profile?minutes=${minutes}${baselineQuery}&limit=${limit}`
+    );
   },
   async capacityPlanning(minutes = 15, limit = 10) {
     return json<{ data: CapacityPlanning; degraded: boolean }>(`/api/v1/traffic/capacity?minutes=${minutes}&limit=${limit}`);

@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/traffic/sessions", s.sessions)
 	mux.HandleFunc("/api/v1/traffic/search", s.search)
 	mux.HandleFunc("/api/v1/traffic/analysis", s.trafficAnalysis)
+	mux.HandleFunc("/api/v1/traffic/baseline-profile", s.trafficBaselineProfile)
 	mux.HandleFunc("/api/v1/traffic/capacity", s.capacityPlanning)
 	mux.HandleFunc("/api/v1/traffic/changes", s.trafficChanges)
 	mux.HandleFunc("/api/v1/traffic/anomalies", s.trafficAnomalies)
@@ -290,6 +291,12 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) trafficAnalysis(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.TrafficAnalysis(r.Context(), queryMinutes(r))
+	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) trafficBaselineProfile(w http.ResponseWriter, r *http.Request) {
+	minutes := queryMinutes(r)
+	data, err := s.store.BehaviorBaseline(r.Context(), minutes, queryBaselineMinutes(r, minutes), queryLimit(r, 10, 50))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
 }
 
@@ -1250,6 +1257,20 @@ func queryMinutes(r *http.Request) int {
 		}
 	}
 	return minutes
+}
+
+func queryBaselineMinutes(r *http.Request, minutes int) int {
+	fallback := max(minutes*8, 60)
+	if fallback > 1440 {
+		fallback = 1440
+	}
+	value := fallback
+	if raw := r.URL.Query().Get("baseline_minutes"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= minutes*2 && n <= 10080 {
+			value = n
+		}
+	}
+	return value
 }
 
 func queryLimit(r *http.Request, fallback, max int) int {
