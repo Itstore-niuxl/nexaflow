@@ -594,7 +594,7 @@ func (s *Server) aiIncidentSummary(w http.ResponseWriter, r *http.Request) {
 	contextData, contextErr := s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
 	writeJSON(w, map[string]any{
 		"data":     buildAIIncidentSummary(s.aiOptions(), incident, contextData),
-		"degraded": incidentErr != nil || ruleErr != nil || contextErr != nil,
+		"degraded": incidentErr != nil || ruleErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)),
 	})
 }
 
@@ -1404,10 +1404,19 @@ func buildAIIncidentSummary(options aiSummaryOptions, incident, contextData map[
 	anomalies := sliceValue(contextData["anomalies"])
 	relations := mapValue(contextData["relations"])
 	relationSummary := mapValue(relations["summary"])
+	dstProfile := mapValue(contextData["dst_ip_profile"])
+	srcProfile := mapValue(contextData["src_ip_profile"])
+	portProfile := mapValue(contextData["dst_port_profile"])
 	bytes := maxUint(uint64Value(incident["bytes"]), uint64Value(relationSummary["bytes"]))
 	findings := []string{
 		fmt.Sprintf("事件对象 %s 当前级别为 %s，关联流量约 %s。", subject, aiSeverityText(severity), formatAIBytes(bytes)),
 		fmt.Sprintf("上下文包含 %d 条关联会话、%d 条风险线索、%d 条异常波动。", len(sessions), len(insights), len(anomalies)),
+	}
+	if stringValue(dstProfile["ip"]) != "" {
+		findings = append(findings, fmt.Sprintf("目的资产 %s 近窗口入站 %s、出站 %s。", stringValue(dstProfile["ip"]), formatAIBytes(uint64Value(dstProfile["inbound_bytes"])), formatAIBytes(uint64Value(dstProfile["outbound_bytes"]))))
+	}
+	if stringValue(portProfile["port"]) != "" {
+		findings = append(findings, fmt.Sprintf("目的端口 %s 近窗口流量 %s，关联会话 %d 条。", stringValue(portProfile["port"]), formatAIBytes(uint64Value(portProfile["bytes"])), len(sliceValue(portProfile["flows"]))))
 	}
 	if len(sessions) > 0 {
 		top := mapValue(sessions[0])
@@ -1422,6 +1431,15 @@ func buildAIIncidentSummary(options aiSummaryOptions, incident, contextData map[
 		"关联会话数：" + strconv.Itoa(len(sessions)),
 		"关联风险线索：" + strconv.Itoa(len(insights)),
 		"关联异常波动：" + strconv.Itoa(len(anomalies)),
+	}
+	if stringValue(srcProfile["ip"]) != "" {
+		evidence = append(evidence, "源资产画像："+stringValue(srcProfile["ip"]))
+	}
+	if stringValue(dstProfile["ip"]) != "" {
+		evidence = append(evidence, "目的资产画像："+stringValue(dstProfile["ip"]))
+	}
+	if stringValue(portProfile["port"]) != "" {
+		evidence = append(evidence, "端口画像："+stringValue(portProfile["port"]))
 	}
 	actions := []string{
 		"优先查看事件上下文中的关联会话和关联端口，确认是否为计划内业务流量。",
@@ -1561,6 +1579,18 @@ func findAIIncident(rows []map[string]any, id, subject, kind string) map[string]
 		}
 	}
 	return map[string]any{}
+}
+
+func aiIncidentContextUsable(contextData map[string]any) bool {
+	if len(sliceValue(contextData["sessions"])) > 0 || len(sliceValue(contextData["insights"])) > 0 || len(sliceValue(contextData["anomalies"])) > 0 {
+		return true
+	}
+	for _, key := range []string{"ip_profile", "src_ip_profile", "dst_ip_profile", "port_profile", "dst_port_profile"} {
+		if len(mapValue(contextData[key])) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func findMapByString(rows []map[string]any, field, value string) map[string]any {

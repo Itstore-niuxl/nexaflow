@@ -2255,17 +2255,33 @@ func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind strin
 		"anomalies":        anomalies,
 		"playbook_actions": incidentPlaybookActions(kind, selector["dimension"]),
 	}
+	var extraErr error
+	if selector["src_ip"] != "" {
+		profile, profileErr := s.IPProfile(ctx, selector["src_ip"], minutes)
+		context["src_ip_profile"] = profile
+		extraErr = firstErr(extraErr, profileErr)
+	}
+	if selector["dst_ip"] != "" && selector["dst_ip"] != selector["src_ip"] {
+		profile, profileErr := s.IPProfile(ctx, selector["dst_ip"], minutes)
+		context["dst_ip_profile"] = profile
+		extraErr = firstErr(extraErr, profileErr)
+	}
+	if selector["dst_port"] != "" {
+		profile, profileErr := s.PortProfile(ctx, selector["dst_port"], minutes)
+		context["dst_port_profile"] = profile
+		extraErr = firstErr(extraErr, profileErr)
+	}
 	if selector["dimension"] == "ip" && selector["key"] != "" {
 		profile, profileErr := s.IPProfile(ctx, selector["key"], minutes)
 		context["ip_profile"] = profile
-		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, profileErr)
+		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr, profileErr)
 	}
 	if selector["dimension"] == "dst_port" && selector["key"] != "" {
 		profile, profileErr := s.PortProfile(ctx, selector["key"], minutes)
 		context["port_profile"] = profile
-		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, profileErr)
+		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr, profileErr)
 	}
-	return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr)
+	return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr)
 }
 
 func (s *Store) ReportOverview(ctx context.Context, minutes, limit int) (map[string]any, error) {
@@ -4742,6 +4758,12 @@ func incidentContextSelector(subject, kind string) map[string]string {
 	if subject == "" {
 		return selector
 	}
+	if parsed := incidentEndpointSelector(subject); len(parsed) > 0 {
+		for key, value := range parsed {
+			selector[key] = value
+		}
+		return selector
+	}
 	prefix, value, hasPrefix := strings.Cut(subject, ":")
 	if hasPrefix {
 		value = strings.TrimSpace(value)
@@ -4801,6 +4823,80 @@ func incidentContextSelector(subject, kind string) map[string]string {
 		selector["query"] = ""
 	}
 	return selector
+}
+
+func incidentEndpointSelector(subject string) map[string]string {
+	if !strings.Contains(subject, " -> ") {
+		return nil
+	}
+	ips := ipTokensInText(subject)
+	if len(ips) < 2 {
+		return nil
+	}
+	src := ips[0]
+	dst := ips[1]
+	pair := src + " -> " + dst
+	selector := map[string]string{
+		"dimension": "pair",
+		"key":       pair,
+		"query":     dst,
+		"direction": "src",
+		"src_ip":    src,
+		"dst_ip":    dst,
+	}
+	if port := dstPortAfterIP(subject, dst); port != "" {
+		selector["dst_port"] = port
+	}
+	return selector
+}
+
+func ipTokensInText(text string) []string {
+	normalized := strings.NewReplacer("/", " ", ">", " ", "-", " ", ",", " ", "(", " ", ")", " ").Replace(text)
+	items := []string{}
+	seen := map[string]bool{}
+	for _, token := range strings.Fields(normalized) {
+		candidate := strings.Trim(token, "[];")
+		if addr, err := netip.ParseAddr(candidate); err == nil {
+			value := addr.String()
+			if !seen[value] {
+				items = append(items, value)
+				seen[value] = true
+			}
+			continue
+		}
+		if ip, _, ok := strings.Cut(candidate, ":"); ok {
+			if addr, err := netip.ParseAddr(ip); err == nil {
+				value := addr.String()
+				if !seen[value] {
+					items = append(items, value)
+					seen[value] = true
+				}
+			}
+		}
+	}
+	return items
+}
+
+func dstPortAfterIP(text, ip string) string {
+	idx := strings.Index(text, ip+":")
+	if idx < 0 {
+		return ""
+	}
+	rest := text[idx+len(ip)+1:]
+	port := ""
+	for _, ch := range rest {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		port += string(ch)
+	}
+	if port == "" {
+		return ""
+	}
+	if n, err := strconv.Atoi(port); err == nil && n > 0 && n <= 65535 {
+		return port
+	}
+	return ""
 }
 
 func (s *Store) incidentRelatedInsights(ctx context.Context, dimension, key, query string, minutes, limit int) ([]map[string]any, error) {

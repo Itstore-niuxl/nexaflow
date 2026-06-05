@@ -575,6 +575,9 @@ export interface IncidentSelector {
   key: string;
   query: string;
   direction: string;
+  src_ip?: string;
+  dst_ip?: string;
+  dst_port?: string;
 }
 
 export interface PlaybookAction {
@@ -594,7 +597,10 @@ export interface SecurityIncidentContext {
   anomalies: TrafficAnomaly[];
   playbook_actions: PlaybookAction[];
   ip_profile?: IPProfile;
+  src_ip_profile?: IPProfile;
+  dst_ip_profile?: IPProfile;
   port_profile?: PortProfile;
+  dst_port_profile?: PortProfile;
 }
 
 export interface IncidentTimelineEntry {

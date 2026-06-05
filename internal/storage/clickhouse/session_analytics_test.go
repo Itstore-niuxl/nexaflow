@@ -120,3 +120,20 @@ func TestCaptureQualityRowStatus(t *testing.T) {
 		t.Fatalf("expected critical queue pressure, got %s", status)
 	}
 }
+
+func TestIncidentContextSelectorParsesEndpointPort(t *testing.T) {
+	selector := incidentContextSelector("169.254.0.4 -> 10.2.0.12:80", "custom_rule")
+
+	if selector["dimension"] != "pair" {
+		t.Fatalf("expected pair dimension, got %#v", selector)
+	}
+	if selector["key"] != "169.254.0.4 -> 10.2.0.12" {
+		t.Fatalf("expected normalized pair key, got %#v", selector)
+	}
+	if selector["query"] != "10.2.0.12" {
+		t.Fatalf("expected dst ip query, got %#v", selector)
+	}
+	if selector["src_ip"] != "169.254.0.4" || selector["dst_ip"] != "10.2.0.12" || selector["dst_port"] != "80" {
+		t.Fatalf("expected parsed endpoint fields, got %#v", selector)
+	}
+}

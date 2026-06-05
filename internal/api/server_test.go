@@ -244,3 +244,19 @@ func TestBuildAIReportSummaryDisabled(t *testing.T) {
 		t.Fatalf("expected disabled mode action, got %#v", summary["actions"])
 	}
 }
+
+func TestAIIncidentContextUsable(t *testing.T) {
+	if aiIncidentContextUsable(map[string]any{}) {
+		t.Fatal("empty context should not be usable")
+	}
+	if !aiIncidentContextUsable(map[string]any{
+		"dst_ip_profile": map[string]any{"ip": "10.2.0.12"},
+	}) {
+		t.Fatal("asset profile context should be usable")
+	}
+	if !aiIncidentContextUsable(map[string]any{
+		"sessions": []any{map[string]any{"key": "flow"}},
+	}) {
+		t.Fatal("session context should be usable")
+	}
+}

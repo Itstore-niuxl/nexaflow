@@ -1496,7 +1496,7 @@ const refresh = async () => {
       subject: '211.93.22.130 -> 10.2.0.12',
       kind: 'external_session_burst',
       minutes: selectedMinutes.value,
-      selector: { dimension: 'pair', key: '211.93.22.130 -> 10.2.0.12', query: '211.93.22.130 -> 10.2.0.12', direction: 'src' },
+      selector: { dimension: 'pair', key: '211.93.22.130 -> 10.2.0.12', query: '211.93.22.130 -> 10.2.0.12', direction: 'src', src_ip: '211.93.22.130', dst_ip: '10.2.0.12', dst_port: '8081' },
       relations: {
         dimension: 'pair',
         key: '211.93.22.130 -> 10.2.0.12',
@@ -4973,6 +4973,14 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <div>
               <span>关联会话</span>
               <strong>{{ incidentContext.sessions.length.toLocaleString() }}</strong>
+            </div>
+            <div>
+              <span>源 IP</span>
+              <strong>{{ incidentContext.selector.src_ip || '-' }}</strong>
+            </div>
+            <div>
+              <span>目的 IP / 端口</span>
+              <strong>{{ incidentContext.selector.dst_ip || '-' }}{{ incidentContext.selector.dst_port ? `:${incidentContext.selector.dst_port}` : '' }}</strong>
             </div>
           </div>
           <div class="ai-summary-card compact">
