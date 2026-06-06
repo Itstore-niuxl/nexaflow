@@ -25,7 +25,8 @@ import {
   Sparkles,
   Waypoints
 } from '@lucide/vue';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import DashboardChart from './components/DashboardChart.vue';
 import DimensionTrendChart from './components/DimensionTrendChart.vue';
 import FlowMatrixChart from './components/FlowMatrixChart.vue';
@@ -587,6 +588,8 @@ const webhookTestResult = ref<SettingsTestResult | null>(null);
 const settingsImportText = ref('');
 const settingsExportText = ref('');
 const currentView = ref('dashboard');
+const route = useRoute();
+const router = useRouter();
 const activeTopN = ref('src_ip');
 const selectedMinutes = ref(15);
 const profileIP = ref('10.2.0.12');
@@ -692,6 +695,10 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   settings: { title: '系统设置', subtitle: '统一管理大模型、分析参数、安全权限、通知集成、数据保留和后台连接配置' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
 };
+
+const defaultView = 'dashboard';
+const isValidView = (view: unknown): view is string => typeof view === 'string' && Boolean(viewMeta[view]);
+const normalizeView = (view: unknown) => (isValidView(view) ? view : defaultView);
 
 const pageTitle = computed(() => viewMeta[currentView.value]?.title ?? '流量总览');
 const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? '近实时流量、采集健康和关键对象排行');
@@ -3056,9 +3063,29 @@ const formatTime = (ts: number) => {
 };
 
 const setView = (view: string) => {
-  currentView.value = view;
+  const nextView = normalizeView(view);
+  currentView.value = nextView;
+  const nextPath = nextView === defaultView ? '/' : `/${nextView}`;
+  if (router.currentRoute.value.path !== nextPath) {
+    void router.push(nextPath);
+  }
   window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
 };
+
+watch(
+  () => route.params.view,
+  (view) => {
+    if (typeof view === 'string' && !isValidView(view)) {
+      void router.replace('/');
+      return;
+    }
+    const nextView = normalizeView(view);
+    if (currentView.value !== nextView) {
+      currentView.value = nextView;
+    }
+  },
+  { immediate: true }
+);
 
 const applyCaptureConfig = async () => {
   if (!canWrite.value) return;
@@ -3130,14 +3157,14 @@ const loadSessions = async () => {
 const openSessionIP = async (ip: string) => {
   if (!ip) return;
   profileIP.value = ip;
-  currentView.value = 'profile';
+  setView('profile');
   await loadProfile();
 };
 
 const openSessionPort = async (port: string) => {
   if (!port) return;
   profilePort.value = port;
-  currentView.value = 'port';
+  setView('port');
   await loadPortProfile();
 };
 
@@ -3145,7 +3172,7 @@ const inspectSession = async (row: SessionRow) => {
   trendDimension.value = 'flow';
   trendKey.value = row.key;
   trendDirection.value = 'src';
-  currentView.value = 'traffic';
+  setView('traffic');
   await loadDimensionTrend();
 };
 
@@ -3153,19 +3180,19 @@ const inspectIncident = async (incident: SecurityIncident) => {
   const subject = incident.subject || '';
   if (subject.startsWith('dst_port:')) {
     profilePort.value = subject.replace('dst_port:', '');
-    currentView.value = 'port';
+    setView('port');
     await loadPortProfile();
     return;
   }
   const ip = subject.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/)?.[0];
   if (ip) {
     profileIP.value = ip;
-    currentView.value = 'profile';
+    setView('profile');
     await loadProfile();
     return;
   }
   searchTerm.value = subject;
-  currentView.value = 'search';
+  setView('search');
   await runSearch();
 };
 
@@ -3192,7 +3219,7 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
 
 const openPrimaryIncidentContext = async () => {
   const incident = securityIncidents.value[0];
-  currentView.value = 'incidents';
+  setView('incidents');
   if (incident) {
     await loadIncidentContext(incident);
   }
@@ -3216,7 +3243,7 @@ const openPrimaryAssetProfile = async () => {
   const asset = assetRisks.value[0];
   if (!asset) return;
   profileIP.value = asset.ip;
-  currentView.value = 'profile';
+  setView('profile');
   await loadProfile();
 };
 
@@ -3299,13 +3326,13 @@ const newRule = () => {
 const useGovernanceRule = (suggestion: AIGovernanceSuggestion) => {
   if (!canWrite.value || !suggestion.proposed_rule) return;
   ruleEditor.value = { ...suggestion.proposed_rule, id: '' };
-  currentView.value = 'rules';
+  setView('rules');
 };
 
 const reviewGovernanceSilence = (suggestion: AIGovernanceSuggestion) => {
   if (!canWrite.value || !suggestion.proposed_silence?.subject) return;
   whitelistSubject.value = suggestion.proposed_silence.subject;
-  currentView.value = 'alerts';
+  setView('alerts');
 };
 
 const submitGovernanceApproval = async (suggestion: AIGovernanceSuggestion) => {
@@ -3531,7 +3558,7 @@ const useAssetEnrichmentSuggestion = (suggestion: AIAssetEnrichmentSuggestion) =
     metadata_updated_at: metadata.metadata_updated_at || 0
   };
   assetTagsText.value = (metadata.tags || []).join(', ');
-  currentView.value = 'assets';
+  setView('assets');
 };
 
 const saveAssetMetadata = async () => {
@@ -3559,55 +3586,55 @@ const openServiceTrend = async (service: string) => {
   trendDimension.value = 'service';
   trendKey.value = service;
   trendDirection.value = 'src';
-  currentView.value = 'traffic';
+  setView('traffic');
   await loadDimensionTrend();
 };
 
 const openServicePort = async (port: string) => {
   profilePort.value = port;
-  currentView.value = 'port';
+  setView('port');
   await loadPortProfile();
 };
 
 const searchServiceFlow = async (flow: string, fallback: string) => {
   searchTerm.value = flow || fallback;
-  currentView.value = 'search';
+  setView('search');
   await runSearch();
 };
 
 const openExposureIP = async (row: ServiceExposure) => {
   profileIP.value = row.ip;
-  currentView.value = 'profile';
+  setView('profile');
   await loadProfile();
 };
 
 const openExposurePort = async (row: ServiceExposure) => {
   profilePort.value = row.port;
-  currentView.value = 'port';
+  setView('port');
   await loadPortProfile();
 };
 
 const searchExposureFlow = async (row: ServiceExposure) => {
   searchTerm.value = row.sample_flow || `${row.ip}:${row.port}`;
-  currentView.value = 'search';
+  setView('search');
   await runSearch();
 };
 
 const openExternalInternal = async (row: ExternalAccess) => {
   profileIP.value = row.internal_ip;
-  currentView.value = 'profile';
+  setView('profile');
   await loadProfile();
 };
 
 const openExternalPort = async (row: ExternalAccess) => {
   profilePort.value = row.port;
-  currentView.value = 'port';
+  setView('port');
   await loadPortProfile();
 };
 
 const searchExternalFlow = async (row: ExternalAccess) => {
   searchTerm.value = row.sample_flow || row.public_ip;
-  currentView.value = 'search';
+  setView('search');
   await runSearch();
 };
 
@@ -4141,7 +4168,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
         <section class="ai-workbench-actions">
           <button class="command-button" type="button" @click="openPrimaryIncidentContext">查看首要事件上下文</button>
           <button class="command-button" type="button" @click="openPrimaryAssetProfile">查看最高风险资产</button>
-          <button class="command-button" type="button" @click="currentView = 'reports'">进入报表中心</button>
+          <button class="command-button" type="button" @click="setView('reports')">进入报表中心</button>
         </section>
 
         <section class="table-panel ai-query-panel">
@@ -4316,7 +4343,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div class="ai-workbench-actions">
                 <button class="command-button" type="button" :disabled="!canWrite" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
                 <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="submitAssetEnrichmentApproval(item)">提交审批</button>
-                <button class="inline-button" type="button" @click="profileIP = item.ip; currentView = 'asset-risk'">查看资产风险</button>
+                <button class="inline-button" type="button" @click="profileIP = item.ip; setView('asset-risk')">查看资产风险</button>
               </div>
             </article>
           </div>
@@ -4540,7 +4567,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                   <td>{{ incident.subject }}</td>
                   <td><span class="severity-pill" :class="incident.severity">{{ severityText(incident.severity) }}</span></td>
                   <td>{{ incident.summary }}</td>
-                  <td><button class="inline-button" type="button" @click="loadIncidentContext(incident); currentView = 'incidents'">上下文</button></td>
+                  <td><button class="inline-button" type="button" @click="loadIncidentContext(incident); setView('incidents')">上下文</button></td>
                 </tr>
               </tbody>
             </table>
@@ -6076,7 +6103,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>
                   <div class="row-actions">
                     <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset(asset)">编辑</button>
-                    <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
+                    <button class="inline-button" type="button" @click="profileIP = asset.ip; setView('profile'); loadProfile()">画像</button>
                   </div>
                 </td>
               </tr>
@@ -6187,8 +6214,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ asset.recommended_action }}</td>
                 <td>{{ formatTime(asset.last_seen) }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
-                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; currentView = 'search'; runSearch()">检索</button>
+                  <button class="inline-button" type="button" @click="profileIP = asset.ip; setView('profile'); loadProfile()">画像</button>
+                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; setView('search'); runSearch()">检索</button>
                   <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
                 </td>
               </tr>
@@ -7107,8 +7134,8 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 <td>{{ asset.top_finding || '-' }}</td>
                 <td>{{ asset.recommended_action }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" @click="profileIP = asset.ip; currentView = 'profile'; loadProfile()">画像</button>
-                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; currentView = 'search'; runSearch()">检索</button>
+                  <button class="inline-button" type="button" @click="profileIP = asset.ip; setView('profile'); loadProfile()">画像</button>
+                  <button class="inline-button" type="button" @click="searchTerm = asset.ip; setView('search'); runSearch()">检索</button>
                 </td>
               </tr>
             </tbody>
