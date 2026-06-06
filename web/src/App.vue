@@ -461,6 +461,7 @@ const savingIncidentNote = ref(false);
 const reportOverview = ref<ReportOverview>(emptyReportOverview());
 const assetAISummary = ref<AISummary>(emptyAISummary('asset'));
 const reportAISummary = ref<AISummary>(emptyAISummary('report'));
+const captureDiagnosticsAISummary = ref<AISummary>(emptyAISummary('capture_diagnostics'));
 const aiQuestion = ref('最近 30 分钟哪个公网 IP 访问最多？');
 const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
 const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
@@ -774,6 +775,7 @@ const refresh = async () => {
       trafficAnomaliesRes,
       reportRes,
       reportAIRes,
+      captureDiagnosticsAIRes,
       governanceRes,
       ruleEffectivenessRes,
       assetEnrichmentRes,
@@ -827,6 +829,7 @@ const refresh = async () => {
       api.trafficAnomalies(minutes, 40),
       api.reportOverview(minutes, 12),
       api.aiReportSummary(minutes, 12),
+      api.aiCaptureDiagnosticsSummary(minutes, 80),
       api.aiGovernanceSuggestions(minutes, 8),
       api.aiRuleEffectiveness(minutes, 120),
       api.aiAssetEnrichmentSuggestions(minutes, 8),
@@ -881,6 +884,7 @@ const refresh = async () => {
     trafficAnomalies.value = trafficAnomaliesRes.data;
     reportOverview.value = reportRes.data;
     reportAISummary.value = reportAIRes.data;
+    captureDiagnosticsAISummary.value = captureDiagnosticsAIRes.data;
     aiGovernance.value = governanceRes.data;
     aiRuleEffectiveness.value = ruleEffectivenessRes.data;
     aiAssetEnrichment.value = assetEnrichmentRes.data;
@@ -926,6 +930,7 @@ const refresh = async () => {
       trafficAnomaliesRes.degraded ||
       reportRes.degraded ||
       reportAIRes.degraded ||
+      captureDiagnosticsAIRes.degraded ||
       governanceRes.degraded ||
       ruleEffectivenessRes.degraded ||
       assetEnrichmentRes.degraded ||
@@ -1170,6 +1175,21 @@ const refresh = async () => {
         { id: 'storage_windows', name: '窗口覆盖率', status: 'warning', score: 6, metric: '覆盖率 94.0%', detail: '示例数据存在短时窗口断档。', recommendation: '检查采集器重启或 ClickHouse 写入失败时间点。' }
       ],
       recommendations: [{ level: 'warning', title: '窗口覆盖率', detail: '示例数据存在短时窗口断档，真实采集接入后会展示实际诊断建议' }]
+    };
+    captureDiagnosticsAISummary.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      kind: 'capture_diagnostics',
+      subject: 'collector',
+      title: 'AI 采集诊断摘要',
+      summary: '采集链路存在窗口覆盖率警告，实时性和队列状态正常，建议优先核对采集器重启和 ClickHouse 写入时间点。',
+      confidence: 0.78,
+      findings: ['检查 5 个采集层级，发现 1 个警告层。', '网卡计数、用户态包队列和写入队列均保持健康。', '窗口覆盖率低于目标阈值，存在短时断档迹象。'],
+      evidence: ['总体状态：警告', '警告层数：1', '窗口覆盖率：94.0%'],
+      actions: ['检查采集器重启记录和 runtime 配置变更。', '核对 ClickHouse 写入失败或磁盘 IO 峰值。', '继续观察数据新鲜度和窗口覆盖率是否恢复。'],
+      generated_at: now
     };
     alertConfig.value = { flow_bytes: 20480, flow_share: 0.3, source_packets: 50, link_utilization: 0.8 };
     detectionRules.value = [
@@ -4706,6 +4726,27 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <strong>{{ captureDiagnostics.summary.layer_count.toLocaleString() }}</strong>
             </div>
           </article>
+        </section>
+        <section class="ai-summary-card compact">
+          <div class="panel-heading">
+            <h2>{{ captureDiagnosticsAISummary.title }}</h2>
+            <span>{{ captureDiagnosticsAISummary.mode }} / {{ aiConfidenceText(captureDiagnosticsAISummary.confidence) }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ captureDiagnosticsAISummary.summary }}</p>
+          <div class="ai-summary-grid">
+            <div>
+              <span>诊断发现</span>
+              <ul>
+                <li v-for="item in captureDiagnosticsAISummary.findings" :key="`capture-ai-finding-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+            <div>
+              <span>建议动作</span>
+              <ul>
+                <li v-for="item in captureDiagnosticsAISummary.actions" :key="`capture-ai-action-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
         </section>
         <section class="command-grid">
           <HorizontalBarChart title="采集链路诊断" eyebrow="Capture Diagnostics" :items="captureDiagnosticItems" unit="count" />

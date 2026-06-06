@@ -252,6 +252,44 @@ func TestBuildAIReportSummaryDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildAICaptureDiagnosticsSummary(t *testing.T) {
+	summary := buildAICaptureDiagnosticsSummary(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{
+			"minutes": 15,
+			"status":  "warning",
+			"summary": map[string]any{
+				"layer_count":     5,
+				"critical_layers": 0,
+				"warning_layers":  1,
+			},
+			"layers": []any{
+				map[string]any{"name": "窗口覆盖率", "status": "warning", "metric": "覆盖率 94.0%", "detail": "存在短时窗口断档。"},
+				map[string]any{"name": "数据新鲜度", "status": "healthy", "metric": "最新延迟 5 秒", "detail": "实时窗口正常。"},
+			},
+			"recommendations": []any{
+				map[string]any{"level": "warning", "title": "窗口覆盖率", "detail": "检查采集器重启或 ClickHouse 写入失败时间点。"},
+			},
+		},
+	)
+
+	if stringValue(summary["kind"]) != "capture_diagnostics" {
+		t.Fatalf("expected capture diagnostics kind, got %#v", summary["kind"])
+	}
+	if stringValue(summary["title"]) != "AI 采集诊断摘要" {
+		t.Fatalf("unexpected title: %#v", summary["title"])
+	}
+	if len(sliceValue(summary["findings"])) < 3 {
+		t.Fatalf("expected diagnostic findings, got %#v", summary["findings"])
+	}
+	if len(sliceValue(summary["actions"])) != 1 {
+		t.Fatalf("expected recommendation action, got %#v", summary["actions"])
+	}
+	if float64Value(summary["confidence"]) <= 0 {
+		t.Fatalf("expected confidence, got %#v", summary["confidence"])
+	}
+}
+
 func TestEnhanceAISummaryUsesExternalModel(t *testing.T) {
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {

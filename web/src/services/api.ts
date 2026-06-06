@@ -1340,6 +1340,11 @@ export const api = {
   async aiReportSummary(minutes = 15, limit = 10) {
     return json<{ data: AISummary; degraded: boolean }>(`/api/v1/ai/report-summary?minutes=${minutes}&limit=${limit}`);
   },
+  async aiCaptureDiagnosticsSummary(minutes = 15, limit = 20) {
+    return json<{ data: AISummary; degraded: boolean }>(
+      `/api/v1/ai/capture-diagnostics-summary?minutes=${minutes}&limit=${limit}`
+    );
+  },
   async aiQuery(question: string, minutes = 15, limit = 8) {
     const response = await fetch('/api/v1/ai/query', {
       method: 'POST',

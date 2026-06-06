@@ -1213,6 +1213,54 @@ func buildAIReportSummary(options aiSummaryOptions, report map[string]any) map[s
 	return aiSummary(options, "report", "overview", "AI 巡检摘要", riskSentence, confidenceByContext(len(assetRisks)+len(incidents)+len(anomalies)+len(exposures)), findings, evidence, actions)
 }
 
+func buildAICaptureDiagnosticsSummary(options aiSummaryOptions, report map[string]any) map[string]any {
+	status := firstString(stringValue(report["status"]), "unknown")
+	minutes := int64Value(report["minutes"])
+	summary := mapValue(report["summary"])
+	layers := sliceValue(report["layers"])
+	recommendations := sliceValue(report["recommendations"])
+	critical := int64Value(summary["critical_layers"])
+	warning := int64Value(summary["warning_layers"])
+	findings := []string{
+		fmt.Sprintf("近 %d 分钟采集链路状态为 %s，检查 %d 个层级。", minutes, aiDataQualityStatusText(status), int64Value(summary["layer_count"])),
+		fmt.Sprintf("诊断发现严重层 %d 个、警告层 %d 个。", critical, warning),
+	}
+	evidence := []string{
+		"总体状态：" + aiDataQualityStatusText(status),
+		"严重层数：" + strconv.FormatInt(critical, 10),
+		"警告层数：" + strconv.FormatInt(warning, 10),
+	}
+	for _, raw := range layers {
+		layer := mapValue(raw)
+		layerStatus := stringValue(layer["status"])
+		if layerStatus != "healthy" {
+			findings = append(findings, fmt.Sprintf("%s 状态为 %s，指标：%s。", stringValue(layer["name"]), aiDataQualityStatusText(layerStatus), firstString(stringValue(layer["metric"]), "-")))
+			evidence = append(evidence, stringValue(layer["name"])+"："+firstString(stringValue(layer["detail"]), "-"))
+		}
+	}
+	actions := []string{}
+	for _, raw := range recommendations {
+		row := mapValue(raw)
+		if detail := strings.TrimSpace(stringValue(row["detail"])); detail != "" {
+			actions = append(actions, detail)
+		}
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "保持采集器在线，持续观察网卡计数、队列压力、窗口新鲜度和覆盖率。")
+	}
+	title := "AI 采集诊断摘要"
+	lead := "当前采集链路整体稳定，可继续基于实时数据分析。"
+	if critical > 0 {
+		lead = "采集链路存在严重异常，建议优先处理影响实时性或数据完整性的层级。"
+	} else if warning > 0 {
+		lead = "采集链路存在警告项，建议结合分层诊断确认是否影响数据可信度。"
+	}
+	if !options.Enabled {
+		return disabledAISummary(options, "capture_diagnostics", "collector")
+	}
+	return aiSummary(options, "capture_diagnostics", "collector", title, lead, confidenceByContext(len(layers)+len(recommendations)), findings, evidence, actions)
+}
+
 func aiSummary(options aiSummaryOptions, kind, subject, title, summary string, confidence float64, findings, evidence, actions []string) map[string]any {
 	return map[string]any{
 		"enabled":      options.Enabled,
@@ -1233,6 +1281,19 @@ func aiSummary(options aiSummaryOptions, kind, subject, title, summary string, c
 
 func disabledAISummary(options aiSummaryOptions, kind, subject string) map[string]any {
 	return aiSummary(options, kind, subject, "AI 摘要已关闭", "当前 `NEXAFLOW_AI_MODE=disabled`，系统只返回基础上下文，不生成 AI 摘要。", 0, []string{}, []string{}, []string{"设置 NEXAFLOW_AI_MODE=local_mock 可启用本地摘要，或配置外部模型网关。"})
+}
+
+func aiDataQualityStatusText(status string) string {
+	switch status {
+	case "critical":
+		return "严重"
+	case "warning":
+		return "警告"
+	case "healthy":
+		return "健康"
+	default:
+		return "未知"
+	}
 }
 
 func confidenceByContext(count int) float64 {

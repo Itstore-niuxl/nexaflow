@@ -96,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/incident-summary", s.aiIncidentSummary)
 	mux.HandleFunc("/api/v1/ai/asset-summary", s.aiAssetSummary)
 	mux.HandleFunc("/api/v1/ai/report-summary", s.aiReportSummary)
+	mux.HandleFunc("/api/v1/ai/capture-diagnostics-summary", s.aiCaptureDiagnosticsSummary)
 	mux.HandleFunc("/api/v1/ai/query", s.aiQuery)
 	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
 	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
@@ -669,6 +670,28 @@ func (s *Server) aiReportSummary(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"data":     data,
 		"degraded": err != nil || aiErr != nil,
+	})
+}
+
+func (s *Server) aiCaptureDiagnosticsSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := queryLimit(r, 20, 200)
+	capture, captureErr := s.store.CaptureQuality(r.Context(), minutes, limit)
+	quality, qualityErr := s.store.DataQuality(r.Context(), minutes, limit)
+	report := captureDiagnosticReport(capture, quality, minutes)
+	data, aiErr := s.enhanceAISummary(r.Context(), buildAICaptureDiagnosticsSummary(s.aiOptions(), report), map[string]any{
+		"capture_diagnostics": report,
+		"capture_quality":     capture,
+		"data_quality":        quality,
+		"minutes":             minutes,
+	})
+	writeJSON(w, map[string]any{
+		"data":     data,
+		"degraded": captureErr != nil || qualityErr != nil || aiErr != nil,
 	})
 }
 
