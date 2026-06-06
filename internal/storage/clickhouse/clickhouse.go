@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nexaflow/internal/model"
@@ -2289,11 +2290,93 @@ func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind strin
 		relationDimension = "flow"
 		relationKey = ""
 	}
-	relations, relationErr := s.ObjectRelations(ctx, relationDimension, relationKey, selector["direction"], minutes, limit)
-	sessions, sessionErr := s.Sessions(ctx, selector["query"], minutes, limit)
-	searchRows, searchErr := s.Search(ctx, selector["query"], minutes, limit)
-	insights, insightErr := s.incidentRelatedInsights(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
-	anomalies, anomalyErr := s.incidentRelatedAnomalies(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
+
+	var (
+		relations  map[string]any
+		sessions   []map[string]any
+		searchRows []map[string]any
+		insights   []map[string]any
+		anomalies  []map[string]any
+
+		relationErr error
+		sessionErr  error
+		searchErr   error
+		insightErr  error
+		anomalyErr  error
+	)
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		relations, relationErr = s.ObjectRelations(ctx, relationDimension, relationKey, selector["direction"], minutes, limit)
+	}()
+	go func() {
+		defer wg.Done()
+		sessions, sessionErr = s.Sessions(ctx, selector["query"], minutes, limit)
+	}()
+	go func() {
+		defer wg.Done()
+		searchRows, searchErr = s.Search(ctx, selector["query"], minutes, limit)
+	}()
+	go func() {
+		defer wg.Done()
+		insights, insightErr = s.incidentRelatedInsights(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
+	}()
+	go func() {
+		defer wg.Done()
+		anomalies, anomalyErr = s.incidentRelatedAnomalies(ctx, selector["dimension"], selector["key"], selector["query"], minutes, limit)
+	}()
+
+	type profileJob struct {
+		profileType string
+		value       string
+		contextKeys []string
+		result      map[string]any
+		err         error
+	}
+	profileJobs := []profileJob{}
+	profileIndex := map[string]int{}
+	addProfile := func(contextKey, profileType, value string) {
+		if value == "" {
+			return
+		}
+		id := profileType + ":" + value
+		if idx, ok := profileIndex[id]; ok {
+			profileJobs[idx].contextKeys = append(profileJobs[idx].contextKeys, contextKey)
+			return
+		}
+		profileIndex[id] = len(profileJobs)
+		profileJobs = append(profileJobs, profileJob{
+			profileType: profileType,
+			value:       value,
+			contextKeys: []string{contextKey},
+		})
+	}
+	addProfile("src_ip_profile", "ip", selector["src_ip"])
+	if selector["dst_ip"] != selector["src_ip"] {
+		addProfile("dst_ip_profile", "ip", selector["dst_ip"])
+	}
+	addProfile("dst_port_profile", "port", selector["dst_port"])
+	if selector["dimension"] == "ip" {
+		addProfile("ip_profile", "ip", selector["key"])
+	}
+	if selector["dimension"] == "dst_port" {
+		addProfile("port_profile", "port", selector["key"])
+	}
+	for i := range profileJobs {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			switch profileJobs[idx].profileType {
+			case "ip":
+				profileJobs[idx].result, profileJobs[idx].err = s.IPProfile(ctx, profileJobs[idx].value, minutes)
+			case "port":
+				profileJobs[idx].result, profileJobs[idx].err = s.PortProfile(ctx, profileJobs[idx].value, minutes)
+			}
+		}(i)
+	}
+	wg.Wait()
+
 	context := map[string]any{
 		"subject":          subject,
 		"kind":             kind,
@@ -2307,30 +2390,11 @@ func (s *Store) SecurityIncidentContext(ctx context.Context, subject, kind strin
 		"playbook_actions": incidentPlaybookActions(kind, selector["dimension"]),
 	}
 	var extraErr error
-	if selector["src_ip"] != "" {
-		profile, profileErr := s.IPProfile(ctx, selector["src_ip"], minutes)
-		context["src_ip_profile"] = profile
-		extraErr = firstErr(extraErr, profileErr)
-	}
-	if selector["dst_ip"] != "" && selector["dst_ip"] != selector["src_ip"] {
-		profile, profileErr := s.IPProfile(ctx, selector["dst_ip"], minutes)
-		context["dst_ip_profile"] = profile
-		extraErr = firstErr(extraErr, profileErr)
-	}
-	if selector["dst_port"] != "" {
-		profile, profileErr := s.PortProfile(ctx, selector["dst_port"], minutes)
-		context["dst_port_profile"] = profile
-		extraErr = firstErr(extraErr, profileErr)
-	}
-	if selector["dimension"] == "ip" && selector["key"] != "" {
-		profile, profileErr := s.IPProfile(ctx, selector["key"], minutes)
-		context["ip_profile"] = profile
-		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr, profileErr)
-	}
-	if selector["dimension"] == "dst_port" && selector["key"] != "" {
-		profile, profileErr := s.PortProfile(ctx, selector["key"], minutes)
-		context["port_profile"] = profile
-		return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr, profileErr)
+	for _, job := range profileJobs {
+		for _, contextKey := range job.contextKeys {
+			context[contextKey] = job.result
+		}
+		extraErr = firstErr(extraErr, job.err)
 	}
 	return context, firstErr(relationErr, sessionErr, searchErr, insightErr, anomalyErr, extraErr)
 }

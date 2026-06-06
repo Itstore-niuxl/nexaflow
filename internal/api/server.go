@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"nexaflow/internal/config"
@@ -740,7 +741,47 @@ func (s *Server) aiIncidentInvestigation(w http.ResponseWriter, r *http.Request)
 	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
 	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	incidents, incidentErr := s.collectSecurityIncidents(r.Context(), minutes, max(limit, 20))
+
+	var (
+		incidents   []map[string]any
+		contextData map[string]any
+		timeline    []map[string]any
+		history     []map[string]any
+
+		incidentErr error
+		contextErr  error
+		timelineErr error
+		historyErr  error
+	)
+	historyMinutes := min(max(minutes*2, 30), 60)
+	contextStarted := subject != "" && kind != ""
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		incidents, incidentErr = s.collectSecurityIncidents(r.Context(), minutes, max(limit, 20))
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		history, historyErr = s.collectSecurityIncidents(r.Context(), historyMinutes, max(limit, 20))
+	}()
+	if contextStarted {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			contextData, contextErr = s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+		}()
+	}
+	if id != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			timeline, timelineErr = s.store.IncidentTimeline(r.Context(), id, 20)
+		}()
+	}
+	wg.Wait()
+
 	incident := findAIIncident(incidents, id, subject, kind)
 	if subject == "" {
 		subject = stringValue(incident["subject"])
@@ -752,14 +793,9 @@ func (s *Server) aiIncidentInvestigation(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "subject or id is required", http.StatusBadRequest)
 		return
 	}
-	contextData, contextErr := s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
-	var timeline []map[string]any
-	var timelineErr error
-	if id != "" {
-		timeline, timelineErr = s.store.IncidentTimeline(r.Context(), id, 20)
+	if !contextStarted {
+		contextData, contextErr = s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
 	}
-	historyMinutes := min(max(minutes*2, 30), 60)
-	history, historyErr := s.collectSecurityIncidents(r.Context(), historyMinutes, max(limit, 20))
 	similar := findSimilarAIIncidents(incident, history, limit)
 	writeJSON(w, map[string]any{
 		"data":     buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, timeline, similar),
