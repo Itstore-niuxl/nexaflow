@@ -39,6 +39,7 @@ import {
   api,
   type AlertConfig,
   type AlertEvent,
+  type AIApprovalRequest,
   type AIAssetEnrichmentSuggestions,
   type AIAssetEnrichmentSuggestion,
   type AIGovernanceSuggestions,
@@ -464,6 +465,8 @@ const aiQueryResult = ref<AIQueryResult>(emptyAIQueryResult());
 const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
 const aiRuleEffectiveness = ref<AIRuleEffectiveness>(emptyAIRuleEffectiveness());
 const aiAssetEnrichment = ref<AIAssetEnrichmentSuggestions>(emptyAIAssetEnrichmentSuggestions());
+const aiApprovals = ref<AIApprovalRequest[]>([]);
+const aiApprovalBusy = ref('');
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
@@ -767,6 +770,7 @@ const refresh = async () => {
       governanceRes,
       ruleEffectivenessRes,
       assetEnrichmentRes,
+      approvalRes,
       ruleFindingRes,
       auditRes,
       configVersionRes,
@@ -819,6 +823,7 @@ const refresh = async () => {
       api.aiGovernanceSuggestions(minutes, 8),
       api.aiRuleEffectiveness(minutes, 120),
       api.aiAssetEnrichmentSuggestions(minutes, 8),
+      api.aiApprovalRequests(''),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
@@ -872,6 +877,7 @@ const refresh = async () => {
     aiGovernance.value = governanceRes.data;
     aiRuleEffectiveness.value = ruleEffectivenessRes.data;
     aiAssetEnrichment.value = assetEnrichmentRes.data;
+    aiApprovals.value = approvalRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -916,6 +922,7 @@ const refresh = async () => {
       governanceRes.degraded ||
       ruleEffectivenessRes.degraded ||
       assetEnrichmentRes.degraded ||
+      approvalRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
       configVersionRes.degraded;
@@ -2600,6 +2607,7 @@ const criticalAssetRiskCount = computed(() => assetRisks.value.filter((row) => r
 const unownedAssetRiskCount = computed(() => assetRisks.value.filter((row) => !row.owner).length);
 const exposedAssetRiskCount = computed(() => assetRisks.value.filter((row) => row.exposed_services > 0 || row.external_peers > 0).length);
 const assetRiskTotalBytes = computed(() => assetRisks.value.reduce((sum, row) => sum + row.total_bytes, 0));
+const pendingAIApprovals = computed(() => aiApprovals.value.filter((row) => row.status === 'pending'));
 const criticalInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'critical').length);
 const warningInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'warning').length);
 const dominantProtocol = computed(() => trafficAnalysis.value.protocol_mix[0]);
@@ -3015,6 +3023,24 @@ const criticalityText = (value: string) => {
   return labels[value] ?? value ?? '普通';
 };
 
+const aiApprovalTypeText = (value: string) => {
+  const labels: Record<string, string> = {
+    rule: '检测规则',
+    silence: '白名单',
+    asset_enrichment: '资产画像'
+  };
+  return labels[value] ?? value;
+};
+
+const aiApprovalStatusText = (value: string) => {
+  const labels: Record<string, string> = {
+    pending: '待审批',
+    approved: '已批准',
+    rejected: '已驳回'
+  };
+  return labels[value] ?? value;
+};
+
 const exposureSubject = (row: ServiceExposure) => `dst_port:${row.port}`;
 
 const exposureObject = (row: ServiceExposure) => `${row.ip}:${row.port} / ${row.protocol}`;
@@ -3280,6 +3306,68 @@ const reviewGovernanceSilence = (suggestion: AIGovernanceSuggestion) => {
   if (!canWrite.value || !suggestion.proposed_silence?.subject) return;
   whitelistSubject.value = suggestion.proposed_silence.subject;
   currentView.value = 'alerts';
+};
+
+const submitGovernanceApproval = async (suggestion: AIGovernanceSuggestion) => {
+  if (!canWrite.value) return;
+  const type = suggestion.proposed_rule ? 'rule' : suggestion.proposed_silence ? 'silence' : '';
+  if (!type) return;
+  aiApprovalBusy.value = suggestion.id;
+  try {
+    await api.createAIApprovalRequest({
+      type,
+      severity: suggestion.severity,
+      title: suggestion.title,
+      target: suggestion.target,
+      summary: suggestion.summary,
+      confidence: suggestion.confidence,
+      evidence: suggestion.evidence,
+      actions: suggestion.actions,
+      payload: {
+        proposed_rule: suggestion.proposed_rule,
+        proposed_silence: suggestion.proposed_silence
+      }
+    });
+    const result = await api.aiApprovalRequests('');
+    aiApprovals.value = result.data;
+  } finally {
+    aiApprovalBusy.value = '';
+  }
+};
+
+const submitAssetEnrichmentApproval = async (suggestion: AIAssetEnrichmentSuggestion) => {
+  if (!canWrite.value) return;
+  aiApprovalBusy.value = suggestion.id;
+  try {
+    await api.createAIApprovalRequest({
+      type: 'asset_enrichment',
+      severity: suggestion.severity,
+      title: suggestion.title,
+      target: suggestion.ip,
+      summary: suggestion.summary,
+      confidence: suggestion.confidence,
+      evidence: suggestion.evidence,
+      actions: suggestion.actions,
+      payload: {
+        proposed_metadata: suggestion.proposed_metadata
+      }
+    });
+    const result = await api.aiApprovalRequests('');
+    aiApprovals.value = result.data;
+  } finally {
+    aiApprovalBusy.value = '';
+  }
+};
+
+const reviewAIApproval = async (request: AIApprovalRequest, action: 'approve' | 'reject') => {
+  if (!canWrite.value) return;
+  aiApprovalBusy.value = request.id;
+  try {
+    await api.reviewAIApprovalRequest(request.id, action, action === 'approve' ? '管理员确认执行' : '管理员驳回建议');
+    await refresh();
+  } finally {
+    aiApprovalBusy.value = '';
+  }
 };
 
 const editRule = (rule: DetectionRule) => {
@@ -4108,6 +4196,46 @@ const exportCSV = (filename: string, rows: string[][]) => {
           </table>
         </section>
 
+        <section class="table-panel ai-approval-panel">
+          <div class="panel-heading">
+            <h2>AI 审批队列</h2>
+            <span>{{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
+          </div>
+          <div v-if="aiApprovals.length === 0" class="empty-state">暂无 AI 审批请求</div>
+          <div v-else class="governance-list">
+            <article v-for="item in aiApprovals.slice(0, 8)" :key="item.id" class="governance-card">
+              <div class="governance-card-header">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ aiApprovalTypeText(item.type) }} / {{ item.target }}</span>
+                </div>
+                <b class="severity-pill" :class="item.severity">{{ aiApprovalStatusText(item.status) }} / {{ aiConfidenceText(item.confidence) }}</b>
+              </div>
+              <p>{{ item.summary }}</p>
+              <div class="ai-summary-grid">
+                <div>
+                  <span>证据</span>
+                  <ul>
+                    <li v-for="evidence in item.evidence.slice(0, 3)" :key="`ai-approval-evidence-${item.id}-${evidence}`">{{ evidence }}</li>
+                  </ul>
+                </div>
+                <div>
+                  <span>执行记录</span>
+                  <ul>
+                    <li>提交：{{ item.created_by || '-' }} / {{ formatTime(item.created_at) }}</li>
+                    <li v-if="item.reviewed_at">处理：{{ item.reviewed_by || '-' }} / {{ formatTime(item.reviewed_at) }}</li>
+                    <li v-if="item.apply_result">结果：{{ item.apply_result }}</li>
+                  </ul>
+                </div>
+              </div>
+              <div v-if="item.status === 'pending'" class="ai-workbench-actions">
+                <button class="command-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'approve')">批准执行</button>
+                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'reject')">驳回</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
         <section class="table-panel ai-governance-panel">
           <div class="panel-heading">
             <h2>AI 治理建议</h2>
@@ -4142,6 +4270,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               <div class="ai-workbench-actions">
                 <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canWrite" @click="useGovernanceRule(item)">填入规则草案</button>
                 <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canWrite" @click="reviewGovernanceSilence(item)">复核白名单</button>
+                <button v-if="item.proposed_rule || item.proposed_silence" class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="submitGovernanceApproval(item)">提交审批</button>
               </div>
             </article>
           </div>
@@ -4186,6 +4315,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </div>
               <div class="ai-workbench-actions">
                 <button class="command-button" type="button" :disabled="!canWrite" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
+                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="submitAssetEnrichmentApproval(item)">提交审批</button>
                 <button class="inline-button" type="button" @click="profileIP = item.ip; currentView = 'asset-risk'">查看资产风险</button>
               </div>
             </article>

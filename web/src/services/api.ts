@@ -904,6 +904,27 @@ export interface AIAssetEnrichmentSuggestions {
   generated_at: number;
 }
 
+export interface AIApprovalRequest {
+  id: string;
+  type: string;
+  status: string;
+  severity: string;
+  title: string;
+  target: string;
+  summary: string;
+  confidence: number;
+  evidence: string[];
+  actions: string[];
+  payload: Record<string, unknown>;
+  created_by: string;
+  created_at: number;
+  reviewed_by?: string;
+  reviewed_at?: number;
+  review_note?: string;
+  applied_at?: number;
+  apply_result?: string;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1349,6 +1370,32 @@ export const api = {
     return json<{ data: AIAssetEnrichmentSuggestions; degraded: boolean }>(
       `/api/v1/ai/asset-enrichment-suggestions?minutes=${minutes}&limit=${limit}`
     );
+  },
+  async aiApprovalRequests(status = '') {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    return json<{ data: AIApprovalRequest[]; degraded: boolean }>(`/api/v1/ai/approval-requests${query}`);
+  },
+  async createAIApprovalRequest(request: Partial<AIApprovalRequest>) {
+    const response = await fetch('/api/v1/ai/approval-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AIApprovalRequest }>;
+  },
+  async reviewAIApprovalRequest(id: string, action: 'approve' | 'reject', note = '') {
+    const response = await fetch('/api/v1/ai/approval-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, action, note })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AIApprovalRequest }>;
   },
   async detectionRules() {
     return json<{ data: DetectionRule[] }>('/api/v1/security/rules');

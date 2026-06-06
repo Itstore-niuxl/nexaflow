@@ -59,7 +59,7 @@ NEXAFLOW_AUTH_SECRET='<random-session-secret>'
 
 `NEXAFLOW_AUTH_PASSWORD` grants administrator access. `NEXAFLOW_AUTH_READONLY_PASSWORD` grants observer access: dashboards and queries are available, but write operations such as collector switching, rule changes, alert handling, whitelist updates, asset metadata edits, and incident notes are rejected.
 
-AI summaries are available in local deterministic mode by default. Set `NEXAFLOW_AI_MODE=disabled` to hide AI summaries, or configure a provider later through `NEXAFLOW_AI_PROVIDER`, `NEXAFLOW_AI_MODEL`, `NEXAFLOW_AI_BASE_URL`, and `NEXAFLOW_AI_API_KEY`.
+AI summaries are available in local deterministic mode by default. Set `NEXAFLOW_AI_MODE=disabled` to hide AI summaries, or configure an OpenAI-compatible provider through `NEXAFLOW_AI_PROVIDER`, `NEXAFLOW_AI_MODEL`, `NEXAFLOW_AI_BASE_URL`, and `NEXAFLOW_AI_API_KEY`. External providers are called through `<base_url>/chat/completions` for incident, asset, and report summaries; if the provider fails, NexaFlow falls back to the local summary and marks the response as degraded.
 
 Configuration changes are recorded in the `配置版本` page. Administrators can restore a previous runtime configuration snapshot from that page; restore actions are also audited and versioned.
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
@@ -248,6 +249,120 @@ func TestBuildAIReportSummaryDisabled(t *testing.T) {
 	}
 	if len(sliceValue(summary["actions"])) == 0 {
 		t.Fatalf("expected disabled mode action, got %#v", summary["actions"])
+	}
+}
+
+func TestEnhanceAISummaryUsesExternalModel(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected AI path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"summary\":\"外部模型摘要\",\"findings\":[\"发现一\"],\"actions\":[\"处理一\"],\"evidence\":[\"证据一\"],\"confidence\":0.91}"}}]}`))
+	}))
+	defer gateway.Close()
+
+	server := New(nil, config.Config{
+		RuntimePath:      t.TempDir() + "/runtime.json",
+		AIMode:           "openai",
+		AIProvider:       "openai_compatible",
+		AIModel:          "test-model",
+		AIBaseURL:        gateway.URL,
+		AIAPIKey:         "test-key",
+		AIMaxContextRows: 12,
+	})
+	local := aiSummary(
+		aiSummaryOptions{Enabled: true, Mode: "openai", Provider: "openai_compatible", Model: "test-model"},
+		"report",
+		"overview",
+		"AI 巡检摘要",
+		"本地摘要",
+		0.5,
+		[]string{"本地发现"},
+		[]string{"本地证据"},
+		[]string{"本地动作"},
+	)
+	enhanced, err := server.enhanceAISummary(context.Background(), local, map[string]any{"sample": "context"})
+	if err != nil {
+		t.Fatalf("enhance summary: %v", err)
+	}
+	if stringValue(enhanced["summary"]) != "外部模型摘要" {
+		t.Fatalf("expected external summary, got %#v", enhanced)
+	}
+	if stringValue(enhanced["provider_status"]) != "external" {
+		t.Fatalf("expected external provider status, got %#v", enhanced)
+	}
+	if !boolValue(enhanced["ai_generated"]) {
+		t.Fatalf("expected ai_generated, got %#v", enhanced)
+	}
+	if len(sliceValue(enhanced["model_evidence"])) != 1 {
+		t.Fatalf("expected model evidence, got %#v", enhanced)
+	}
+}
+
+func TestAIApprovalRuleFlow(t *testing.T) {
+	dir := t.TempDir()
+	server := New(nil, config.Config{
+		RuntimePath:   dir + "/collector_config.json",
+		Mode:          "mock",
+		Iface:         "eth0",
+		CollectorID:   "test-collector",
+		BandwidthMbps: 1000,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/approval-requests", nil)
+	created, err := server.createAIApprovalRequest(req, aiApprovalRequest{
+		Type:       "rule",
+		Severity:   "warning",
+		Title:      "AI 推荐：公网会话突增",
+		Target:     "211.93.22.130 -> 10.2.0.12:8081",
+		Summary:    "公网会话突增，建议沉淀检测规则。",
+		Confidence: 0.82,
+		Evidence:   []string{"会话数量：40"},
+		Actions:    []string{"保存规则后观察误报。"},
+		Payload: map[string]any{
+			"proposed_rule": map[string]any{
+				"name":               "AI 推荐：公网会话突增",
+				"category":           "公网访问",
+				"metric":             "external_sessions",
+				"match":              "211.93.22.130 -> 10.2.0.12:8081",
+				"operator":           "gte",
+				"threshold":          float64(30),
+				"severity":           "warning",
+				"enabled":            true,
+				"description":        "AI 审批测试规则",
+				"recommended_action": "核对公网来源。",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	if created.Status != "pending" || created.ID == "" {
+		t.Fatalf("unexpected created approval: %#v", created)
+	}
+	approved, err := server.reviewAIApprovalRequest(req, created.ID, "approve", "confirmed")
+	if err != nil {
+		t.Fatalf("approve request: %v", err)
+	}
+	if approved.Status != "approved" || approved.ApplyResult == "" {
+		t.Fatalf("unexpected approved request: %#v", approved)
+	}
+	runtime := config.LoadRuntime(server.config.RuntimePath, config.DefaultRuntime(server.config))
+	found := false
+	for _, rule := range runtime.Alerts.DetectionRules {
+		if rule.Name == "AI 推荐：公网会话突增" && rule.Metric == "external_sessions" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected approved rule in runtime, got %#v", runtime.Alerts.DetectionRules)
+	}
+	if _, err := server.reviewAIApprovalRequest(req, created.ID, "approve", "again"); err == nil {
+		t.Fatal("expected duplicate approval to fail")
 	}
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -102,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
 	mux.HandleFunc("/api/v1/ai/rule-effectiveness", s.aiRuleEffectiveness)
 	mux.HandleFunc("/api/v1/ai/asset-enrichment-suggestions", s.aiAssetEnrichmentSuggestions)
+	mux.HandleFunc("/api/v1/ai/approval-requests", s.aiApprovalRequests)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)
@@ -617,9 +619,14 @@ func (s *Server) aiIncidentSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	contextData, contextErr := s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+	data, aiErr := s.enhanceAISummary(r.Context(), buildAIIncidentSummary(s.aiOptions(), incident, contextData), map[string]any{
+		"incident": incident,
+		"context":  contextData,
+		"minutes":  minutes,
+	})
 	writeJSON(w, map[string]any{
-		"data":     buildAIIncidentSummary(s.aiOptions(), incident, contextData),
-		"degraded": incidentErr != nil || ruleErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)),
+		"data":     data,
+		"degraded": incidentErr != nil || ruleErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)) || aiErr != nil,
 	})
 }
 
@@ -637,9 +644,16 @@ func (s *Server) aiAssetSummary(w http.ResponseWriter, r *http.Request) {
 	limit := s.aiContextLimit(queryLimit(r, 20, 200))
 	risks, riskErr := s.store.AssetRiskPosture(r.Context(), minutes, limit)
 	profile, profileErr := s.store.IPProfile(r.Context(), ip, minutes)
+	risk := findMapByString(risks, "ip", ip)
+	data, aiErr := s.enhanceAISummary(r.Context(), buildAIAssetSummary(s.aiOptions(), ip, risk, profile), map[string]any{
+		"ip":      ip,
+		"risk":    risk,
+		"profile": profile,
+		"minutes": minutes,
+	})
 	writeJSON(w, map[string]any{
-		"data":     buildAIAssetSummary(s.aiOptions(), ip, findMapByString(risks, "ip", ip), profile),
-		"degraded": riskErr != nil || profileErr != nil,
+		"data":     data,
+		"degraded": riskErr != nil || profileErr != nil || aiErr != nil,
 	})
 }
 
@@ -650,9 +664,13 @@ func (s *Server) aiReportSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	minutes := queryMinutes(r)
 	report, err := s.store.ReportOverview(r.Context(), minutes, s.aiContextLimit(queryLimit(r, 10, 50)))
+	data, aiErr := s.enhanceAISummary(r.Context(), buildAIReportSummary(s.aiOptions(), report), map[string]any{
+		"report":  report,
+		"minutes": minutes,
+	})
 	writeJSON(w, map[string]any{
-		"data":     buildAIReportSummary(s.aiOptions(), report),
-		"degraded": err != nil,
+		"data":     data,
+		"degraded": err != nil || aiErr != nil,
 	})
 }
 
@@ -1542,10 +1560,16 @@ func queryLimit(r *http.Request, fallback, max int) int {
 }
 
 func (s *Server) audit(r *http.Request, action, target, summary string, detail map[string]any) {
+	if s.store == nil {
+		return
+	}
 	_ = s.store.RecordAuditEvent(r.Context(), auditActor(r), action, target, summary, detail, auditClientIP(r))
 }
 
 func (s *Server) configSnapshot(r *http.Request, scope, target, action, summary string, snapshot any) {
+	if s.store == nil {
+		return
+	}
 	_ = s.store.RecordConfigVersion(r.Context(), auditActor(r), scope, target, action, summary, snapshot, auditClientIP(r))
 }
 
@@ -1767,6 +1791,477 @@ func (s *Server) testAISettings(ctx context.Context, ai config.AISettings) map[s
 	result["ok"] = false
 	result["message"] = "模型网关返回异常状态：" + resp.Status
 	return result
+}
+
+type aiChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type aiChatRequest struct {
+	Model       string          `json:"model"`
+	Messages    []aiChatMessage `json:"messages"`
+	Temperature float64         `json:"temperature"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+}
+
+type aiChatResponse struct {
+	Choices []struct {
+		Message aiChatMessage `json:"message"`
+	} `json:"choices"`
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
+}
+
+type aiApprovalRequest struct {
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	Status      string         `json:"status"`
+	Severity    string         `json:"severity"`
+	Title       string         `json:"title"`
+	Target      string         `json:"target"`
+	Summary     string         `json:"summary"`
+	Confidence  float64        `json:"confidence"`
+	Evidence    []string       `json:"evidence"`
+	Actions     []string       `json:"actions"`
+	Payload     map[string]any `json:"payload"`
+	CreatedBy   string         `json:"created_by"`
+	CreatedAt   int64          `json:"created_at"`
+	ReviewedBy  string         `json:"reviewed_by,omitempty"`
+	ReviewedAt  int64          `json:"reviewed_at,omitempty"`
+	ReviewNote  string         `json:"review_note,omitempty"`
+	AppliedAt   int64          `json:"applied_at,omitempty"`
+	ApplyResult string         `json:"apply_result,omitempty"`
+}
+
+type aiApprovalStore struct {
+	Requests []aiApprovalRequest `json:"requests"`
+}
+
+func (s *Server) aiApprovalRequests(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		items, err := s.loadAIApprovalRequests()
+		if status != "" {
+			items = filterAIApprovalRequests(items, status)
+		}
+		writeJSON(w, map[string]any{"data": items, "degraded": err != nil})
+	case http.MethodPost:
+		var body struct {
+			Action  string            `json:"action"`
+			ID      string            `json:"id"`
+			Note    string            `json:"note"`
+			Request aiApprovalRequest `json:"request"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		action := strings.TrimSpace(body.Action)
+		if action == "" {
+			result, err := s.createAIApprovalRequest(r, body.Request)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]any{"data": result})
+			return
+		}
+		result, err := s.reviewAIApprovalRequest(r, strings.TrimSpace(body.ID), action, strings.TrimSpace(body.Note))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"data": result})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) createAIApprovalRequest(r *http.Request, request aiApprovalRequest) (aiApprovalRequest, error) {
+	request.Type = strings.TrimSpace(request.Type)
+	request.Title = strings.TrimSpace(request.Title)
+	request.Target = strings.TrimSpace(request.Target)
+	if request.Type == "" || request.Title == "" || request.Target == "" {
+		return request, fmt.Errorf("type, title and target are required")
+	}
+	if len(request.Payload) == 0 {
+		return request, fmt.Errorf("payload is required")
+	}
+	request.ID = strings.TrimSpace(request.ID)
+	if request.ID == "" {
+		request.ID = "ai-approval-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	request.Status = "pending"
+	request.CreatedBy = auditActor(r)
+	request.CreatedAt = time.Now().Unix()
+	items, _ := s.loadAIApprovalRequests()
+	items = upsertAIApprovalRequest(items, request)
+	if err := s.saveAIApprovalRequests(items); err != nil {
+		return request, err
+	}
+	s.audit(r, "ai.approval.create", request.ID, "提交 AI 建议审批："+request.Title, map[string]any{
+		"id":     request.ID,
+		"type":   request.Type,
+		"target": request.Target,
+	})
+	return request, nil
+}
+
+func (s *Server) reviewAIApprovalRequest(r *http.Request, id, action, note string) (aiApprovalRequest, error) {
+	if id == "" {
+		return aiApprovalRequest{}, fmt.Errorf("id is required")
+	}
+	if action != "approve" && action != "reject" {
+		return aiApprovalRequest{}, fmt.Errorf("action must be approve or reject")
+	}
+	items, err := s.loadAIApprovalRequests()
+	if err != nil {
+		return aiApprovalRequest{}, err
+	}
+	index := -1
+	for i, item := range items {
+		if item.ID == id {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return aiApprovalRequest{}, fmt.Errorf("approval request not found")
+	}
+	request := items[index]
+	if request.Status != "pending" {
+		return request, fmt.Errorf("approval request is already %s", request.Status)
+	}
+	request.ReviewedBy = auditActor(r)
+	request.ReviewedAt = time.Now().Unix()
+	request.ReviewNote = note
+	if action == "reject" {
+		request.Status = "rejected"
+		items[index] = request
+		if err := s.saveAIApprovalRequests(items); err != nil {
+			return request, err
+		}
+		s.audit(r, "ai.approval.reject", request.ID, "驳回 AI 建议："+request.Title, map[string]any{"id": request.ID, "type": request.Type, "note": note})
+		return request, nil
+	}
+	applyResult, err := s.applyAIApprovalRequest(r, request)
+	if err != nil {
+		return request, err
+	}
+	request.Status = "approved"
+	request.AppliedAt = time.Now().Unix()
+	request.ApplyResult = applyResult
+	items[index] = request
+	if err := s.saveAIApprovalRequests(items); err != nil {
+		return request, err
+	}
+	s.audit(r, "ai.approval.approve", request.ID, "批准 AI 建议："+request.Title, map[string]any{"id": request.ID, "type": request.Type, "result": applyResult})
+	return request, nil
+}
+
+func (s *Server) applyAIApprovalRequest(r *http.Request, request aiApprovalRequest) (string, error) {
+	switch request.Type {
+	case "rule":
+		ruleData := mapValue(request.Payload["proposed_rule"])
+		if len(ruleData) == 0 {
+			ruleData = request.Payload
+		}
+		data, err := json.Marshal(ruleData)
+		if err != nil {
+			return "", err
+		}
+		var rule model.DetectionRule
+		if err := json.Unmarshal(data, &rule); err != nil {
+			return "", err
+		}
+		rule.ID = ""
+		if strings.TrimSpace(rule.Name) == "" || strings.TrimSpace(rule.Metric) == "" || rule.Threshold <= 0 {
+			return "", fmt.Errorf("invalid proposed rule")
+		}
+		runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+		rule.ID = "rule-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+		rule.UpdatedAt = time.Now().Unix()
+		runtime.Alerts.DetectionRules = upsertDetectionRule(runtime.Alerts.DetectionRules, rule)
+		if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+			return "", err
+		}
+		s.configSnapshot(r, "rules", rule.ID, "ai.approval.apply.rule", "AI 审批保存检测规则："+rule.Name, config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
+		return "saved rule " + rule.ID, nil
+	case "silence":
+		silence := mapValue(request.Payload["proposed_silence"])
+		subject := strings.TrimSpace(firstString(stringValue(silence["subject"]), stringValue(request.Payload["subject"]), request.Target))
+		if subject == "" {
+			return "", fmt.Errorf("silence subject is required")
+		}
+		runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
+		runtime.Alerts.SilencedSubjects = append(runtime.Alerts.SilencedSubjects, subject)
+		runtime.Alerts.SilencedSubjects = normalizeRuntimeSilencedSubjects(runtime.Alerts.SilencedSubjects)
+		if err := config.SaveRuntime(s.config.RuntimePath, runtime); err != nil {
+			return "", err
+		}
+		s.configSnapshot(r, "alerts", subject, "ai.approval.apply.silence", "AI 审批加入白名单/静默名单："+subject, config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config)))
+		return "silenced " + subject, nil
+	case "asset_enrichment":
+		metadata := mapValue(request.Payload["proposed_metadata"])
+		if len(metadata) == 0 {
+			metadata = request.Payload
+		}
+		if strings.TrimSpace(stringValue(metadata["ip"])) == "" {
+			metadata["ip"] = request.Target
+		}
+		if strings.TrimSpace(stringValue(metadata["ip"])) == "" {
+			return "", fmt.Errorf("asset ip is required")
+		}
+		data, err := s.store.UpdateAssetMetadata(r.Context(), metadata)
+		if err != nil {
+			return "", err
+		}
+		target := "asset:" + stringValue(data["ip"])
+		s.audit(r, "ai.approval.apply.asset_metadata", target, "AI 审批更新资产元数据："+stringValue(data["ip"]), map[string]any{"id": request.ID, "ip": data["ip"]})
+		return "updated asset " + stringValue(data["ip"]), nil
+	default:
+		return "", fmt.Errorf("unsupported approval type: %s", request.Type)
+	}
+}
+
+func (s *Server) aiApprovalRequestsPath() string {
+	return filepath.Join(filepath.Dir(s.config.RuntimePath), "ai_approval_requests.json")
+}
+
+func (s *Server) loadAIApprovalRequests() ([]aiApprovalRequest, error) {
+	data, err := os.ReadFile(s.aiApprovalRequestsPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []aiApprovalRequest{}, nil
+		}
+		return []aiApprovalRequest{}, err
+	}
+	var store aiApprovalStore
+	if err := json.Unmarshal(data, &store); err != nil {
+		return []aiApprovalRequest{}, err
+	}
+	return store.Requests, nil
+}
+
+func (s *Server) saveAIApprovalRequests(items []aiApprovalRequest) error {
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+	path := s.aiApprovalRequestsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(aiApprovalStore{Requests: items}, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func upsertAIApprovalRequest(items []aiApprovalRequest, request aiApprovalRequest) []aiApprovalRequest {
+	for i, item := range items {
+		if item.ID == request.ID {
+			items[i] = request
+			return items
+		}
+	}
+	return append(items, request)
+}
+
+func filterAIApprovalRequests(items []aiApprovalRequest, status string) []aiApprovalRequest {
+	result := []aiApprovalRequest{}
+	for _, item := range items {
+		if item.Status == status {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func normalizeRuntimeSilencedSubjects(subjects []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, subject := range subjects {
+		subject = strings.TrimSpace(subject)
+		if subject == "" || seen[subject] {
+			continue
+		}
+		seen[subject] = true
+		result = append(result, subject)
+	}
+	return result
+}
+
+func (s *Server) enhanceAISummary(ctx context.Context, local map[string]any, contextData map[string]any) (map[string]any, error) {
+	ai := s.loadSystemSettings().AI
+	if !shouldCallExternalAI(ai) || !boolValue(local["enabled"]) {
+		local["provider_status"] = "local"
+		return local, nil
+	}
+	enhanced, err := callExternalAISummary(ctx, ai, local, contextData)
+	if err != nil {
+		local["provider_status"] = "fallback"
+		local["provider_error"] = err.Error()
+		return local, err
+	}
+	return mergeExternalAISummary(local, enhanced), nil
+}
+
+func shouldCallExternalAI(ai config.AISettings) bool {
+	mode := strings.ToLower(strings.TrimSpace(ai.Mode))
+	if mode == "" || mode == "disabled" || mode == "local_mock" {
+		return false
+	}
+	return strings.TrimSpace(ai.BaseURL) != "" && strings.TrimSpace(ai.APIKey) != ""
+}
+
+func callExternalAISummary(ctx context.Context, ai config.AISettings, local, contextData map[string]any) (map[string]any, error) {
+	target, err := url.Parse(strings.TrimRight(ai.BaseURL, "/") + "/chat/completions")
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return nil, fmt.Errorf("AI Base URL 格式不正确")
+	}
+	model := strings.TrimSpace(ai.Model)
+	if model == "" {
+		model = "nexaflow-local-summary"
+	}
+	payload := map[string]any{
+		"local_summary": local,
+		"context":       contextData,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	requestBody, err := json.Marshal(aiChatRequest{
+		Model: model,
+		Messages: []aiChatMessage{
+			{
+				Role: "system",
+				Content: strings.Join([]string{
+					"你是 NexaFlow 网络流量分析系统的企业级 AI 分析助手。",
+					"只能基于用户提供的 JSON 上下文生成结论，不得编造 IP、端口、资产、风险或数值。",
+					"返回 JSON 对象，字段仅包含 summary、findings、actions、confidence、evidence。",
+					"findings、actions、evidence 必须是中文字符串数组，summary 必须是中文短段落，confidence 是 0 到 1 的数字。",
+				}, "\n"),
+			},
+			{
+				Role:    "user",
+				Content: "请优化下面的本地 AI 摘要，保留证据链和可执行处置建议：\n" + string(payloadJSON),
+			},
+		},
+		Temperature: ai.Temperature,
+		MaxTokens:   900,
+	})
+	if err != nil {
+		return nil, err
+	}
+	timeout := time.Duration(ai.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, target.String(), bytes.NewReader(requestBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ai.APIKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用模型网关失败：%w", err)
+	}
+	defer resp.Body.Close()
+	var chat aiChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
+		return nil, fmt.Errorf("解析模型响应失败：%w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(chat.Error.Message)
+		if message == "" {
+			message = resp.Status
+		}
+		return nil, fmt.Errorf("模型网关返回异常：%s", message)
+	}
+	if len(chat.Choices) == 0 || strings.TrimSpace(chat.Choices[0].Message.Content) == "" {
+		return nil, fmt.Errorf("模型网关未返回摘要内容")
+	}
+	var enhanced map[string]any
+	if err := json.Unmarshal([]byte(extractJSONObject(chat.Choices[0].Message.Content)), &enhanced); err != nil {
+		return nil, fmt.Errorf("模型摘要不是合法 JSON：%w", err)
+	}
+	return enhanced, nil
+}
+
+func mergeExternalAISummary(local, enhanced map[string]any) map[string]any {
+	result := map[string]any{}
+	for key, value := range local {
+		result[key] = value
+	}
+	if summary := strings.TrimSpace(stringValue(enhanced["summary"])); summary != "" {
+		result["summary"] = summary
+	}
+	if findings := stringListValue(enhanced["findings"], 8); len(findings) > 0 {
+		result["findings"] = findings
+	}
+	if actions := stringListValue(enhanced["actions"], 8); len(actions) > 0 {
+		result["actions"] = actions
+	}
+	if evidence := stringListValue(enhanced["evidence"], 8); len(evidence) > 0 {
+		result["model_evidence"] = evidence
+	}
+	if confidence := float64Value(enhanced["confidence"]); confidence > 0 {
+		if confidence > 1 {
+			confidence = 1
+		}
+		result["confidence"] = confidence
+	}
+	result["ai_generated"] = true
+	result["provider_status"] = "external"
+	return result
+}
+
+func stringListValue(value any, limit int) []string {
+	items := sliceValue(value)
+	if len(items) == 0 {
+		return []string{}
+	}
+	out := []string{}
+	for _, item := range items {
+		text := strings.TrimSpace(stringValue(item))
+		if text == "" {
+			continue
+		}
+		out = append(out, text)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func extractJSONObject(content string) string {
+	text := strings.TrimSpace(content)
+	if strings.HasPrefix(text, "```") {
+		text = strings.TrimPrefix(text, "```json")
+		text = strings.TrimPrefix(text, "```")
+		text = strings.TrimSuffix(text, "```")
+		text = strings.TrimSpace(text)
+	}
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end > start {
+		return text[start : end+1]
+	}
+	return text
 }
 
 func testWebhookSettings(ctx context.Context, notification config.NotificationSettings) map[string]any {
