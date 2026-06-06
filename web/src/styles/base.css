@@ -1614,6 +1614,16 @@ td {
   gap: 12px;
 }
 
+.incident-recurrence-panel {
+  display: grid;
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.incident-recurrence-panel table {
+  min-width: 780px;
+}
+
 .report-recommendations {
   display: grid;
   align-content: start;

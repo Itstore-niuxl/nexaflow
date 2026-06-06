@@ -398,6 +398,17 @@ const emptyAIIncidentInvestigation = (): AIIncidentInvestigation => ({
   root_causes: [],
   evidence_chain: [],
   next_steps: [],
+  similar_incidents: [],
+  recurrence: {
+    recurring: false,
+    similar_count: 0,
+    same_subject: 0,
+    unresolved_count: 0,
+    latest_seen: 0,
+    latest_subject: '',
+    timeline_entries: 0,
+    conclusion: '暂未发现明显复发迹象'
+  },
   context: emptyIncidentContext(),
   timeline: [],
   generated_at: 0
@@ -1815,6 +1826,34 @@ const refresh = async () => {
       findings: ['事件对象关联公网会话突增，存在 40 条会话样本。', '关联资产 10.2.0.12 存在公网暴露和高风险服务。', '首要会话流量约 6.68 MB。'],
       evidence: ['事件类型：公网会话突增', '关联会话数：1', '关联风险线索：1'],
       actions: ['核对公网来源是否为业务白名单。', '检查 10.2.0.12 的端口暴露策略。', '必要时生成规则或临时收敛访问来源。'],
+      generated_at: now
+    };
+    incidentInvestigation.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      subject: '211.93.22.130 -> 10.2.0.12',
+      summary: incidentAISummary.value,
+      root_causes: ['相似事件反复出现，优先检查是否存在未关闭的业务模式、误报规则或长期暴露面', '公网扫描、异常外联或服务暴露扩大', '业务流量峰值或计划内变更'],
+      evidence_chain: ['事件对象：211.93.22.130 -> 10.2.0.12', '关联会话：1 条', '相似事件：2 条，复发判断：同一对象已出现 1 条相似记录，需按复发事件处理'],
+      next_steps: ['先核对相似事件的最近处置记录，判断是重复告警、规则噪声还是同一风险未根除。', '查看首要关联会话，确认源、目的、端口和服务用途。'],
+      similar_incidents: [
+        { id: 'sample-similar-1', subject: '211.93.22.130 -> 10.2.0.12', kind: 'external_session_burst', category: '公网暴露', severity: 'warning', status: 'ack', summary: '同一公网对端重复访问内部服务', first_seen: now - 7200, last_seen: now - 3600, score: 82, similarity: 100, reason: '对象相同、类型相同' },
+        { id: 'sample-similar-2', subject: '211.93.22.131 -> 10.2.0.12', kind: 'external_session_burst', category: '公网暴露', severity: 'warning', status: 'open', summary: '同类公网会话突增', first_seen: now - 14400, last_seen: now - 5400, score: 76, similarity: 62, reason: '类型相同、类别相同、级别相同' }
+      ],
+      recurrence: {
+        recurring: true,
+        similar_count: 2,
+        same_subject: 1,
+        unresolved_count: 1,
+        latest_seen: now - 3600,
+        latest_subject: '211.93.22.130 -> 10.2.0.12',
+        timeline_entries: incidentTimeline.value.length,
+        conclusion: '同一对象已出现 1 条相似记录，需按复发事件处理'
+      },
+      context: incidentContext.value,
+      timeline: incidentTimeline.value,
       generated_at: now
     };
     assetAISummary.value = {
@@ -6426,6 +6465,54 @@ const exportCSV = (filename: string, rows: string[][]) => {
                 </ul>
               </div>
             </div>
+          </div>
+          <div class="incident-recurrence-panel">
+            <div class="panel-heading">
+              <h2>复发判断</h2>
+              <span>{{ incidentInvestigation.recurrence.recurring ? '疑似复发' : '未发现复发' }} / {{ incidentInvestigation.recurrence.similar_count.toLocaleString() }} 条相似事件</span>
+            </div>
+            <p class="ai-summary-lead">{{ incidentInvestigation.recurrence.conclusion }}</p>
+            <div class="incident-context-summary">
+              <div>
+                <span>同对象</span>
+                <strong>{{ incidentInvestigation.recurrence.same_subject.toLocaleString() }}</strong>
+              </div>
+              <div>
+                <span>未闭环</span>
+                <strong>{{ incidentInvestigation.recurrence.unresolved_count.toLocaleString() }}</strong>
+              </div>
+              <div>
+                <span>处置记录</span>
+                <strong>{{ incidentInvestigation.recurrence.timeline_entries.toLocaleString() }}</strong>
+              </div>
+              <div>
+                <span>最近相似</span>
+                <strong>{{ incidentInvestigation.recurrence.latest_seen ? formatTime(incidentInvestigation.recurrence.latest_seen) : '-' }}</strong>
+              </div>
+            </div>
+            <table v-if="incidentInvestigation.similar_incidents.length">
+              <thead>
+                <tr>
+                  <th>对象</th>
+                  <th>相似度</th>
+                  <th>原因</th>
+                  <th>级别</th>
+                  <th>状态</th>
+                  <th>最近出现</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in incidentInvestigation.similar_incidents" :key="item.id">
+                  <td>{{ item.subject }}</td>
+                  <td>{{ item.similarity }}%</td>
+                  <td>{{ item.reason }}</td>
+                  <td><span class="severity-pill" :class="item.severity">{{ severityText(item.severity) }}</span></td>
+                  <td>{{ alertStatusText(item.status) }}</td>
+                  <td>{{ formatTime(item.last_seen) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="empty-state">暂无相似事件</div>
           </div>
           <div class="playbook-list">
             <article v-for="action in incidentContext.playbook_actions" :key="action.label">

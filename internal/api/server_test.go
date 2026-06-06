@@ -486,6 +486,10 @@ func TestBuildAIIncidentInvestigation(t *testing.T) {
 			},
 		},
 		nil,
+		[]map[string]any{
+			{"id": "older-1", "subject": "10.2.0.12:8081", "kind": "external_session_burst", "category": "公网暴露", "severity": "critical", "status": "open", "summary": "公网会话突增复发", "last_seen": int64(1700000000), "score": int64(88)},
+			{"id": "older-2", "subject": "211.93.22.130 -> 10.2.0.12", "kind": "external_session_burst", "category": "公网暴露", "severity": "warning", "status": "ack", "summary": "同类公网会话突增", "last_seen": int64(1699999000), "score": int64(80)},
+		},
 	)
 	if stringValue(investigation["subject"]) != "10.2.0.12:8081" {
 		t.Fatalf("unexpected subject: %#v", investigation["subject"])
@@ -495,6 +499,13 @@ func TestBuildAIIncidentInvestigation(t *testing.T) {
 	}
 	if len(sliceValue(investigation["evidence_chain"])) == 0 {
 		t.Fatalf("expected evidence chain, got %#v", investigation["evidence_chain"])
+	}
+	if len(sliceValue(investigation["similar_incidents"])) != 2 {
+		t.Fatalf("expected similar incidents, got %#v", investigation["similar_incidents"])
+	}
+	recurrence := mapValue(investigation["recurrence"])
+	if !boolValue(recurrence["recurring"]) {
+		t.Fatalf("expected recurrence marker, got %#v", recurrence)
 	}
 }
 

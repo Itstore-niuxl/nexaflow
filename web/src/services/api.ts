@@ -685,6 +685,32 @@ export interface IncidentTimelineEntry {
   created_at: number;
 }
 
+export interface SimilarIncident {
+  id: string;
+  subject: string;
+  kind: string;
+  category: string;
+  severity: string;
+  status: string;
+  summary: string;
+  first_seen: number;
+  last_seen: number;
+  score: number;
+  similarity: number;
+  reason: string;
+}
+
+export interface IncidentRecurrence {
+  recurring: boolean;
+  similar_count: number;
+  same_subject: number;
+  unresolved_count: number;
+  latest_seen: number;
+  latest_subject: string;
+  timeline_entries: number;
+  conclusion: string;
+}
+
 export interface ReportRecommendation {
   level: string;
   title: string;
@@ -783,6 +809,8 @@ export interface AIIncidentInvestigation {
   root_causes: string[];
   evidence_chain: string[];
   next_steps: string[];
+  similar_incidents: SimilarIncident[];
+  recurrence: IncidentRecurrence;
   context: SecurityIncidentContext;
   timeline: IncidentTimelineEntry[];
   generated_at: number;

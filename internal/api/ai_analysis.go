@@ -160,15 +160,19 @@ func buildAIQueryResponse(options aiSummaryOptions, intent aiQueryIntent, rows [
 	}
 }
 
-func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextData map[string]any, timeline []map[string]any) map[string]any {
+func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextData map[string]any, timeline, similarIncidents []map[string]any) map[string]any {
 	if timeline == nil {
 		timeline = []map[string]any{}
+	}
+	if similarIncidents == nil {
+		similarIncidents = []map[string]any{}
 	}
 	summary := buildAIIncidentSummary(options, incident, contextData)
 	subject := firstString(stringValue(summary["subject"]), stringValue(contextData["subject"]), "未知事件对象")
 	sessions := sliceValue(contextData["sessions"])
 	insights := sliceValue(contextData["insights"])
 	anomalies := sliceValue(contextData["anomalies"])
+	recurrence := incidentRecurrenceSummary(subject, similarIncidents, timeline)
 	rootCauses := []string{"业务流量峰值或计划内变更", "公网扫描、异常外联或服务暴露扩大", "采集质量异常导致指标失真"}
 	if len(insights) > 0 {
 		rootCauses = append([]string{"规则或风险线索命中，优先核对命中对象是否符合业务白名单"}, rootCauses...)
@@ -176,31 +180,40 @@ func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextDat
 	if len(anomalies) > 0 {
 		rootCauses = append([]string{"历史基线偏离或新增对象出现，优先确认是否存在变更窗口"}, rootCauses...)
 	}
+	if boolValue(recurrence["recurring"]) {
+		rootCauses = append([]string{"相似事件反复出现，优先检查是否存在未关闭的业务模式、误报规则或长期暴露面"}, rootCauses...)
+	}
 	evidenceChain := []string{
 		fmt.Sprintf("事件对象：%s", subject),
 		fmt.Sprintf("关联会话：%d 条", len(sessions)),
 		fmt.Sprintf("风险线索：%d 条", len(insights)),
 		fmt.Sprintf("异常波动：%d 条", len(anomalies)),
 		fmt.Sprintf("处置时间线：%d 条", len(timeline)),
+		fmt.Sprintf("相似事件：%d 条，复发判断：%s", len(similarIncidents), stringValue(recurrence["conclusion"])),
 	}
 	nextSteps := []string{
 		"先查看首要关联会话，确认源、目的、端口和服务用途。",
 		"核对资产负责人、业务标签、暴露策略和白名单记录。",
 		"若确认为异常，补充事件备注并沉淀检测规则或临时静默策略。",
 	}
+	if boolValue(recurrence["recurring"]) {
+		nextSteps = append([]string{"先核对相似事件的最近处置记录，判断是重复告警、规则噪声还是同一风险未根除。"}, nextSteps...)
+	}
 	return map[string]any{
-		"enabled":        options.Enabled,
-		"mode":           options.Mode,
-		"provider":       options.Provider,
-		"model":          options.Model,
-		"subject":        subject,
-		"summary":        summary,
-		"root_causes":    rootCauses,
-		"evidence_chain": evidenceChain,
-		"next_steps":     nextSteps,
-		"context":        contextData,
-		"timeline":       timeline,
-		"generated_at":   time.Now().Unix(),
+		"enabled":           options.Enabled,
+		"mode":              options.Mode,
+		"provider":          options.Provider,
+		"model":             options.Model,
+		"subject":           subject,
+		"summary":           summary,
+		"root_causes":       rootCauses,
+		"evidence_chain":    evidenceChain,
+		"next_steps":        nextSteps,
+		"similar_incidents": similarIncidents,
+		"recurrence":        recurrence,
+		"context":           contextData,
+		"timeline":          timeline,
+		"generated_at":      time.Now().Unix(),
 	}
 }
 
@@ -1319,6 +1332,126 @@ func findAIIncident(rows []map[string]any, id, subject, kind string) map[string]
 		}
 	}
 	return map[string]any{}
+}
+
+func findSimilarAIIncidents(target map[string]any, rows []map[string]any, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 8
+	}
+	targetID := stringValue(target["id"])
+	scored := []map[string]any{}
+	for _, row := range rows {
+		if targetID != "" && stringValue(row["id"]) == targetID {
+			continue
+		}
+		score, reason := incidentSimilarity(target, row)
+		if score < 45 {
+			continue
+		}
+		scored = append(scored, map[string]any{
+			"id":         stringValue(row["id"]),
+			"subject":    stringValue(row["subject"]),
+			"kind":       stringValue(row["kind"]),
+			"category":   stringValue(row["category"]),
+			"severity":   stringValue(row["severity"]),
+			"status":     stringValue(row["status"]),
+			"summary":    stringValue(row["summary"]),
+			"first_seen": int64Value(row["first_seen"]),
+			"last_seen":  int64Value(row["last_seen"]),
+			"score":      int64Value(row["score"]),
+			"similarity": score,
+			"reason":     reason,
+		})
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if int64Value(scored[i]["similarity"]) != int64Value(scored[j]["similarity"]) {
+			return int64Value(scored[i]["similarity"]) > int64Value(scored[j]["similarity"])
+		}
+		return int64Value(scored[i]["last_seen"]) > int64Value(scored[j]["last_seen"])
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored
+}
+
+func incidentSimilarity(target, row map[string]any) (int64, string) {
+	targetSubject := stringValue(target["subject"])
+	rowSubject := stringValue(row["subject"])
+	targetKind := stringValue(target["kind"])
+	rowKind := stringValue(row["kind"])
+	targetCategory := stringValue(target["category"])
+	rowCategory := stringValue(row["category"])
+	targetSeverity := stringValue(target["severity"])
+	rowSeverity := stringValue(row["severity"])
+	targetIP := firstIPv4(targetSubject)
+	rowIP := firstIPv4(rowSubject)
+
+	score := int64(0)
+	reasons := []string{}
+	if targetSubject != "" && targetSubject == rowSubject {
+		score += 55
+		reasons = append(reasons, "对象相同")
+	}
+	if targetKind != "" && targetKind == rowKind {
+		score += 25
+		reasons = append(reasons, "类型相同")
+	}
+	if targetIP != "" && targetIP == rowIP {
+		score += 18
+		reasons = append(reasons, "关联 IP 相同")
+	}
+	if targetCategory != "" && targetCategory == rowCategory {
+		score += 12
+		reasons = append(reasons, "类别相同")
+	}
+	if targetSeverity != "" && targetSeverity == rowSeverity {
+		score += 8
+		reasons = append(reasons, "级别相同")
+	}
+	if score > 100 {
+		score = 100
+	}
+	if len(reasons) == 0 {
+		return score, "弱相关"
+	}
+	return score, strings.Join(reasons, "、")
+}
+
+func incidentRecurrenceSummary(subject string, similarIncidents, timeline []map[string]any) map[string]any {
+	sameSubject := 0
+	unresolved := 0
+	latestSeen := int64(0)
+	latestSubject := ""
+	for _, row := range similarIncidents {
+		if stringValue(row["subject"]) == subject {
+			sameSubject++
+		}
+		if status := stringValue(row["status"]); status == "" || status == "open" || status == "ack" {
+			unresolved++
+		}
+		if seen := int64Value(row["last_seen"]); seen > latestSeen {
+			latestSeen = seen
+			latestSubject = stringValue(row["subject"])
+		}
+	}
+	recurring := len(similarIncidents) >= 2 || sameSubject > 0
+	conclusion := "暂未发现明显复发迹象"
+	if sameSubject > 0 {
+		conclusion = fmt.Sprintf("同一对象已出现 %d 条相似记录，需按复发事件处理", sameSubject)
+	} else if len(similarIncidents) >= 2 {
+		conclusion = fmt.Sprintf("发现 %d 条同类相似事件，需复核规则噪声和同类资产暴露面", len(similarIncidents))
+	}
+	return map[string]any{
+		"recurring":        recurring,
+		"similar_count":    len(similarIncidents),
+		"same_subject":     sameSubject,
+		"unresolved_count": unresolved,
+		"latest_seen":      latestSeen,
+		"latest_subject":   latestSubject,
+		"timeline_entries": len(timeline),
+		"conclusion":       conclusion,
+	}
 }
 
 func aiIncidentContextUsable(contextData map[string]any) bool {
