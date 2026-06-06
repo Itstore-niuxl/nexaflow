@@ -1340,13 +1340,21 @@ func findSimilarAIIncidents(target map[string]any, rows []map[string]any, limit 
 	}
 	targetID := stringValue(target["id"])
 	scored := []map[string]any{}
+	seen := map[string]bool{}
 	for _, row := range rows {
 		if targetID != "" && stringValue(row["id"]) == targetID {
+			continue
+		}
+		dedupeKey := firstString(stringValue(row["id"]), strings.Join([]string{stringValue(row["subject"]), stringValue(row["kind"]), stringValue(row["summary"])}, "|"))
+		if dedupeKey != "" && seen[dedupeKey] {
 			continue
 		}
 		score, reason := incidentSimilarity(target, row)
 		if score < 45 {
 			continue
+		}
+		if dedupeKey != "" {
+			seen[dedupeKey] = true
 		}
 		scored = append(scored, map[string]any{
 			"id":         stringValue(row["id"]),

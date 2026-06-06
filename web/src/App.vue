@@ -594,6 +594,7 @@ const diffingConfigVersion = ref('');
 const restoringConfigVersion = ref('');
 const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
+const loadingIncidentAI = ref(false);
 const savingSettings = ref(false);
 const settingsTestResult = ref<SettingsTestResult | null>(null);
 const webhookTestResult = ref<SettingsTestResult | null>(null);
@@ -621,6 +622,7 @@ const exposureRiskFilter = ref('all');
 const exposureCategoryFilter = ref('all');
 const sessionSearch = ref('');
 let timer: number | undefined;
+let incidentAIRequestSeq = 0;
 
 const navGroups = [
   {
@@ -956,16 +958,7 @@ const refresh = async () => {
     } else {
       assetAISummary.value = emptyAISummary('asset');
     }
-    if (securityIncidents.value[0]) {
-      const incident = securityIncidents.value[0];
-      const [incidentAIRes, investigationRes] = await Promise.all([
-        api.aiIncidentSummary(incident.subject, incident.kind, incident.id, minutes, 12),
-        api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, minutes, 12)
-      ]);
-      incidentAISummary.value = incidentAIRes.data;
-      incidentInvestigation.value = investigationRes.data;
-      nextDegraded = nextDegraded || incidentAIRes.degraded || investigationRes.degraded;
-    } else {
+    if (!securityIncidents.value.length) {
       incidentAISummary.value = emptyAISummary('incident');
       incidentInvestigation.value = emptyAIIncidentInvestigation();
     }
@@ -3255,24 +3248,52 @@ const inspectIncident = async (incident: SecurityIncident) => {
   await runSearch();
 };
 
-const loadIncidentContext = async (incident: SecurityIncident) => {
-  selectedIncident.value = incident;
-  loadingIncidentContext.value = true;
+const loadIncidentAI = async (incident: SecurityIncident, requestSeq: number) => {
+  loadingIncidentAI.value = true;
   try {
-    const [contextResult, timelineResult, aiResult, investigationResult] = await Promise.all([
-      api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12),
-      api.incidentTimeline(incident.id, 50),
+    const [aiResult, investigationResult] = await Promise.all([
       api.aiIncidentSummary(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12),
       api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12)
     ]);
-    incidentContext.value = contextResult.data;
-    incidentTimeline.value = timelineResult.data;
+    if (requestSeq !== incidentAIRequestSeq || selectedIncident.value?.id !== incident.id) return;
     incidentAISummary.value = aiResult.data;
     incidentInvestigation.value = investigationResult.data;
-    incidentNoteText.value = '';
-    degraded.value = contextResult.degraded || timelineResult.degraded || aiResult.degraded || investigationResult.degraded;
+    degraded.value = degraded.value || aiResult.degraded || investigationResult.degraded;
+  } catch {
+    if (requestSeq === incidentAIRequestSeq) {
+      degraded.value = true;
+    }
   } finally {
-    loadingIncidentContext.value = false;
+    if (requestSeq === incidentAIRequestSeq) {
+      loadingIncidentAI.value = false;
+    }
+  }
+};
+
+const loadIncidentContext = async (incident: SecurityIncident) => {
+  const requestSeq = ++incidentAIRequestSeq;
+  selectedIncident.value = incident;
+  incidentContext.value = emptyIncidentContext();
+  incidentTimeline.value = [];
+  incidentAISummary.value = emptyAISummary('incident', incident.subject);
+  incidentInvestigation.value = emptyAIIncidentInvestigation();
+  incidentNoteText.value = '';
+  loadingIncidentContext.value = true;
+  void loadIncidentAI(incident, requestSeq);
+  try {
+    const [contextResult, timelineResult] = await Promise.all([
+      api.securityIncidentContext(incident.subject, incident.kind, selectedMinutes.value, 12),
+      api.incidentTimeline(incident.id, 50)
+    ]);
+    if (requestSeq !== incidentAIRequestSeq || selectedIncident.value?.id !== incident.id) return;
+    incidentContext.value = contextResult.data;
+    incidentTimeline.value = timelineResult.data;
+    incidentNoteText.value = '';
+    degraded.value = degraded.value || contextResult.degraded || timelineResult.degraded;
+  } finally {
+    if (requestSeq === incidentAIRequestSeq) {
+      loadingIncidentContext.value = false;
+    }
   }
 };
 
@@ -6448,7 +6469,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <div class="ai-summary-card compact">
             <div class="panel-heading">
               <h2>{{ incidentAISummary.title }}</h2>
-              <span>{{ incidentAISummary.mode }} / {{ aiConfidenceText(incidentAISummary.confidence) }}</span>
+              <span>{{ loadingIncidentAI ? 'AI 调查加载中...' : `${incidentAISummary.mode} / ${aiConfidenceText(incidentAISummary.confidence)}` }}</span>
             </div>
             <p class="ai-summary-lead">{{ incidentAISummary.summary }}</p>
             <div class="ai-summary-grid">
@@ -6469,7 +6490,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
           <div class="incident-recurrence-panel">
             <div class="panel-heading">
               <h2>复发判断</h2>
-              <span>{{ incidentInvestigation.recurrence.recurring ? '疑似复发' : '未发现复发' }} / {{ incidentInvestigation.recurrence.similar_count.toLocaleString() }} 条相似事件</span>
+              <span>{{ loadingIncidentAI ? 'AI 调查加载中...' : `${incidentInvestigation.recurrence.recurring ? '疑似复发' : '未发现复发'} / ${incidentInvestigation.recurrence.similar_count.toLocaleString()} 条相似事件` }}</span>
             </div>
             <p class="ai-summary-lead">{{ incidentInvestigation.recurrence.conclusion }}</p>
             <div class="incident-context-summary">
