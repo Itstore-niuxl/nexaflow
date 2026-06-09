@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -130,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/settings/test-webhook", s.systemSettingsTestWebhook)
 	mux.HandleFunc("/api/v1/system/settings/export", s.systemSettingsExport)
 	mux.HandleFunc("/api/v1/system/settings/import", s.systemSettingsImport)
+	mux.HandleFunc("/api/v1/system/users", s.systemUsers)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/audit-events/export", s.auditEventsExport)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
@@ -1792,6 +1794,148 @@ func (s *Server) systemSettingsImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"data": s.publicSystemSettings(saved)})
 }
 
+func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
+	settings := s.loadSystemSettings()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"users":   publicUserAccounts(settings.Security.Users),
+			"summary": userAccountSummary(settings.Security.Users),
+			"roles":   []string{"admin", "analyst", "auditor", "viewer"},
+			"statuses": []string{
+				"active",
+				"disabled",
+			},
+		}})
+	case http.MethodPost:
+		var body struct {
+			Username    string `json:"username"`
+			DisplayName string `json:"display_name"`
+			Role        string `json:"role"`
+			Status      string `json:"status"`
+			Password    string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		username := strings.TrimSpace(body.Username)
+		if username == "" {
+			http.Error(w, "username is required", http.StatusBadRequest)
+			return
+		}
+		role := config.NormalizeUserRole(body.Role)
+		status := config.NormalizeUserStatus(body.Status)
+		now := time.Now().Unix()
+		users := settings.Security.Users
+		found := -1
+		for idx := range users {
+			if users[idx].Username == username {
+				found = idx
+				break
+			}
+		}
+		passwordHash := ""
+		if strings.TrimSpace(body.Password) != "" {
+			hash, err := hashPassword(body.Password)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			passwordHash = hash
+		}
+		if found < 0 && passwordHash == "" {
+			http.Error(w, "password is required for new user", http.StatusBadRequest)
+			return
+		}
+		if found >= 0 {
+			users[found].DisplayName = strings.TrimSpace(body.DisplayName)
+			if users[found].DisplayName == "" {
+				users[found].DisplayName = username
+			}
+			users[found].Role = role
+			users[found].Status = status
+			users[found].UpdatedAt = now
+			if passwordHash != "" {
+				users[found].PasswordHash = passwordHash
+			}
+		} else {
+			users = append(users, config.UserAccount{
+				Username:     username,
+				DisplayName:  strings.TrimSpace(body.DisplayName),
+				Role:         role,
+				Status:       status,
+				PasswordHash: passwordHash,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			})
+		}
+		users = normalizeUserSettings(users)
+		if !hasWritableAdmin(users) {
+			http.Error(w, "at least one active admin user is required", http.StatusBadRequest)
+			return
+		}
+		settings.Security.Users = users
+		if err := config.SaveSystemSettings(s.systemSettingsPath(), settings); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		saved := s.loadSystemSettings()
+		action := "system.user.upsert"
+		s.configSnapshot(r, "system", "users", action, "保存用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+		s.audit(r, action, "user:"+username, "保存用户："+username, map[string]any{"username": username, "role": role, "status": status})
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"users":   publicUserAccounts(saved.Security.Users),
+			"summary": userAccountSummary(saved.Security.Users),
+		}})
+	case http.MethodDelete:
+		username := strings.TrimSpace(r.URL.Query().Get("username"))
+		if username == "" {
+			var body struct {
+				Username string `json:"username"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			username = strings.TrimSpace(body.Username)
+		}
+		if username == "" {
+			http.Error(w, "username is required", http.StatusBadRequest)
+			return
+		}
+		users := []config.UserAccount{}
+		removed := false
+		for _, user := range settings.Security.Users {
+			if user.Username == username {
+				removed = true
+				continue
+			}
+			users = append(users, user)
+		}
+		if !removed {
+			http.Error(w, "user not found", http.StatusNotFound)
+			return
+		}
+		if len(users) > 0 && !hasWritableAdmin(users) {
+			http.Error(w, "at least one active admin user is required", http.StatusBadRequest)
+			return
+		}
+		settings.Security.Users = normalizeUserSettings(users)
+		if err := config.SaveSystemSettings(s.systemSettingsPath(), settings); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		saved := s.loadSystemSettings()
+		action := "system.user.delete"
+		s.configSnapshot(r, "system", "users", action, "删除用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+		s.audit(r, action, "user:"+username, "删除用户："+username, map[string]any{"username": username})
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"users":   publicUserAccounts(saved.Security.Users),
+			"summary": userAccountSummary(saved.Security.Users),
+		}})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.AuditEvents(r.Context(), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
@@ -2078,21 +2222,18 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	role := s.loginRole(body.Password)
-	if role == "" {
+	identity, ok := s.loginIdentity(body.Actor, body.Password)
+	if !ok {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
-	actor := strings.TrimSpace(body.Actor)
-	if actor == "" {
-		actor = "operator"
-	}
-	if err := s.setAuthCookie(w, actor, role); err != nil {
+	if err := s.setAuthCookie(w, identity.Actor, identity.Role); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	_ = s.store.RecordAuditEvent(r.Context(), actor, "auth.login", "console", "控制台登录："+actor, map[string]any{"actor": actor, "role": role}, auditClientIP(r))
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": actor, "role": role, "can_write": role == authRoleAdmin}})
+	s.recordUserLogin(identity.Actor)
+	_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.login", "console", "控制台登录："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role, "can_write": identity.Role == authRoleAdmin}})
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
@@ -2144,7 +2285,7 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 
 func (s *Server) authEnabled() bool {
 	security := s.loadSystemSettings().Security
-	return security.AuthEnabled && (strings.TrimSpace(security.AdminPassword) != "" || strings.TrimSpace(security.ReadOnlyPassword) != "")
+	return security.AuthEnabled && (strings.TrimSpace(security.AdminPassword) != "" || strings.TrimSpace(security.ReadOnlyPassword) != "" || hasActiveUsers(security.Users))
 }
 
 func (s *Server) loginRole(password string) string {
@@ -2156,6 +2297,50 @@ func (s *Server) loginRole(password string) string {
 		return authRoleViewer
 	}
 	return ""
+}
+
+func (s *Server) loginIdentity(actor, password string) (authIdentity, bool) {
+	security := s.loadSystemSettings().Security
+	username := strings.TrimSpace(actor)
+	for _, user := range security.Users {
+		if user.Status != "active" || strings.TrimSpace(user.PasswordHash) == "" {
+			continue
+		}
+		if username != "" && user.Username != username {
+			continue
+		}
+		if verifyPasswordHash(password, user.PasswordHash) {
+			return authIdentity{Actor: user.Username, Role: normalizeAuthRole(user.Role)}, true
+		}
+	}
+	if role := s.loginRole(password); role != "" {
+		if username == "" {
+			username = "operator"
+		}
+		return authIdentity{Actor: username, Role: role}, true
+	}
+	return authIdentity{}, false
+}
+
+func (s *Server) recordUserLogin(username string) {
+	if strings.TrimSpace(username) == "" {
+		return
+	}
+	path := s.systemSettingsPath()
+	settings := s.loadSystemSettings()
+	changed := false
+	now := time.Now().Unix()
+	for idx := range settings.Security.Users {
+		if settings.Security.Users[idx].Username == username {
+			settings.Security.Users[idx].LastLoginAt = now
+			settings.Security.Users[idx].UpdatedAt = now
+			changed = true
+			break
+		}
+	}
+	if changed {
+		_ = config.SaveSystemSettings(path, settings)
+	}
 }
 
 func requestNeedsWriteAccess(r *http.Request) bool {
@@ -2171,12 +2356,58 @@ func requestNeedsWriteAccess(r *http.Request) bool {
 }
 
 func normalizeAuthRole(role string) string {
-	switch strings.TrimSpace(role) {
-	case authRoleViewer:
-		return authRoleViewer
-	default:
+	switch config.NormalizeUserRole(role) {
+	case authRoleAdmin:
 		return authRoleAdmin
+	case "analyst":
+		return "analyst"
+	case "auditor":
+		return "auditor"
+	default:
+		return authRoleViewer
 	}
+}
+
+func hasActiveUsers(users []config.UserAccount) bool {
+	for _, user := range users {
+		if user.Status == "active" && strings.TrimSpace(user.PasswordHash) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hashPassword(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	sum := passwordDigest(salt, password)
+	return "sha256:" + base64.RawURLEncoding.EncodeToString(salt) + ":" + base64.RawURLEncoding.EncodeToString(sum), nil
+}
+
+func verifyPasswordHash(password, encoded string) bool {
+	parts := strings.Split(encoded, ":")
+	if len(parts) != 3 || parts[0] != "sha256" {
+		return false
+	}
+	salt, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	expected, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	actual := passwordDigest(salt, password)
+	return hmac.Equal(actual, expected)
+}
+
+func passwordDigest(salt []byte, password string) []byte {
+	h := sha256.New()
+	_, _ = h.Write(salt)
+	_, _ = h.Write([]byte(password))
+	return h.Sum(nil)
 }
 
 func (s *Server) setAuthCookie(w http.ResponseWriter, actor, role string) error {
@@ -2494,6 +2725,69 @@ func (s *Server) publicSystemSettings(settings config.SystemSettings) map[string
 	}
 }
 
+func publicUserAccounts(users []config.UserAccount) []map[string]any {
+	items := []map[string]any{}
+	for _, user := range normalizeUserSettings(users) {
+		items = append(items, map[string]any{
+			"username":        user.Username,
+			"display_name":    user.DisplayName,
+			"role":            user.Role,
+			"status":          user.Status,
+			"password_set":    strings.TrimSpace(user.PasswordHash) != "",
+			"created_at":      user.CreatedAt,
+			"updated_at":      user.UpdatedAt,
+			"last_login_at":   user.LastLoginAt,
+			"can_write":       user.Role == authRoleAdmin && user.Status == "active",
+			"can_export":      user.Status == "active" && user.Role != "viewer",
+			"can_audit":       user.Status == "active" && (user.Role == authRoleAdmin || user.Role == "auditor"),
+			"can_configure":   user.Role == authRoleAdmin && user.Status == "active",
+			"can_investigate": user.Status == "active" && (user.Role == authRoleAdmin || user.Role == "analyst"),
+		})
+	}
+	return items
+}
+
+func userAccountSummary(users []config.UserAccount) map[string]any {
+	summary := map[string]any{
+		"total":    len(users),
+		"active":   0,
+		"disabled": 0,
+		"admin":    0,
+		"analyst":  0,
+		"auditor":  0,
+		"viewer":   0,
+	}
+	for _, user := range normalizeUserSettings(users) {
+		if user.Status == "active" {
+			summary["active"] = int64Value(summary["active"]) + 1
+		} else {
+			summary["disabled"] = int64Value(summary["disabled"]) + 1
+		}
+		role := config.NormalizeUserRole(user.Role)
+		summary[role] = int64Value(summary[role]) + 1
+	}
+	return summary
+}
+
+func normalizeUserSettings(users []config.UserAccount) []config.UserAccount {
+	data, _ := json.Marshal(config.SecuritySettings{Users: users})
+	var security config.SecuritySettings
+	_ = json.Unmarshal(data, &security)
+	settings := config.DefaultSystemSettings(config.Config{})
+	settings.Security.Users = security.Users
+	settings = config.LoadSystemSettings("", settings)
+	return settings.Security.Users
+}
+
+func hasWritableAdmin(users []config.UserAccount) bool {
+	for _, user := range normalizeUserSettings(users) {
+		if user.Status == "active" && user.Role == authRoleAdmin && strings.TrimSpace(user.PasswordHash) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeSensitiveSystemSettings(current, next config.SystemSettings) config.SystemSettings {
 	if strings.TrimSpace(next.AI.APIKey) == "" || isMaskedSecret(next.AI.APIKey) {
 		next.AI.APIKey = current.AI.APIKey
@@ -2506,6 +2800,9 @@ func mergeSensitiveSystemSettings(current, next config.SystemSettings) config.Sy
 	}
 	if strings.TrimSpace(next.Notification.WebhookToken) == "" || isMaskedSecret(next.Notification.WebhookToken) {
 		next.Notification.WebhookToken = current.Notification.WebhookToken
+	}
+	if next.Security.Users == nil {
+		next.Security.Users = current.Security.Users
 	}
 	return next
 }

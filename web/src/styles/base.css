@@ -654,6 +654,7 @@ h2 {
 }
 
 .toolbar-panel button,
+.command-button,
 .whitelist-form button,
 .form-actions button,
 .inline-button {
@@ -718,6 +719,7 @@ h2 {
   background: var(--accent-soft);
 }
 
+.command-button,
 .toolbar-panel .command-button,
 .form-actions button:first-child,
 .whitelist-form button {
@@ -730,6 +732,7 @@ h2 {
   margin-left: auto;
 }
 
+.command-button:hover,
 .toolbar-panel .command-button:hover,
 .form-actions button:first-child:hover,
 .whitelist-form button:hover {
@@ -746,6 +749,7 @@ h2 {
 }
 
 button:disabled,
+.command-button:disabled,
 .toolbar-panel button:disabled,
 .inline-button:disabled,
 .whitelist-form button:disabled,
@@ -765,6 +769,25 @@ button:disabled,
   min-width: 48px;
   padding: 0 10px;
   font-size: 13px;
+}
+
+.inline-button.danger {
+  color: #b42318;
+  border-color: #f3b7b0;
+}
+
+.inline-button.danger:hover {
+  color: #ffffff;
+  border-color: #b42318;
+  background: #b42318;
+}
+
+.button-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
 }
 
 .action-cell,

@@ -90,6 +90,9 @@ import {
   type SeriesPoint,
   type Summary,
   type SystemSettings,
+  type SystemUser,
+  type SystemUserInput,
+  type SystemUsers,
   type SystemStatus,
   type SettingsTestResult,
   type TrafficAnalysis,
@@ -182,6 +185,22 @@ const emptySystemSettings = (): SystemSettings => ({
   updated_at: 0
 });
 const systemSettings = ref<SystemSettings>(emptySystemSettings());
+const emptySystemUsers = (): SystemUsers => ({
+  users: [],
+  summary: { total: 0, active: 0, disabled: 0, admin: 0, analyst: 0, auditor: 0, viewer: 0 },
+  roles: ['admin', 'analyst', 'auditor', 'viewer'],
+  statuses: ['active', 'disabled']
+});
+const emptyUserForm = (): SystemUserInput => ({
+  username: '',
+  display_name: '',
+  role: 'viewer',
+  status: 'active',
+  password: ''
+});
+const systemUsers = ref<SystemUsers>(emptySystemUsers());
+const userForm = ref<SystemUserInput>(emptyUserForm());
+const editingUsername = ref('');
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -234,6 +253,8 @@ const emptyCaptureQuality = (): CaptureQuality => ({
     latest_window_ts: 0
   },
   sources: [],
+  timeline: [],
+  events: [],
   recommendations: []
 });
 const captureQuality = ref<CaptureQuality>(emptyCaptureQuality());
@@ -646,6 +667,7 @@ const handlingAlert = ref(false);
 const loadingIncidentContext = ref(false);
 const loadingIncidentAI = ref(false);
 const savingSettings = ref(false);
+const savingUser = ref(false);
 const settingsTestResult = ref<SettingsTestResult | null>(null);
 const webhookTestResult = ref<SettingsTestResult | null>(null);
 const settingsImportText = ref('');
@@ -771,8 +793,18 @@ const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? '�
 const canWrite = computed(() => !authStatus.value.enabled || authStatus.value.can_write !== false);
 const authRoleText = computed(() => {
   if (!authStatus.value.enabled) return '免登录';
-  return authStatus.value.role === 'viewer' ? '观察员' : '管理员';
+  return userRoleText(authStatus.value.role || 'admin');
 });
+const userRoleText = (role: string) => {
+  const labels: Record<string, string> = {
+    admin: '管理员',
+    analyst: '安全分析员',
+    auditor: '审计员',
+    viewer: '只读用户'
+  };
+  return labels[role] ?? role;
+};
+const userStatusText = (status: string) => (status === 'disabled' ? '禁用' : '启用');
 const rangeSeconds = computed(() => selectedMinutes.value * 60);
 const rangeLabel = computed(() => {
   if (selectedMinutes.value >= 1440) return '24 小时';
@@ -849,7 +881,8 @@ const refresh = async () => {
       ruleFindingRes,
       auditRes,
       configVersionRes,
-      systemSettingsRes
+      systemSettingsRes,
+      systemUsersRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -904,7 +937,8 @@ const refresh = async () => {
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
-      api.systemSettings()
+      api.systemSettings(),
+      api.systemUsers()
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -961,6 +995,7 @@ const refresh = async () => {
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
     systemSettings.value = normalizeSettingsForForm(systemSettingsRes.data);
+    systemUsers.value = { ...emptySystemUsers(), ...systemUsersRes.data };
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -1286,6 +1321,57 @@ const refresh = async () => {
           status: 'healthy'
         }
       ],
+      timeline: [
+        {
+          ts: now - 60,
+          rx_bytes: 51000000,
+          tx_bytes: 3600000,
+          rx_packets: 32000,
+          tx_packets: 2600,
+          drops: 0,
+          errors: 0,
+          queue_pressure: 0.002,
+          source_count: 1,
+          interface_count: 1,
+          bytes: 54600000,
+          packets: 34600,
+          status: 'healthy',
+          summary: '采集窗口稳定'
+        },
+        {
+          ts: now - 30,
+          rx_bytes: 53000000,
+          tx_bytes: 4100000,
+          rx_packets: 33500,
+          tx_packets: 3000,
+          drops: 0,
+          errors: 0,
+          queue_pressure: 0.0018,
+          source_count: 1,
+          interface_count: 1,
+          bytes: 57100000,
+          packets: 36500,
+          status: 'healthy',
+          summary: '采集窗口稳定'
+        },
+        {
+          ts: now - 5,
+          rx_bytes: 54000000,
+          tx_bytes: 4300000,
+          rx_packets: 32500,
+          tx_packets: 3400,
+          drops: 0,
+          errors: 0,
+          queue_pressure: 0.0018,
+          source_count: 1,
+          interface_count: 1,
+          bytes: 58300000,
+          packets: 35900,
+          status: 'healthy',
+          summary: '采集窗口稳定'
+        }
+      ],
+      events: [],
       recommendations: [{ level: 'info', title: '接口采集稳定', detail: '当前网卡 RX/TX 丢包和错误计数未出现异常增量' }]
     };
     captureDiagnostics.value = {
@@ -2484,6 +2570,7 @@ const refresh = async () => {
       generated_at: now
     };
     systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
+    systemUsers.value = emptySystemUsers();
     degraded.value = true;
   } finally {
     loading.value = false;
@@ -2546,6 +2633,72 @@ const importSettings = async () => {
   systemSettings.value = normalizeSettingsForForm(result.data);
   settingsImportText.value = '';
   await refresh();
+};
+
+const editSystemUser = (user: SystemUser) => {
+  editingUsername.value = user.username;
+  userForm.value = {
+    username: user.username,
+    display_name: user.display_name,
+    role: user.role,
+    status: user.status,
+    password: ''
+  };
+};
+
+const resetUserForm = () => {
+  editingUsername.value = '';
+  userForm.value = emptyUserForm();
+};
+
+const saveSystemUser = async () => {
+  if (!canWrite.value || !userForm.value.username.trim()) return;
+  savingUser.value = true;
+  try {
+    const result = await api.saveSystemUser({
+      ...userForm.value,
+      username: userForm.value.username.trim(),
+      display_name: userForm.value.display_name.trim(),
+      password: userForm.value.password?.trim() || undefined
+    });
+    systemUsers.value = { ...emptySystemUsers(), ...result.data };
+    resetUserForm();
+    await refresh();
+  } finally {
+    savingUser.value = false;
+  }
+};
+
+const toggleSystemUser = async (user: SystemUser) => {
+  if (!canWrite.value) return;
+  savingUser.value = true;
+  try {
+    const result = await api.saveSystemUser({
+      username: user.username,
+      display_name: user.display_name,
+      role: user.role,
+      status: user.status === 'active' ? 'disabled' : 'active'
+    });
+    systemUsers.value = { ...emptySystemUsers(), ...result.data };
+    await refresh();
+  } finally {
+    savingUser.value = false;
+  }
+};
+
+const deleteSystemUser = async (username: string) => {
+  if (!canWrite.value || !username) return;
+  savingUser.value = true;
+  try {
+    const result = await api.deleteSystemUser(username);
+    systemUsers.value = { ...emptySystemUsers(), ...result.data };
+    if (editingUsername.value === username) {
+      resetUserForm();
+    }
+    await refresh();
+  } finally {
+    savingUser.value = false;
+  }
 };
 
 const checkAuth = async () => {
@@ -2694,6 +2847,30 @@ const captureQualityQueueItems = computed(() =>
     key: `${row.source_id} / ${row.iface}`,
     bytes: Math.round((row.queue_pressure || 0) * 100),
     packets: row.packet_queue_len + row.window_queue_len
+  }))
+);
+const captureQualityTimelineSeries = computed(() =>
+  captureQuality.value.timeline.map((row) => ({
+    ts: row.ts,
+    bytes: row.bytes || row.rx_bytes + row.tx_bytes,
+    packets: row.drops + row.errors
+  }))
+);
+const captureQualityTimelineRiskItems = computed(() =>
+  captureQuality.value.timeline
+    .filter((row) => row.status !== 'healthy' || row.drops > 0 || row.errors > 0 || row.queue_pressure >= 0.7)
+    .slice(-12)
+    .map((row) => ({
+      key: `${dataQualityStatusText(row.status)} / ${formatTime(row.ts)}`,
+      bytes: Math.max(row.drops + row.errors, Math.round((row.queue_pressure || 0) * 100)),
+      packets: row.source_count + row.interface_count
+    }))
+);
+const captureQualityEventItems = computed(() =>
+  captureQuality.value.events.map((row) => ({
+    key: `${dataQualityStatusText(row.status)} / ${formatTime(row.ts)}`,
+    bytes: Math.max(row.drops + row.errors, Math.round((row.queue_pressure || 0) * 100)),
+    packets: row.packets
   }))
 );
 const priorityCaptureSources = computed(() =>
@@ -5443,6 +5620,46 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <p>{{ item.detail }}</p>
             </article>
           </section>
+        </section>
+        <section class="command-grid">
+          <TrafficHeatmap :points="captureQualityTimelineSeries" />
+          <HorizontalBarChart title="采集异常窗口" eyebrow="Capture Windows" :items="captureQualityTimelineRiskItems" unit="count" />
+          <HorizontalBarChart title="最近异常事件" eyebrow="Capture Events" :items="captureQualityEventItems" unit="count" />
+        </section>
+        <section class="table-panel wide-key-table capture-event-table">
+          <div class="panel-heading">
+            <h2>最近异常采集窗口</h2>
+            <span>{{ captureQuality.events.length.toLocaleString() }} 个窗口 / 从最新窗口倒序</span>
+          </div>
+          <div v-if="captureQuality.events.length === 0" class="empty-state">暂无异常采集窗口</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>状态</th>
+                <th>摘要</th>
+                <th>Drops</th>
+                <th>Errors</th>
+                <th>队列压力</th>
+                <th>采集源 / 网卡</th>
+                <th>流量</th>
+                <th>包数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in captureQuality.events" :key="row.id ?? `capture-event-${row.ts}`">
+                <td>{{ formatTime(row.ts) }}</td>
+                <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                <td :title="row.detail">{{ row.summary }}</td>
+                <td>{{ row.drops.toLocaleString() }}</td>
+                <td>{{ row.errors.toLocaleString() }}</td>
+                <td>{{ ((row.queue_pressure || 0) * 100).toFixed(1) }}%</td>
+                <td>{{ (row.source_count ?? 0).toLocaleString() }} / {{ (row.interface_count ?? 0).toLocaleString() }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td>{{ row.packets.toLocaleString() }}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
         <section class="tables-grid analysis-grid">
           <section class="table-panel report-recommendations">
@@ -8430,6 +8647,68 @@ const downloadBlob = (filename: string, blob: Blob) => {
             <label class="check-row"><input v-model="systemSettings.security.require_audit_for_write" type="checkbox" /> 写操作强制记录审计</label>
             <label class="check-row"><input v-model="systemSettings.security.allow_frontend_secrets" type="checkbox" /> 允许前端维护敏感配置</label>
           </section>
+          <section class="table-panel">
+            <div class="panel-heading">
+              <h2>用户管理</h2>
+              <span>{{ systemUsers.summary.active.toLocaleString() }} 启用 / {{ systemUsers.summary.total.toLocaleString() }} 总数</span>
+            </div>
+            <div class="asset-editor-grid">
+              <label><span>用户名</span><input v-model="userForm.username" :disabled="Boolean(editingUsername)" placeholder="zhangsan" /></label>
+              <label><span>显示名称</span><input v-model="userForm.display_name" placeholder="张三 / 安全分析员" /></label>
+              <label><span>角色</span><select v-model="userForm.role"><option value="admin">管理员</option><option value="analyst">安全分析员</option><option value="auditor">审计员</option><option value="viewer">只读用户</option></select></label>
+              <label><span>状态</span><select v-model="userForm.status"><option value="active">启用</option><option value="disabled">禁用</option></select></label>
+              <label><span>密码</span><input v-model="userForm.password" type="password" :placeholder="editingUsername ? '留空保持原密码' : '新用户必填'" /></label>
+            </div>
+            <div class="button-row">
+              <button class="command-button" type="button" :disabled="!canWrite || savingUser || !userForm.username.trim()" @click="saveSystemUser">{{ editingUsername ? '更新用户' : '创建用户' }}</button>
+              <button class="inline-button" type="button" :disabled="savingUser" @click="resetUserForm">清空</button>
+            </div>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table">
+          <div class="panel-heading">
+            <h2>用户与权限矩阵</h2>
+            <span>管理员 {{ systemUsers.summary.admin.toLocaleString() }} / 分析员 {{ systemUsers.summary.analyst.toLocaleString() }} / 审计员 {{ systemUsers.summary.auditor.toLocaleString() }}</span>
+          </div>
+          <div v-if="systemUsers.users.length === 0" class="empty-state">暂无独立用户，当前仍使用管理员/观察员共享口令</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>用户名</th>
+                <th>显示名称</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>密码</th>
+                <th>权限</th>
+                <th>最近登录</th>
+                <th>更新时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="user in systemUsers.users" :key="user.username">
+                <td>{{ user.username }}</td>
+                <td>{{ user.display_name }}</td>
+                <td>{{ userRoleText(user.role) }}</td>
+                <td><span class="severity-pill" :class="user.status === 'active' ? 'healthy' : 'warning'">{{ userStatusText(user.status) }}</span></td>
+                <td>{{ user.password_set ? '已设置' : '未设置' }}</td>
+                <td>
+                  <span class="cell-subtle">
+                    {{ user.can_write ? '写入' : '只读' }} / {{ user.can_audit ? '审计' : '非审计' }} / {{ user.can_export ? '导出' : '禁导出' }}
+                  </span>
+                </td>
+                <td>{{ formatTime(user.last_login_at ?? 0) }}</td>
+                <td>{{ formatTime(user.updated_at) }}</td>
+                <td>
+                  <button class="inline-button" type="button" :disabled="savingUser" @click="editSystemUser(user)">编辑</button>
+                  <button class="inline-button" type="button" :disabled="!canWrite || savingUser" @click="toggleSystemUser(user)">{{ user.status === 'active' ? '禁用' : '启用' }}</button>
+                  <button class="inline-button danger" type="button" :disabled="!canWrite || savingUser" @click="deleteSystemUser(user.username)">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="tables-grid analysis-grid">
           <section class="table-panel">
             <div class="panel-heading">
               <h2>通知集成</h2>

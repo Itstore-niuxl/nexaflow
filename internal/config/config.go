@@ -72,13 +72,25 @@ type AnalysisSettings struct {
 }
 
 type SecuritySettings struct {
-	AuthEnabled          bool   `json:"auth_enabled"`
-	ReadOnlyEnabled      bool   `json:"readonly_enabled"`
-	AdminPassword        string `json:"admin_password,omitempty"`
-	ReadOnlyPassword     string `json:"readonly_password,omitempty"`
-	SessionTTLHours      int    `json:"session_ttl_hours"`
-	RequireAuditForWrite bool   `json:"require_audit_for_write"`
-	AllowFrontendSecrets bool   `json:"allow_frontend_secrets"`
+	AuthEnabled          bool          `json:"auth_enabled"`
+	ReadOnlyEnabled      bool          `json:"readonly_enabled"`
+	AdminPassword        string        `json:"admin_password,omitempty"`
+	ReadOnlyPassword     string        `json:"readonly_password,omitempty"`
+	Users                []UserAccount `json:"users,omitempty"`
+	SessionTTLHours      int           `json:"session_ttl_hours"`
+	RequireAuditForWrite bool          `json:"require_audit_for_write"`
+	AllowFrontendSecrets bool          `json:"allow_frontend_secrets"`
+}
+
+type UserAccount struct {
+	Username     string `json:"username"`
+	DisplayName  string `json:"display_name"`
+	Role         string `json:"role"`
+	Status       string `json:"status"`
+	PasswordHash string `json:"password_hash,omitempty"`
+	CreatedAt    int64  `json:"created_at"`
+	UpdatedAt    int64  `json:"updated_at"`
+	LastLoginAt  int64  `json:"last_login_at,omitempty"`
 }
 
 type NotificationSettings struct {
@@ -433,6 +445,7 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	if settings.Security.SessionTTLHours > 168 {
 		settings.Security.SessionTTLHours = 168
 	}
+	settings.Security.Users = normalizeUserAccounts(settings.Security.Users)
 	if !settings.Security.AuthEnabled {
 		settings.Security.ReadOnlyEnabled = false
 	}
@@ -463,6 +476,54 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	}
 	settings.Backend.RequiresRestart = true
 	return settings
+}
+
+func normalizeUserAccounts(users []UserAccount) []UserAccount {
+	if users == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	seen := map[string]bool{}
+	normalized := []UserAccount{}
+	for _, user := range users {
+		user.Username = strings.TrimSpace(user.Username)
+		if user.Username == "" || seen[user.Username] {
+			continue
+		}
+		seen[user.Username] = true
+		user.DisplayName = strings.TrimSpace(user.DisplayName)
+		if user.DisplayName == "" {
+			user.DisplayName = user.Username
+		}
+		user.Role = NormalizeUserRole(user.Role)
+		user.Status = NormalizeUserStatus(user.Status)
+		if user.CreatedAt <= 0 {
+			user.CreatedAt = now
+		}
+		if user.UpdatedAt <= 0 {
+			user.UpdatedAt = user.CreatedAt
+		}
+		normalized = append(normalized, user)
+	}
+	return normalized
+}
+
+func NormalizeUserRole(role string) string {
+	switch strings.TrimSpace(strings.ToLower(role)) {
+	case "admin", "analyst", "auditor", "viewer":
+		return strings.TrimSpace(strings.ToLower(role))
+	default:
+		return "viewer"
+	}
+}
+
+func NormalizeUserStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "disabled":
+		return "disabled"
+	default:
+		return "active"
+	}
 }
 
 func normalizeAIMode(mode string) string {

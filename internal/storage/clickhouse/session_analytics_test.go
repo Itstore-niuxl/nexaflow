@@ -171,6 +171,67 @@ func TestAnnotateCaptureQualityRow(t *testing.T) {
 	}
 }
 
+func TestCaptureQualityTimelineStatusAndEvents(t *testing.T) {
+	timeline := []map[string]any{
+		{
+			"ts":              int64(100),
+			"drops":           uint64(0),
+			"errors":          uint64(0),
+			"queue_pressure":  0.10,
+			"bytes":           uint64(1000),
+			"packets":         uint64(100),
+			"source_count":    uint64(1),
+			"interface_count": uint64(1),
+		},
+		{
+			"ts":              int64(105),
+			"drops":           uint64(2),
+			"errors":          uint64(0),
+			"queue_pressure":  0.20,
+			"bytes":           uint64(2000),
+			"packets":         uint64(200),
+			"source_count":    uint64(1),
+			"interface_count": uint64(1),
+		},
+		{
+			"ts":              int64(110),
+			"drops":           uint64(0),
+			"errors":          uint64(0),
+			"queue_pressure":  0.95,
+			"bytes":           uint64(3000),
+			"packets":         uint64(300),
+			"source_count":    uint64(2),
+			"interface_count": uint64(2),
+		},
+	}
+	for _, row := range timeline {
+		row["status"] = captureQualityTimelineStatus(row)
+		row["summary"] = captureQualityTimelineSummary(row)
+	}
+	if status := stringValue(timeline[0]["status"]); status != "healthy" {
+		t.Fatalf("expected healthy timeline point, got %s", status)
+	}
+	if status := stringValue(timeline[1]["status"]); status != "warning" {
+		t.Fatalf("expected warning timeline point, got %s", status)
+	}
+	if status := stringValue(timeline[2]["status"]); status != "critical" {
+		t.Fatalf("expected critical timeline point, got %s", status)
+	}
+	events := captureQualityEvents(timeline, 10)
+	if len(events) != 2 {
+		t.Fatalf("expected two abnormal events, got %#v", events)
+	}
+	if int64Value(events[0]["ts"]) != 110 {
+		t.Fatalf("expected newest event first, got %#v", events[0])
+	}
+	if stringValue(events[0]["status"]) != "critical" {
+		t.Fatalf("expected critical newest event, got %#v", events[0])
+	}
+	if stringValue(events[1]["status"]) != "warning" {
+		t.Fatalf("expected warning second event, got %#v", events[1])
+	}
+}
+
 func TestIncidentContextSelectorParsesEndpointPort(t *testing.T) {
 	selector := incidentContextSelector("169.254.0.4 -> 10.2.0.12:80", "custom_rule")
 

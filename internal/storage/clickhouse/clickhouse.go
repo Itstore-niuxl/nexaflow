@@ -638,14 +638,66 @@ FORMAT JSON`, s.database, minutes, limit)
 	summary["drop_ratio"] = ratioFloat(float64(uintValue(summary["rx_dropped"])+uintValue(summary["tx_dropped"])), float64(uintValue(summary["rx_packets"])+uintValue(summary["tx_packets"])))
 	summary["error_ratio"] = ratioFloat(float64(uintValue(summary["rx_errors"])+uintValue(summary["tx_errors"])), float64(uintValue(summary["rx_packets"])+uintValue(summary["tx_packets"])))
 	status := captureQualityStatus(parsed.Data)
+	timeline, timelineErr := s.captureQualityTimeline(ctx, minutes, max(limit*3, 60))
 	return map[string]any{
 		"generated_at":    now,
 		"minutes":         minutes,
 		"status":          status,
 		"summary":         summary,
 		"sources":         parsed.Data,
+		"timeline":        timeline,
+		"events":          captureQualityEvents(timeline, 30),
 		"recommendations": captureQualityRecommendations(status, summary, parsed.Data),
-	}, nil
+	}, timelineErr
+}
+
+func (s *Store) captureQualityTimeline(ctx context.Context, minutes, limit int) ([]map[string]any, error) {
+	if limit <= 0 {
+		limit = 120
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	q := fmt.Sprintf(`SELECT
+    toUnixTimestamp(ts) AS ts,
+    sum(rx_bytes) AS rx_bytes,
+    sum(tx_bytes) AS tx_bytes,
+    sum(rx_packets) AS rx_packets,
+    sum(tx_packets) AS tx_packets,
+    sum(rx_dropped + tx_dropped) AS drops,
+    sum(rx_errors + tx_errors) AS errors,
+    max(greatest(
+        if(packet_queue_capacity = 0, 0, toFloat64(packet_queue_len) / packet_queue_capacity),
+        if(window_queue_capacity = 0, 0, toFloat64(window_queue_len) / window_queue_capacity)
+    )) AS queue_pressure,
+    uniqExact(source_id) AS source_count,
+    uniqExact(iface) AS interface_count
+FROM %s.capture_quality_5s
+WHERE ts >= now() - INTERVAL %d MINUTE
+GROUP BY ts
+ORDER BY ts DESC
+LIMIT %d
+FORMAT JSON`, s.database, minutes, limit)
+	body, err := s.query(ctx, q)
+	if err != nil {
+		return []map[string]any{}, err
+	}
+	var parsed struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return []map[string]any{}, err
+	}
+	for left, right := 0, len(parsed.Data)-1; left < right; left, right = left+1, right-1 {
+		parsed.Data[left], parsed.Data[right] = parsed.Data[right], parsed.Data[left]
+	}
+	for _, row := range parsed.Data {
+		row["bytes"] = uintValue(row["rx_bytes"]) + uintValue(row["tx_bytes"])
+		row["packets"] = uintValue(row["rx_packets"]) + uintValue(row["tx_packets"])
+		row["status"] = captureQualityTimelineStatus(row)
+		row["summary"] = captureQualityTimelineSummary(row)
+	}
+	return parsed.Data, nil
 }
 
 func (s *Store) Alerts(ctx context.Context, limit, minutes int) ([]model.AlertEvent, error) {
@@ -3442,6 +3494,53 @@ func demoCaptureQuality(minutes int) map[string]any {
 			"status":                "healthy",
 		},
 	}
+	for _, source := range sources {
+		annotateCaptureQualityRow(source)
+	}
+	timeline := []map[string]any{
+		{
+			"ts":              now - 60,
+			"rx_bytes":        uint64(51000000),
+			"tx_bytes":        uint64(3600000),
+			"rx_packets":      uint64(32000),
+			"tx_packets":      uint64(2600),
+			"drops":           uint64(0),
+			"errors":          uint64(0),
+			"queue_pressure":  0.002,
+			"source_count":    uint64(1),
+			"interface_count": uint64(1),
+		},
+		{
+			"ts":              now - 30,
+			"rx_bytes":        uint64(53000000),
+			"tx_bytes":        uint64(4100000),
+			"rx_packets":      uint64(33500),
+			"tx_packets":      uint64(3000),
+			"drops":           uint64(0),
+			"errors":          uint64(0),
+			"queue_pressure":  0.0018,
+			"source_count":    uint64(1),
+			"interface_count": uint64(1),
+		},
+		{
+			"ts":              now - 5,
+			"rx_bytes":        uint64(54000000),
+			"tx_bytes":        uint64(4300000),
+			"rx_packets":      uint64(32500),
+			"tx_packets":      uint64(3400),
+			"drops":           uint64(0),
+			"errors":          uint64(0),
+			"queue_pressure":  0.0018,
+			"source_count":    uint64(1),
+			"interface_count": uint64(1),
+		},
+	}
+	for _, point := range timeline {
+		point["bytes"] = uintValue(point["rx_bytes"]) + uintValue(point["tx_bytes"])
+		point["packets"] = uintValue(point["rx_packets"]) + uintValue(point["tx_packets"])
+		point["status"] = captureQualityTimelineStatus(point)
+		point["summary"] = captureQualityTimelineSummary(point)
+	}
 	return map[string]any{
 		"generated_at": now,
 		"minutes":      minutes,
@@ -3465,7 +3564,9 @@ func demoCaptureQuality(minutes int) map[string]any {
 			"interface_count":  1,
 			"latest_window_ts": now - 5,
 		},
-		"sources": sources,
+		"sources":  sources,
+		"timeline": timeline,
+		"events":   captureQualityEvents(timeline, 30),
 		"recommendations": []map[string]string{
 			{"level": "info", "title": "采集接口健康", "detail": "当前未发现接口丢包或错误增量"},
 		},
@@ -5006,6 +5107,68 @@ func captureQualityStatus(sources []map[string]any) string {
 		}
 	}
 	return status
+}
+
+func captureQualityTimelineStatus(row map[string]any) string {
+	if uintValue(row["errors"]) > 0 || floatValue(row["queue_pressure"]) >= 0.90 {
+		return "critical"
+	}
+	if uintValue(row["drops"]) > 0 || floatValue(row["queue_pressure"]) >= 0.70 {
+		return "warning"
+	}
+	return "healthy"
+}
+
+func captureQualityTimelineSummary(row map[string]any) string {
+	if uintValue(row["errors"]) > 0 {
+		return "采集窗口出现接口错误，优先检查网卡链路和交换机镜像口"
+	}
+	if uintValue(row["drops"]) > 0 {
+		return "采集窗口出现接口丢包，建议核对采集压力、BPF 过滤和容器权限"
+	}
+	if floatValue(row["queue_pressure"]) >= 0.90 {
+		return "采集队列严重积压，存在实时流量丢失风险"
+	}
+	if floatValue(row["queue_pressure"]) >= 0.70 {
+		return "采集队列压力偏高，需要观察 collector 处理能力"
+	}
+	return "采集窗口稳定"
+}
+
+func captureQualityEvents(timeline []map[string]any, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 30
+	}
+	events := []map[string]any{}
+	for i := len(timeline) - 1; i >= 0 && len(events) < limit; i-- {
+		row := timeline[i]
+		status := stringValue(row["status"])
+		if status == "" {
+			status = captureQualityTimelineStatus(row)
+		}
+		if status == "healthy" {
+			continue
+		}
+		ts := int64Value(row["ts"])
+		drops := uintValue(row["drops"])
+		errors := uintValue(row["errors"])
+		queuePressure := floatValue(row["queue_pressure"])
+		events = append(events, map[string]any{
+			"id":              fmt.Sprintf("capture-event-%d", ts),
+			"ts":              ts,
+			"status":          status,
+			"summary":         captureQualityTimelineSummary(row),
+			"detail":          fmt.Sprintf("drops=%d, errors=%d, queue=%.1f%%", drops, errors, queuePressure*100),
+			"drops":           drops,
+			"errors":          errors,
+			"queue_pressure":  queuePressure,
+			"bytes":           uintValue(row["bytes"]),
+			"packets":         uintValue(row["packets"]),
+			"source_count":    uintValue(row["source_count"]),
+			"interface_count": uintValue(row["interface_count"]),
+		})
+	}
+	return events
 }
 
 func captureQualityRecommendations(status string, summary map[string]any, sources []map[string]any) []map[string]string {

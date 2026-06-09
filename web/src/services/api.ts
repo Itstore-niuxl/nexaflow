@@ -153,6 +153,45 @@ export interface SystemSettings {
   updated_at: number;
 }
 
+export interface SystemUser {
+  username: string;
+  display_name: string;
+  role: string;
+  status: string;
+  password_set: boolean;
+  created_at: number;
+  updated_at: number;
+  last_login_at?: number;
+  can_write?: boolean;
+  can_export?: boolean;
+  can_audit?: boolean;
+  can_configure?: boolean;
+  can_investigate?: boolean;
+}
+
+export interface SystemUsers {
+  users: SystemUser[];
+  summary: {
+    total: number;
+    active: number;
+    disabled: number;
+    admin: number;
+    analyst: number;
+    auditor: number;
+    viewer: number;
+  };
+  roles?: string[];
+  statuses?: string[];
+}
+
+export interface SystemUserInput {
+  username: string;
+  display_name: string;
+  role: string;
+  status: string;
+  password?: string;
+}
+
 export interface SettingsTestResult {
   ok: boolean;
   mode?: string;
@@ -369,12 +408,46 @@ export interface CaptureQualitySource {
   status: string;
 }
 
+export interface CaptureQualityTimelinePoint {
+  ts: number;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_packets: number;
+  tx_packets: number;
+  drops: number;
+  errors: number;
+  queue_pressure: number;
+  source_count: number;
+  interface_count: number;
+  bytes: number;
+  packets: number;
+  status: string;
+  summary: string;
+}
+
+export interface CaptureQualityEvent {
+  id?: string;
+  ts: number;
+  status: string;
+  summary: string;
+  detail?: string;
+  drops: number;
+  errors: number;
+  queue_pressure: number;
+  bytes: number;
+  packets: number;
+  source_count?: number;
+  interface_count?: number;
+}
+
 export interface CaptureQuality {
   generated_at: number;
   minutes: number;
   status: string;
   summary: CaptureQualitySummary;
   sources: CaptureQualitySource[];
+  timeline: CaptureQualityTimelinePoint[];
+  events: CaptureQualityEvent[];
   recommendations: DataQualityRecommendation[];
 }
 
@@ -1375,6 +1448,29 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: SystemSettings }>;
+  },
+  async systemUsers() {
+    return json<{ data: SystemUsers }>('/api/v1/system/users');
+  },
+  async saveSystemUser(user: SystemUserInput) {
+    const response = await fetch('/api/v1/system/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(user)
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SystemUsers }>;
+  },
+  async deleteSystemUser(username: string) {
+    const response = await fetch(`/api/v1/system/users?username=${encodeURIComponent(username)}`, {
+      method: 'DELETE'
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SystemUsers }>;
   },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(

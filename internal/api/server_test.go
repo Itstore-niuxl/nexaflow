@@ -65,6 +65,38 @@ func TestLoginRole(t *testing.T) {
 	}
 }
 
+func TestLoginIdentityUsesManagedUsers(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("analyst-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath, AuthPassword: "legacy-admin"})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "alice", DisplayName: "Alice", Role: "analyst", Status: "active", PasswordHash: passwordHash},
+		{Username: "disabled", DisplayName: "Disabled", Role: "admin", Status: "disabled", PasswordHash: passwordHash},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthPassword: "legacy-admin"})
+	identity, ok := server.loginIdentity("alice", "analyst-pass")
+	if !ok {
+		t.Fatal("expected managed user login")
+	}
+	if identity.Actor != "alice" || identity.Role != "analyst" {
+		t.Fatalf("unexpected identity %#v", identity)
+	}
+	if _, ok := server.loginIdentity("disabled", "analyst-pass"); ok {
+		t.Fatal("disabled user should not log in")
+	}
+	legacy, ok := server.loginIdentity("operator", "legacy-admin")
+	if !ok || legacy.Role != authRoleAdmin {
+		t.Fatalf("expected legacy admin fallback, got %#v ok=%v", legacy, ok)
+	}
+}
+
 func TestRequestNeedsWriteAccess(t *testing.T) {
 	getReq, _ := http.NewRequest(http.MethodGet, "/api/v1/collectors/config", nil)
 	if requestNeedsWriteAccess(getReq) {
