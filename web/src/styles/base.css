@@ -773,6 +773,14 @@ button:disabled,
   text-align: right;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .whitelist-form {
   display: flex;
   align-items: end;

@@ -108,6 +108,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/rule-effectiveness", s.aiRuleEffectiveness)
 	mux.HandleFunc("/api/v1/ai/asset-enrichment-suggestions", s.aiAssetEnrichmentSuggestions)
 	mux.HandleFunc("/api/v1/ai/approval-requests", s.aiApprovalRequests)
+	mux.HandleFunc("/api/v1/ai/approval-stats", s.aiApprovalStats)
+	mux.HandleFunc("/api/v1/ai/approval-requests/export", s.aiApprovalRequestsExport)
 	mux.HandleFunc("/api/v1/collectors", s.collectors)
 	mux.HandleFunc("/api/v1/collectors/config", s.collectorConfig)
 	mux.HandleFunc("/api/v1/interfaces", s.interfaces)

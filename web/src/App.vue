@@ -38,6 +38,7 @@ import TrafficCompositionPanel from './components/TrafficCompositionPanel.vue';
 import TrafficHeatmap from './components/TrafficHeatmap.vue';
 import {
   api,
+  type AIApprovalStats,
   type AlertConfig,
   type AlertEvent,
   type AIApprovalRequest,
@@ -469,6 +470,32 @@ const emptyAIAssetEnrichmentSuggestions = (): AIAssetEnrichmentSuggestions => ({
   suggestions: [],
   generated_at: 0
 });
+const emptyAIApprovalStats = (): AIApprovalStats => ({
+  generated_at: 0,
+  total: 0,
+  pending: 0,
+  approved: 0,
+  rejected: 0,
+  critical_pending: 0,
+  overdue_pending: 0,
+  oldest_pending_age_seconds: 0,
+  average_review_seconds: 0,
+  reviewed_count: 0,
+  status_counts: [],
+  type_counts: [],
+  severity_counts: [],
+  pending_type_counts: [],
+  pending_severity_counts: [],
+  stale_threshold_seconds: 86400,
+  summary: '等待 AI 审批数据加载。',
+  recommendations: [],
+  requires_operator_attention: false,
+  approval_completion_rate: 0,
+  approval_rejection_rate: 0,
+  pending_criticality_score: 0,
+  oldest_pending_age_readable: '-',
+  average_review_time_readable: '-'
+});
 const searchTerm = ref('10.2.0.12');
 const searchResults = ref<SearchResult[]>([]);
 const sessions = ref<SessionRow[]>([]);
@@ -496,6 +523,7 @@ const aiGovernance = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions()
 const aiRuleEffectiveness = ref<AIRuleEffectiveness>(emptyAIRuleEffectiveness());
 const aiAssetEnrichment = ref<AIAssetEnrichmentSuggestions>(emptyAIAssetEnrichmentSuggestions());
 const aiApprovals = ref<AIApprovalRequest[]>([]);
+const aiApprovalStats = ref<AIApprovalStats>(emptyAIApprovalStats());
 const aiApprovalBusy = ref('');
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
@@ -810,6 +838,7 @@ const refresh = async () => {
       ruleEffectivenessRes,
       assetEnrichmentRes,
       approvalRes,
+      approvalStatsRes,
       ruleFindingRes,
       auditRes,
       configVersionRes,
@@ -864,6 +893,7 @@ const refresh = async () => {
       api.aiRuleEffectiveness(minutes, 120),
       api.aiAssetEnrichmentSuggestions(minutes, 8),
       api.aiApprovalRequests(''),
+      api.aiApprovalStats(),
       api.ruleFindings(minutes, 100),
       api.auditEvents(120),
       api.configVersions('', 120),
@@ -919,6 +949,7 @@ const refresh = async () => {
     aiRuleEffectiveness.value = ruleEffectivenessRes.data;
     aiAssetEnrichment.value = assetEnrichmentRes.data;
     aiApprovals.value = approvalRes.data;
+    aiApprovalStats.value = approvalStatsRes.data;
     ruleFindings.value = ruleFindingRes.data;
     auditEvents.value = auditRes.data;
     configVersions.value = configVersionRes.data;
@@ -964,6 +995,7 @@ const refresh = async () => {
       governanceRes.degraded ||
       ruleEffectivenessRes.degraded ||
       assetEnrichmentRes.degraded ||
+      approvalStatsRes.degraded ||
       approvalRes.degraded ||
       ruleFindingRes.degraded ||
       auditRes.degraded ||
@@ -2738,6 +2770,12 @@ const unownedAssetRiskCount = computed(() => assetRisks.value.filter((row) => !r
 const exposedAssetRiskCount = computed(() => assetRisks.value.filter((row) => row.exposed_services > 0 || row.external_peers > 0).length);
 const assetRiskTotalBytes = computed(() => assetRisks.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const pendingAIApprovals = computed(() => aiApprovals.value.filter((row) => row.status === 'pending'));
+const aiApprovalPendingTypeItems = computed<TopItem[]>(() =>
+  aiApprovalStats.value.pending_type_counts.map((row) => ({ key: row.label, bytes: row.count, packets: 0 }))
+);
+const aiApprovalPendingSeverityItems = computed<TopItem[]>(() =>
+  aiApprovalStats.value.pending_severity_counts.map((row) => ({ key: row.label, bytes: row.count, packets: 0 }))
+);
 const criticalInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'critical').length);
 const warningInsightCount = computed(() => securityInsights.value.filter((row) => row.severity === 'warning').length);
 const dominantProtocol = computed(() => trafficAnalysis.value.protocol_mix[0]);
@@ -3185,6 +3223,8 @@ const formatTime = (ts: number) => {
   return new Date(ts * 1000).toLocaleString();
 };
 
+const formatPercent = (value: number) => `${(value * 100).toFixed(1)}%`;
+
 const setView = (view: string) => {
   const nextView = normalizeView(view);
   currentView.value = nextView;
@@ -3509,8 +3549,9 @@ const submitGovernanceApproval = async (suggestion: AIGovernanceSuggestion) => {
         proposed_silence: suggestion.proposed_silence
       }
     });
-    const result = await api.aiApprovalRequests('');
+    const [result, statsResult] = await Promise.all([api.aiApprovalRequests(''), api.aiApprovalStats()]);
     aiApprovals.value = result.data;
+    aiApprovalStats.value = statsResult.data;
   } finally {
     aiApprovalBusy.value = '';
   }
@@ -3533,8 +3574,9 @@ const submitAssetEnrichmentApproval = async (suggestion: AIAssetEnrichmentSugges
         proposed_metadata: suggestion.proposed_metadata
       }
     });
-    const result = await api.aiApprovalRequests('');
+    const [result, statsResult] = await Promise.all([api.aiApprovalRequests(''), api.aiApprovalStats()]);
     aiApprovals.value = result.data;
+    aiApprovalStats.value = statsResult.data;
   } finally {
     aiApprovalBusy.value = '';
   }
@@ -4032,6 +4074,14 @@ const exportConfigVersions = async () => {
   downloadBlob(filename, blob);
 };
 
+const exportAIApprovals = async () => {
+  const response = await api.downloadAIApprovalRequests('', 500);
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'nexaflow-ai-approvals.csv';
+  downloadBlob(filename, blob);
+};
+
 const exportRuleFindings = () => {
   const rows = [
     ['规则', '对象', '级别', '指标', '当前值', '阈值', '流量字节', '包数', '摘要', '建议', '命中时间'],
@@ -4345,10 +4395,73 @@ const downloadBlob = (filename: string, blob: Blob) => {
           </table>
         </section>
 
+        <section class="metrics-grid">
+          <article class="metric">
+            <ClipboardList :size="22" />
+            <div>
+              <span>AI 待审批</span>
+              <strong>{{ aiApprovalStats.pending.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <AlertTriangle :size="22" />
+            <div>
+              <span>严重待审批</span>
+              <strong>{{ aiApprovalStats.critical_pending.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <History :size="22" />
+            <div>
+              <span>超时待审批</span>
+              <strong>{{ aiApprovalStats.overdue_pending.toLocaleString() }}</strong>
+            </div>
+          </article>
+          <article class="metric">
+            <Gauge :size="22" />
+            <div>
+              <span>审批完成率</span>
+              <strong>{{ formatPercent(aiApprovalStats.approval_completion_rate) }}</strong>
+            </div>
+          </article>
+        </section>
+
+        <section class="command-grid">
+          <HorizontalBarChart title="待审批类型分布" eyebrow="AI Governance" :items="aiApprovalPendingTypeItems" unit="count" />
+          <HorizontalBarChart title="待审批级别分布" eyebrow="Risk Queue" :items="aiApprovalPendingSeverityItems" unit="count" />
+        </section>
+
+        <section class="ai-summary-card compact ai-approval-overview">
+          <div class="panel-heading">
+            <h2>审批治理概览</h2>
+            <span>{{ aiApprovalStats.requires_operator_attention ? '需要关注' : '队列可控' }}</span>
+          </div>
+          <p class="ai-summary-lead">{{ aiApprovalStats.summary }}</p>
+          <div class="ai-summary-grid">
+            <div>
+              <span>处理效率</span>
+              <ul>
+                <li>最早待审批：{{ aiApprovalStats.oldest_pending_age_readable }}</li>
+                <li>平均处理：{{ aiApprovalStats.average_review_time_readable }}</li>
+                <li>驳回率：{{ formatPercent(aiApprovalStats.approval_rejection_rate) }}</li>
+              </ul>
+            </div>
+            <div>
+              <span>建议动作</span>
+              <ul>
+                <li v-for="item in aiApprovalStats.recommendations" :key="`ai-approval-rec-${item}`">{{ item }}</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
         <section class="table-panel ai-approval-panel">
           <div class="panel-heading">
             <h2>AI 审批队列</h2>
-            <span>{{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
+            <div class="panel-actions">
+              <span>{{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
+              <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled || aiApprovals.length === 0" @click="exportAIApprovals">导出审批 CSV</button>
+            </div>
           </div>
           <div v-if="aiApprovals.length === 0" class="empty-state">暂无 AI 审批请求</div>
           <div v-else class="governance-list">

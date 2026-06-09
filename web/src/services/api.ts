@@ -984,6 +984,39 @@ export interface AIApprovalRequest {
   apply_result?: string;
 }
 
+export interface AIApprovalCount {
+  key: string;
+  label: string;
+  count: number;
+}
+
+export interface AIApprovalStats {
+  generated_at: number;
+  total: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  critical_pending: number;
+  overdue_pending: number;
+  oldest_pending_age_seconds: number;
+  average_review_seconds: number;
+  reviewed_count: number;
+  status_counts: AIApprovalCount[];
+  type_counts: AIApprovalCount[];
+  severity_counts: AIApprovalCount[];
+  pending_type_counts: AIApprovalCount[];
+  pending_severity_counts: AIApprovalCount[];
+  stale_threshold_seconds: number;
+  summary: string;
+  recommendations: string[];
+  requires_operator_attention: boolean;
+  approval_completion_rate: number;
+  approval_rejection_rate: number;
+  pending_criticality_score: number;
+  oldest_pending_age_readable: string;
+  average_review_time_readable: string;
+}
+
 export interface ObjectRelationSummary {
   key: string;
   bytes: number;
@@ -1450,6 +1483,18 @@ export const api = {
   async aiApprovalRequests(status = '') {
     const query = status ? `?status=${encodeURIComponent(status)}` : '';
     return json<{ data: AIApprovalRequest[]; degraded: boolean }>(`/api/v1/ai/approval-requests${query}`);
+  },
+  async aiApprovalStats() {
+    return json<{ data: AIApprovalStats; degraded: boolean }>('/api/v1/ai/approval-stats');
+  },
+  async downloadAIApprovalRequests(status = '', limit = 500) {
+    const response = await fetch(
+      `/api/v1/ai/approval-requests/export?status=${encodeURIComponent(status)}&limit=${limit}&format=csv`
+    );
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response;
   },
   async createAIApprovalRequest(request: Partial<AIApprovalRequest>) {
     const response = await fetch('/api/v1/ai/approval-requests', {

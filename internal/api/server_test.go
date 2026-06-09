@@ -692,6 +692,94 @@ func TestConfigVersionsCSV(t *testing.T) {
 	}
 }
 
+func TestAIApprovalRequestsCSV(t *testing.T) {
+	body, err := aiApprovalRequestsCSV([]aiApprovalRequest{
+		{
+			ID:          "ai-approval-1",
+			Type:        "rule",
+			Status:      "approved",
+			Severity:    "warning",
+			Title:       "AI 推荐：公网会话突增",
+			Target:      "211.93.22.130 -> 10.2.0.12:8081",
+			Summary:     "建议沉淀检测规则。",
+			Confidence:  0.82,
+			Evidence:    []string{"会话数量：40"},
+			Actions:     []string{"保存规则后观察误报。"},
+			Payload:     map[string]any{"proposed_rule": map[string]any{"name": "公网会话突增"}},
+			CreatedBy:   "admin",
+			CreatedAt:   1700000000,
+			ReviewedBy:  "admin",
+			ReviewedAt:  1700000100,
+			ReviewNote:  "确认执行",
+			AppliedAt:   1700000200,
+			ApplyResult: "saved rule rule-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("build ai approval csv: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{"created_time,id,type,status,severity,title,target,summary,confidence", "ai-approval-1", "AI 推荐：公网会话突增", "saved rule rule-1", `""name"":""公网会话突增""`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected AI approval CSV to contain %q, got %s", want, text)
+		}
+	}
+}
+
+func TestBuildAIApprovalStats(t *testing.T) {
+	now := int64(1700100000)
+	stats := buildAIApprovalStats([]aiApprovalRequest{
+		{
+			ID:        "pending-critical",
+			Type:      "rule",
+			Status:    "pending",
+			Severity:  "critical",
+			CreatedAt: now - 26*60*60,
+		},
+		{
+			ID:        "pending-warning",
+			Type:      "silence",
+			Status:    "pending",
+			Severity:  "warning",
+			CreatedAt: now - 30*60,
+		},
+		{
+			ID:         "approved-rule",
+			Type:       "rule",
+			Status:     "approved",
+			Severity:   "warning",
+			CreatedAt:  now - 10*60,
+			ReviewedAt: now - 4*60,
+		},
+		{
+			ID:         "rejected-asset",
+			Type:       "asset_enrichment",
+			Status:     "rejected",
+			Severity:   "info",
+			CreatedAt:  now - 20*60,
+			ReviewedAt: now - 8*60,
+		},
+	}, now)
+	if int64Value(stats["pending"]) != 2 {
+		t.Fatalf("expected 2 pending approvals, got %#v", stats)
+	}
+	if int64Value(stats["critical_pending"]) != 1 {
+		t.Fatalf("expected 1 critical pending approval, got %#v", stats)
+	}
+	if int64Value(stats["overdue_pending"]) != 1 {
+		t.Fatalf("expected 1 overdue pending approval, got %#v", stats)
+	}
+	if int64Value(stats["average_review_seconds"]) != 540 {
+		t.Fatalf("expected 540s average review time, got %#v", stats)
+	}
+	if !boolValue(stats["requires_operator_attention"]) {
+		t.Fatalf("expected operator attention, got %#v", stats)
+	}
+	if len(stats["pending_type_counts"].([]aiApprovalCount)) != 2 {
+		t.Fatalf("expected pending type distribution, got %#v", stats)
+	}
+}
+
 func TestBuildAIRuleEffectiveness(t *testing.T) {
 	rules := []model.DetectionRule{
 		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},
