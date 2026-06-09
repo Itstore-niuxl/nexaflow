@@ -90,6 +90,7 @@ type UserAccount struct {
 	Role         string `json:"role"`
 	Status       string `json:"status"`
 	PasswordHash string `json:"password_hash,omitempty"`
+	AuthVersion  int    `json:"auth_version,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
 	LastLoginAt  int64  `json:"last_login_at,omitempty"`
@@ -515,6 +516,9 @@ func normalizeUserAccounts(users []UserAccount) []UserAccount {
 		}
 		user.Role = NormalizeUserRole(user.Role)
 		user.Status = NormalizeUserStatus(user.Status)
+		if strings.TrimSpace(user.PasswordHash) != "" && user.AuthVersion <= 0 {
+			user.AuthVersion = 1
+		}
 		if user.CreatedAt <= 0 {
 			user.CreatedAt = now
 		}

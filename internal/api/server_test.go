@@ -200,6 +200,78 @@ func TestSystemUserUnlockClearsLockout(t *testing.T) {
 	}
 }
 
+func TestAuthRequiredRejectsDisabledManagedUserToken(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 10},
+		{Username: "backup", DisplayName: "Backup", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 10},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthSecret: "test-secret"})
+	token, err := server.signAuthToken("admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	settings.Security.Users[0].Status = "disabled"
+	settings.Security.Users[0].AuthVersion = nextUserAuthVersion(settings.Security.Users[0])
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save disabled settings: %v", err)
+	}
+	handler := server.authRequired(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/summary", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected disabled user token to be rejected, got %d", resp.Code)
+	}
+}
+
+func TestManagedUserPasswordResetInvalidatesOldToken(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 10},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthSecret: "test-secret"})
+	token, err := server.signAuthToken("admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	newHash, err := hashPassword("new-admin-pass")
+	if err != nil {
+		t.Fatalf("hash new password: %v", err)
+	}
+	settings.Security.Users[0].PasswordHash = newHash
+	settings.Security.Users[0].AuthVersion = nextUserAuthVersion(settings.Security.Users[0])
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save reset settings: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/summary", nil)
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	if _, ok := server.verifyAuthRequest(req); ok {
+		t.Fatal("old token should be invalid after password reset")
+	}
+}
+
 func TestRequestPermission(t *testing.T) {
 	cases := []struct {
 		method string

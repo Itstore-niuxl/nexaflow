@@ -44,8 +44,9 @@ const (
 )
 
 type authIdentity struct {
-	Actor string
-	Role  string
+	Actor       string
+	Role        string
+	AuthVersion int
 }
 
 type Server struct {
@@ -1851,6 +1852,9 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if found >= 0 {
+			roleChanged := normalizeAuthRole(users[found].Role) != normalizeAuthRole(role)
+			statusChanged := users[found].Status != status
+			versionChanged := false
 			users[found].DisplayName = strings.TrimSpace(body.DisplayName)
 			if users[found].DisplayName == "" {
 				users[found].DisplayName = username
@@ -1858,8 +1862,15 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 			users[found].Role = role
 			users[found].Status = status
 			users[found].UpdatedAt = now
+			if strings.TrimSpace(users[found].PasswordHash) != "" && (roleChanged || statusChanged) {
+				users[found].AuthVersion = nextUserAuthVersion(users[found])
+				versionChanged = true
+			}
 			if passwordHash != "" {
 				users[found].PasswordHash = passwordHash
+				if !versionChanged {
+					users[found].AuthVersion = nextUserAuthVersion(users[found])
+				}
 				users[found].FailedLogins = 0
 				users[found].LockedUntil = 0
 			}
@@ -1870,6 +1881,7 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 				Role:         role,
 				Status:       status,
 				PasswordHash: passwordHash,
+				AuthVersion:  nextUserAuthVersion(config.UserAccount{}),
 				CreatedAt:    now,
 				UpdatedAt:    now,
 			})
@@ -2366,6 +2378,7 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().Unix()
 	settings.Security.Users[userIdx].PasswordHash = passwordHash
+	settings.Security.Users[userIdx].AuthVersion = nextUserAuthVersion(settings.Security.Users[userIdx])
 	settings.Security.Users[userIdx].FailedLogins = 0
 	settings.Security.Users[userIdx].LockedUntil = 0
 	settings.Security.Users[userIdx].UpdatedAt = now
@@ -2467,7 +2480,7 @@ func (s *Server) loginIdentity(actor, password string) (authIdentity, bool) {
 			return authIdentity{}, false
 		}
 		if verifyPasswordHash(password, user.PasswordHash) {
-			return authIdentity{Actor: user.Username, Role: normalizeAuthRole(user.Role)}, true
+			return authIdentity{Actor: user.Username, Role: normalizeAuthRole(user.Role), AuthVersion: userAuthVersion(user)}, true
 		}
 	}
 	if role := s.loginRole(password); role != "" {
@@ -2627,6 +2640,64 @@ func (s *Server) managedUserExists(username string) bool {
 	return false
 }
 
+func userAuthVersion(user config.UserAccount) int {
+	if user.AuthVersion > 0 {
+		return user.AuthVersion
+	}
+	if strings.TrimSpace(user.PasswordHash) != "" {
+		return 1
+	}
+	return 0
+}
+
+func nextUserAuthVersion(user config.UserAccount) int {
+	next := user.AuthVersion + 1
+	if next <= 0 {
+		next = 1
+	}
+	now := int(time.Now().Unix())
+	if next < now {
+		next = now
+	}
+	return next
+}
+
+func (s *Server) authVersionForActor(username string) int {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0
+	}
+	for _, user := range s.loadSystemSettings().Security.Users {
+		if user.Username == username && strings.TrimSpace(user.PasswordHash) != "" {
+			return userAuthVersion(user)
+		}
+	}
+	return 0
+}
+
+func (s *Server) authIdentityCurrent(identity authIdentity) bool {
+	actor := strings.TrimSpace(identity.Actor)
+	if actor == "" {
+		return false
+	}
+	for _, user := range s.loadSystemSettings().Security.Users {
+		if user.Username != actor {
+			continue
+		}
+		if user.Status != "active" || strings.TrimSpace(user.PasswordHash) == "" || user.LockedUntil > time.Now().Unix() {
+			return false
+		}
+		if normalizeAuthRole(user.Role) != normalizeAuthRole(identity.Role) {
+			return false
+		}
+		return identity.AuthVersion == userAuthVersion(user)
+	}
+	if identity.AuthVersion > 0 {
+		return false
+	}
+	return true
+}
+
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -2690,7 +2761,8 @@ func (s *Server) authSessionTTL() time.Duration {
 
 func (s *Server) signAuthToken(actor, role string, expires int64) (string, error) {
 	role = normalizeAuthRole(role)
-	payload := actor + "|" + role + "|" + strconv.FormatInt(expires, 10)
+	version := s.authVersionForActor(actor)
+	payload := actor + "|" + role + "|" + strconv.Itoa(version) + "|" + strconv.FormatInt(expires, 10)
 	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(payload))
 	sig := s.authSignature(encodedPayload)
 	return encodedPayload + "." + sig, nil
@@ -2701,7 +2773,11 @@ func (s *Server) verifyAuthRequest(r *http.Request) (authIdentity, bool) {
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
 		return authIdentity{}, false
 	}
-	return s.verifyAuthToken(cookie.Value)
+	identity, ok := s.verifyAuthToken(cookie.Value)
+	if !ok || !s.authIdentityCurrent(identity) {
+		return authIdentity{}, false
+	}
+	return identity, true
 }
 
 func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
@@ -2718,14 +2794,24 @@ func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 		return authIdentity{}, false
 	}
 	payload := strings.Split(string(raw), "|")
-	if len(payload) != 2 && len(payload) != 3 {
+	if len(payload) != 2 && len(payload) != 3 && len(payload) != 4 {
 		return authIdentity{}, false
 	}
 	role := authRoleAdmin
 	expiresRaw := payload[1]
+	version := 0
 	if len(payload) == 3 {
 		role = normalizeAuthRole(payload[1])
 		expiresRaw = payload[2]
+	}
+	if len(payload) == 4 {
+		role = normalizeAuthRole(payload[1])
+		parsedVersion, err := strconv.Atoi(payload[2])
+		if err != nil || parsedVersion < 0 {
+			return authIdentity{}, false
+		}
+		version = parsedVersion
+		expiresRaw = payload[3]
 	}
 	expires, err := strconv.ParseInt(expiresRaw, 10, 64)
 	if err != nil || expires < time.Now().Unix() {
@@ -2735,7 +2821,7 @@ func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 	if actor == "" {
 		actor = "operator"
 	}
-	return authIdentity{Actor: actor, Role: role}, true
+	return authIdentity{Actor: actor, Role: role, AuthVersion: version}, true
 }
 
 func (s *Server) authSignature(payload string) string {
