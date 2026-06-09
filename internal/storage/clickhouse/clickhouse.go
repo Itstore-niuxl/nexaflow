@@ -1546,6 +1546,7 @@ FORMAT JSON`, s.database, minutes, where, limit)
 	}
 	for _, row := range parsed.Data {
 		row["avg_packet_size"] = ratio(floatValue(row["bytes"]), floatValue(row["packets"]))
+		annotateSessionAnalysis(row)
 	}
 	return parsed.Data, nil
 }
@@ -5434,7 +5435,97 @@ func sessionRow(item model.TopItem, firstSeen, lastSeen int64) map[string]any {
 			row["direction"] = exposure.Direction
 		}
 	}
+	annotateSessionAnalysis(row)
 	return row
+}
+
+func annotateSessionAnalysis(row map[string]any) {
+	score := sessionRiskScore(stringValue(row["risk"]))
+	flags := []string{}
+	recommendation := "持续观察该会话，结合资产画像确认业务合理性。"
+	bytes := uintValue(row["bytes"])
+	packets := uintValue(row["packets"])
+	direction := stringValue(row["direction"])
+	service := stringValue(row["service"])
+	dstPort := stringValue(row["dst_port"])
+
+	if strings.Contains(direction, "公网") {
+		score += 25
+		flags = append(flags, "公网通信")
+		recommendation = "优先核对公网来源、服务端口和访问授权，必要时收敛访问来源。"
+	}
+	if strings.Contains(direction, "内网东西向") {
+		score += 8
+		flags = append(flags, "东西向流量")
+	}
+	if bytes >= 1024*1024*1024 {
+		score += 25
+		flags = append(flags, "GB级大流量")
+		recommendation = "核对是否为备份、同步或批量下载任务，检查带宽和目标资产负载。"
+	} else if bytes >= 100*1024*1024 {
+		score += 15
+		flags = append(flags, "大流量")
+	}
+	if packets >= 100000 {
+		score += 15
+		flags = append(flags, "高包量")
+	}
+	if isSensitiveSessionPort(dstPort) {
+		score += 20
+		flags = append(flags, "敏感端口")
+		recommendation = "检查远程管理、数据库或目录服务访问是否来自授权主机。"
+	}
+	if strings.Contains(strings.ToLower(service), "unknown") || service == "未知服务" {
+		score += 8
+		flags = append(flags, "未知服务")
+	}
+	if len(flags) == 0 {
+		flags = append(flags, "常规会话")
+	}
+	if score > 100 {
+		score = 100
+	}
+	row["analysis_score"] = score
+	row["analysis_level"] = sessionAnalysisLevel(score)
+	row["analysis_flags"] = flags
+	row["recommendation"] = recommendation
+}
+
+func sessionRiskScore(risk string) int {
+	switch risk {
+	case "critical":
+		return 70
+	case "high":
+		return 55
+	case "medium":
+		return 35
+	case "low":
+		return 15
+	default:
+		return 8
+	}
+}
+
+func sessionAnalysisLevel(score int) string {
+	switch {
+	case score >= 80:
+		return "critical"
+	case score >= 60:
+		return "high"
+	case score >= 35:
+		return "medium"
+	default:
+		return "observe"
+	}
+}
+
+func isSensitiveSessionPort(port string) bool {
+	switch strings.TrimSpace(port) {
+	case "22", "23", "3389", "445", "135", "139", "1433", "1521", "3306", "5432", "6379", "9200", "9300", "11211", "389", "636":
+		return true
+	default:
+		return false
+	}
 }
 
 func flowDirection(flow parsedFlow) string {

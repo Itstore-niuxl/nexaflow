@@ -1,6 +1,10 @@
 package clickhouse
 
-import "testing"
+import (
+	"testing"
+
+	"nexaflow/internal/model"
+)
 
 func TestServiceAnalyticsFromSessions(t *testing.T) {
 	sessions := []map[string]any{
@@ -52,6 +56,27 @@ func TestServiceAnalyticsFromSessions(t *testing.T) {
 	}
 	if uintValue(https["server_count"]) != 1 {
 		t.Fatalf("expected HTTPS server count 1, got %d", uintValue(https["server_count"]))
+	}
+}
+
+func TestSessionRowAddsAnalysisFields(t *testing.T) {
+	row := sessionRow(
+		model.TopItem{Key: "211.93.22.130:52000 -> 10.2.0.12:22 / tcp", Bytes: 150 * 1024 * 1024, Packets: 120000},
+		100,
+		120,
+	)
+	if stringValue(row["analysis_level"]) != "critical" {
+		t.Fatalf("expected critical analysis level, got %#v", row)
+	}
+	if int64Value(row["analysis_score"]) < 80 {
+		t.Fatalf("expected high analysis score, got %#v", row["analysis_score"])
+	}
+	flags, ok := row["analysis_flags"].([]string)
+	if !ok || len(flags) < 3 {
+		t.Fatalf("expected analysis flags, got %#v", row["analysis_flags"])
+	}
+	if stringValue(row["recommendation"]) == "" {
+		t.Fatalf("expected recommendation, got %#v", row)
 	}
 }
 

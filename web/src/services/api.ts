@@ -624,6 +624,10 @@ export interface SessionRow {
   bytes: number;
   packets: number;
   avg_packet_size: number;
+  analysis_score?: number;
+  analysis_level?: string;
+  analysis_flags?: string[];
+  recommendation?: string;
   first_seen: number;
   last_seen: number;
 }

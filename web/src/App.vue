@@ -3074,6 +3074,14 @@ const searchResultItems = computed(() => aggregateTopItems(searchResults.value, 
 const sessionServiceItems = computed(() => aggregateTopItems(sessions.value, (row) => row.service, (row) => row.bytes, (row) => row.packets));
 const sessionDirectionItems = computed(() => aggregateTopItems(sessions.value, (row) => row.direction, (row) => row.bytes, (row) => row.packets));
 const sessionRiskItems = computed(() => aggregateTopItems(sessions.value, (row) => serviceRiskText(row.risk), (row) => row.bytes, (row) => row.packets));
+const sessionAnalysisItems = computed(() =>
+  aggregateTopItems(sessions.value, (row) => sessionAnalysisText(row.analysis_level ?? row.risk), (row) => row.bytes, (row) => row.analysis_score ?? row.packets)
+);
+const prioritySessions = computed(() =>
+  [...sessions.value]
+    .sort((a, b) => (b.analysis_score ?? 0) - (a.analysis_score ?? 0) || b.bytes - a.bytes)
+    .slice(0, 6)
+);
 const sessionTotalBytes = computed(() => sessions.value.reduce((sum, row) => sum + row.bytes, 0));
 const sessionTotalPackets = computed(() => sessions.value.reduce((sum, row) => sum + row.packets, 0));
 const highRiskSessionCount = computed(() => sessions.value.filter((row) => row.risk === 'critical' || row.risk === 'high').length);
@@ -3347,6 +3355,17 @@ const serviceRiskText = (risk: string) => {
     observe: '观察'
   };
   return labels[risk] ?? risk;
+};
+
+const sessionAnalysisText = (level: string) => {
+  const labels: Record<string, string> = {
+    critical: '优先排查',
+    high: '重点关注',
+    medium: '持续观察',
+    observe: '常规会话',
+    low: '低风险'
+  };
+  return labels[level] ?? level;
 };
 
 const assetRiskLevelText = (level: string) => {
@@ -4242,7 +4261,7 @@ const exportSelectedTopN = () => {
 
 const exportSessions = () => {
   const rows = [
-    ['会话', '源IP', '源端口', '目的IP', '目的端口', '协议', '服务', '类别', '风险', '方向', '服务端', '客户端', '流量字节', '包数', '平均包长', '首次出现', '最近出现'],
+    ['会话', '源IP', '源端口', '目的IP', '目的端口', '协议', '服务', '类别', '风险', '分析等级', '分析评分', '分析标签', '方向', '服务端', '客户端', '流量字节', '包数', '平均包长', '建议', '首次出现', '最近出现'],
     ...sessions.value.map((row) => [
       row.key,
       row.src_ip,
@@ -4253,12 +4272,16 @@ const exportSessions = () => {
       row.service,
       row.category,
       serviceRiskText(row.risk),
+      sessionAnalysisText(row.analysis_level ?? row.risk),
+      String(row.analysis_score ?? 0),
+      (row.analysis_flags ?? []).join('/'),
       row.direction,
       `${row.server_ip}:${row.server_port}`,
       row.client_ip,
       String(row.bytes),
       String(row.packets),
       String(row.avg_packet_size),
+      row.recommendation ?? '',
       formatTime(row.first_seen),
       formatTime(row.last_seen)
     ])
@@ -7297,7 +7320,41 @@ const downloadBlob = (filename: string, blob: Blob) => {
         </section>
         <section class="command-grid">
           <HorizontalBarChart title="会话风险分布" eyebrow="Session Risk" :items="sessionRiskItems" />
-          <HorizontalBarChart title="会话流量排行" eyebrow="Session Ranking" :items="topFlows" />
+          <HorizontalBarChart title="会话分析分布" eyebrow="Session Priority" :items="sessionAnalysisItems" />
+        </section>
+        <section class="table-panel wide-key-table session-priority-table">
+          <div class="panel-heading">
+            <h2>重点会话</h2>
+            <span>按分析评分排序 / {{ prioritySessions.length.toLocaleString() }} 条</span>
+          </div>
+          <div v-if="prioritySessions.length === 0" class="empty-state">暂无重点会话</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>会话</th>
+                <th>优先级</th>
+                <th>标签</th>
+                <th>流量</th>
+                <th>建议</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in prioritySessions" :key="`priority-${row.key}`">
+                <td :title="row.key">{{ row.key }}</td>
+                <td>
+                  <span class="severity-pill" :class="row.analysis_level ?? row.risk">{{ sessionAnalysisText(row.analysis_level ?? row.risk) }} / {{ row.analysis_score ?? 0 }}</span>
+                </td>
+                <td :title="(row.analysis_flags ?? []).join(' / ')">{{ (row.analysis_flags ?? []).join(' / ') || '-' }}</td>
+                <td>{{ formatBytes(row.bytes) }}</td>
+                <td :title="row.recommendation">{{ row.recommendation ?? '-' }}</td>
+                <td class="action-cell">
+                  <button class="inline-button" type="button" @click="inspectSession(row)">关联</button>
+                  <button class="inline-button" type="button" @click="openSessionIP(row.server_ip || row.dst_ip)">服务端</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </section>
         <section class="table-panel wide-key-table session-table">
           <div class="panel-heading">
@@ -7311,6 +7368,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <th>会话</th>
                 <th>服务</th>
                 <th>风险</th>
+                <th>分析</th>
                 <th>方向</th>
                 <th>服务端</th>
                 <th>客户端</th>
@@ -7328,6 +7386,10 @@ const downloadBlob = (filename: string, blob: Blob) => {
                   <span class="cell-subtle">{{ row.category }} / {{ row.protocol }}</span>
                 </td>
                 <td><span class="severity-pill" :class="row.risk">{{ serviceRiskText(row.risk) }}</span></td>
+                <td>
+                  <strong>{{ row.analysis_score ?? 0 }}</strong>
+                  <span class="cell-subtle">{{ sessionAnalysisText(row.analysis_level ?? row.risk) }}</span>
+                </td>
                 <td>{{ row.direction }}</td>
                 <td>{{ row.server_ip }}:{{ row.server_port }}</td>
                 <td>{{ row.client_ip || row.src_ip }}</td>
