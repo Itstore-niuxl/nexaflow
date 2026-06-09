@@ -92,6 +92,7 @@ export interface AuthStatus {
   can_audit?: boolean;
   can_configure?: boolean;
   can_investigate?: boolean;
+  can_change_password?: boolean;
 }
 
 export interface SystemSettings {
@@ -1371,6 +1372,17 @@ export const api = {
   },
   async logout() {
     const response = await fetch('/api/v1/auth/logout', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AuthStatus }>;
+  },
+  async changePassword(currentPassword: string, newPassword: string) {
+    const response = await fetch('/api/v1/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword })
+    });
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }

@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/status", s.authStatus)
 	mux.HandleFunc("/api/v1/auth/login", s.authLogin)
 	mux.HandleFunc("/api/v1/auth/logout", s.authLogout)
+	mux.HandleFunc("/api/v1/auth/password", s.authPassword)
 	mux.HandleFunc("/api/v1/dashboard/summary", s.summary)
 	mux.HandleFunc("/api/v1/traffic/topn", s.topn)
 	mux.HandleFunc("/api/v1/traffic/timeseries", s.timeseries)
@@ -2196,16 +2197,18 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 	if role == "" {
 		role = authRoleAdmin
 	}
+	canChangePassword := enabled && authenticated && s.managedUserExists(actor)
 	writeJSON(w, map[string]any{"data": map[string]any{
-		"enabled":         enabled,
-		"authenticated":   authenticated,
-		"actor":           actor,
-		"role":            role,
-		"can_write":       !enabled || (authenticated && boolCapability(role, "can_write")),
-		"can_export":      !enabled || (authenticated && boolCapability(role, "can_export")),
-		"can_audit":       !enabled || (authenticated && boolCapability(role, "can_audit")),
-		"can_configure":   !enabled || (authenticated && boolCapability(role, "can_configure")),
-		"can_investigate": !enabled || (authenticated && boolCapability(role, "can_investigate")),
+		"enabled":             enabled,
+		"authenticated":       authenticated,
+		"actor":               actor,
+		"role":                role,
+		"can_write":           !enabled || (authenticated && boolCapability(role, "can_write")),
+		"can_export":          !enabled || (authenticated && boolCapability(role, "can_export")),
+		"can_audit":           !enabled || (authenticated && boolCapability(role, "can_audit")),
+		"can_configure":       !enabled || (authenticated && boolCapability(role, "can_configure")),
+		"can_investigate":     !enabled || (authenticated && boolCapability(role, "can_investigate")),
+		"can_change_password": canChangePassword,
 	}})
 }
 
@@ -2215,7 +2218,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authEnabled() {
-		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator", "role": authRoleAdmin, "can_write": true, "can_export": true, "can_audit": true, "can_configure": true, "can_investigate": true}})
+		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator", "role": authRoleAdmin, "can_write": true, "can_export": true, "can_audit": true, "can_configure": true, "can_investigate": true, "can_change_password": false}})
 		return
 	}
 	var body struct {
@@ -2243,7 +2246,90 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.login", "console", "控制台登录："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
 	}
-	data := map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role}
+	data := map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role, "can_change_password": s.managedUserExists(identity.Actor)}
+	for key, value := range roleCapabilities(identity.Role) {
+		data[key] = value
+	}
+	writeJSON(w, map[string]any{"data": data})
+}
+
+func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authEnabled() {
+		http.Error(w, "authentication is disabled", http.StatusBadRequest)
+		return
+	}
+	identity, ok := s.verifyAuthRequest(r)
+	if !ok || strings.TrimSpace(identity.Actor) == "" {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.CurrentPassword) == "" {
+		http.Error(w, "current password is required", http.StatusBadRequest)
+		return
+	}
+	if len(body.NewPassword) < 8 {
+		http.Error(w, "new password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+	path := s.systemSettingsPath()
+	settings := s.loadSystemSettings()
+	userIdx := -1
+	for idx := range settings.Security.Users {
+		if settings.Security.Users[idx].Username == identity.Actor {
+			userIdx = idx
+			break
+		}
+	}
+	if userIdx < 0 || settings.Security.Users[userIdx].Status != "active" || strings.TrimSpace(settings.Security.Users[userIdx].PasswordHash) == "" {
+		http.Error(w, "managed user password is required", http.StatusBadRequest)
+		return
+	}
+	if settings.Security.Users[userIdx].LockedUntil > time.Now().Unix() {
+		http.Error(w, "user is locked", http.StatusForbidden)
+		return
+	}
+	if !verifyPasswordHash(body.CurrentPassword, settings.Security.Users[userIdx].PasswordHash) {
+		s.recordUserLoginFailure(identity.Actor)
+		if s.store != nil {
+			_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.password.failed", "user:"+identity.Actor, "修改密码失败："+identity.Actor, map[string]any{"actor": identity.Actor, "reason": "invalid_current_password"}, auditClientIP(r))
+		}
+		http.Error(w, "invalid current password", http.StatusUnauthorized)
+		return
+	}
+	passwordHash, err := hashPassword(body.NewPassword)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	now := time.Now().Unix()
+	settings.Security.Users[userIdx].PasswordHash = passwordHash
+	settings.Security.Users[userIdx].FailedLogins = 0
+	settings.Security.Users[userIdx].LockedUntil = 0
+	settings.Security.Users[userIdx].UpdatedAt = now
+	if err := config.SaveSystemSettings(path, settings); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.store != nil {
+		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.password.change", "user:"+identity.Actor, "修改密码："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
+	}
+	if err := s.setAuthCookie(w, identity.Actor, identity.Role); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	data := map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role, "can_change_password": true}
 	for key, value := range roleCapabilities(identity.Role) {
 		data[key] = value
 	}
@@ -2275,7 +2361,7 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.logout", "console", "控制台退出："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
 		}
 	}
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": "", "role": "", "can_write": false, "can_export": false, "can_audit": false, "can_configure": false, "can_investigate": false}})
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": "", "role": "", "can_write": false, "can_export": false, "can_audit": false, "can_configure": false, "can_investigate": false, "can_change_password": false}})
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {
@@ -2471,6 +2557,19 @@ func normalizeAuthRole(role string) string {
 func hasActiveUsers(users []config.UserAccount) bool {
 	for _, user := range users {
 		if user.Status == "active" && strings.TrimSpace(user.PasswordHash) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) managedUserExists(username string) bool {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return false
+	}
+	for _, user := range s.loadSystemSettings().Security.Users {
+		if user.Username == username && user.Status == "active" && strings.TrimSpace(user.PasswordHash) != "" {
 			return true
 		}
 	}

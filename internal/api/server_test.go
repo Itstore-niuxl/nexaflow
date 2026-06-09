@@ -139,6 +139,40 @@ func TestManagedUserLoginFailureLockout(t *testing.T) {
 	}
 }
 
+func TestAuthPasswordChangesManagedUserPassword(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("old-pass-123")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthSecret: "test-secret"})
+	token, err := server.signAuthToken("admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(`{"current_password":"old-pass-123","new_password":"new-pass-456"}`))
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	resp := httptest.NewRecorder()
+	server.authPassword(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected password change to pass, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if _, ok := server.loginIdentity("admin", "old-pass-123"); ok {
+		t.Fatal("old password should no longer authenticate")
+	}
+	if identity, ok := server.loginIdentity("admin", "new-pass-456"); !ok || identity.Role != authRoleAdmin {
+		t.Fatalf("new password should authenticate as admin, identity=%#v ok=%v", identity, ok)
+	}
+}
+
 func TestRequestPermission(t *testing.T) {
 	cases := []struct {
 		method string

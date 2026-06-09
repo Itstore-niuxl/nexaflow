@@ -10,6 +10,7 @@ import {
   Gauge,
   HardDrive,
   History,
+  KeyRound,
   LayoutDashboard,
   ListOrdered,
   MonitorDot,
@@ -663,12 +664,22 @@ const authStatus = ref<AuthStatus>({
   can_export: true,
   can_audit: true,
   can_configure: true,
-  can_investigate: true
+  can_investigate: true,
+  can_change_password: false
 });
 const loginActor = ref('operator');
 const loginPassword = ref('');
 const loginError = ref('');
 const loggingIn = ref(false);
+const passwordDialogOpen = ref(false);
+const changingPassword = ref(false);
+const passwordChangeError = ref('');
+const passwordChangeMessage = ref('');
+const passwordForm = ref({
+  current_password: '',
+  new_password: '',
+  confirm_password: ''
+});
 const switching = ref(false);
 const savingAlerts = ref(false);
 const savingAsset = ref(false);
@@ -2750,6 +2761,53 @@ const login = async () => {
   }
 };
 
+const resetPasswordForm = () => {
+  passwordForm.value = {
+    current_password: '',
+    new_password: '',
+    confirm_password: ''
+  };
+  passwordChangeError.value = '';
+};
+
+const openPasswordDialog = () => {
+  resetPasswordForm();
+  passwordChangeMessage.value = '';
+  passwordDialogOpen.value = true;
+};
+
+const closePasswordDialog = () => {
+  if (changingPassword.value) return;
+  passwordDialogOpen.value = false;
+  resetPasswordForm();
+};
+
+const changeOwnPassword = async () => {
+  if (!authStatus.value.can_change_password) return;
+  passwordChangeError.value = '';
+  passwordChangeMessage.value = '';
+  if (passwordForm.value.new_password.length < 8) {
+    passwordChangeError.value = '新密码至少 8 位';
+    return;
+  }
+  if (passwordForm.value.new_password !== passwordForm.value.confirm_password) {
+    passwordChangeError.value = '两次输入的新密码不一致';
+    return;
+  }
+  changingPassword.value = true;
+  try {
+    const result = await api.changePassword(passwordForm.value.current_password, passwordForm.value.new_password);
+    authStatus.value = result.data;
+    passwordDialogOpen.value = false;
+    resetPasswordForm();
+    passwordChangeMessage.value = '密码已更新';
+  } catch {
+    passwordChangeError.value = '修改失败，请检查当前密码';
+  } finally {
+    changingPassword.value = false;
+  }
+};
+
 const logout = async () => {
   if (timer) {
     window.clearInterval(timer);
@@ -4642,7 +4700,14 @@ const downloadBlob = (filename: string, blob: Blob) => {
         <div class="topbar-actions">
           <div class="status-chip auth-chip">
             <span>{{ authStatus.enabled ? `${authStatus.actor} / ${authRoleText}` : authRoleText }}</span>
+            <button v-if="authStatus.can_change_password" type="button" title="修改密码" @click="openPasswordDialog">
+              <KeyRound :size="14" />
+              <span>改密</span>
+            </button>
             <button v-if="authStatus.enabled" type="button" @click="logout">退出</button>
+          </div>
+          <div v-if="passwordChangeMessage" class="status-chip">
+            {{ passwordChangeMessage }}
           </div>
           <div class="status-chip" :class="{ warning: degraded }">
             <span class="status-dot" :class="{ offline: degraded }"></span>
@@ -8878,6 +8943,33 @@ const downloadBlob = (filename: string, blob: Blob) => {
           </article>
         </section>
       </template>
+    </section>
+    <section v-if="passwordDialogOpen" class="modal-backdrop" @click.self="closePasswordDialog">
+      <form class="security-dialog" @submit.prevent="changeOwnPassword">
+        <div class="panel-heading">
+          <h2>修改密码</h2>
+          <span>{{ authStatus.actor }}</span>
+        </div>
+        <label>
+          <span>当前密码</span>
+          <input v-model="passwordForm.current_password" type="password" autocomplete="current-password" />
+        </label>
+        <label>
+          <span>新密码</span>
+          <input v-model="passwordForm.new_password" type="password" autocomplete="new-password" />
+        </label>
+        <label>
+          <span>确认新密码</span>
+          <input v-model="passwordForm.confirm_password" type="password" autocomplete="new-password" />
+        </label>
+        <p v-if="passwordChangeError" class="muted-text negative">{{ passwordChangeError }}</p>
+        <div class="form-actions">
+          <button type="submit" :disabled="changingPassword || !passwordForm.current_password || !passwordForm.new_password || !passwordForm.confirm_password">
+            {{ changingPassword ? '更新中...' : '更新密码' }}
+          </button>
+          <button type="button" :disabled="changingPassword" @click="closePasswordDialog">取消</button>
+        </div>
+      </form>
     </section>
     </template>
   </main>
