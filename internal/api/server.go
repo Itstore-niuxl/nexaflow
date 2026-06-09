@@ -25,6 +25,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"nexaflow/internal/config"
 	"nexaflow/internal/model"
@@ -1701,6 +1702,10 @@ func (s *Server) systemSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := mergeSensitiveSystemSettings(current, body)
+	if err := validateSystemSettingsPasswords(body, next.Security.PasswordPolicy); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.SaveSystemSettings(path, next); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1787,6 +1792,10 @@ func (s *Server) systemSettingsImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := mergeSensitiveSystemSettings(s.loadSystemSettings(), body)
+	if err := validateSystemSettingsPasswords(body, next.Security.PasswordPolicy); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := config.SaveSystemSettings(s.systemSettingsPath(), next); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1802,7 +1811,7 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, map[string]any{"data": map[string]any{
-			"users":   publicUserAccounts(settings.Security.Users),
+			"users":   publicUserAccounts(settings.Security.Users, settings.Security.PasswordPolicy),
 			"summary": userAccountSummary(settings.Security.Users),
 			"roles":   []string{"admin", "analyst", "auditor", "viewer"},
 			"statuses": []string{
@@ -1840,6 +1849,10 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		passwordHash := ""
 		if strings.TrimSpace(body.Password) != "" {
+			if err := validatePasswordPolicy(body.Password, username, settings.Security.PasswordPolicy); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			hash, err := hashPassword(body.Password)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1871,19 +1884,21 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 				if !versionChanged {
 					users[found].AuthVersion = nextUserAuthVersion(users[found])
 				}
+				users[found].PasswordChangedAt = now
 				users[found].FailedLogins = 0
 				users[found].LockedUntil = 0
 			}
 		} else {
 			users = append(users, config.UserAccount{
-				Username:     username,
-				DisplayName:  strings.TrimSpace(body.DisplayName),
-				Role:         role,
-				Status:       status,
-				PasswordHash: passwordHash,
-				AuthVersion:  nextUserAuthVersion(config.UserAccount{}),
-				CreatedAt:    now,
-				UpdatedAt:    now,
+				Username:          username,
+				DisplayName:       strings.TrimSpace(body.DisplayName),
+				Role:              role,
+				Status:            status,
+				PasswordHash:      passwordHash,
+				AuthVersion:       nextUserAuthVersion(config.UserAccount{}),
+				PasswordChangedAt: now,
+				CreatedAt:         now,
+				UpdatedAt:         now,
 			})
 		}
 		users = normalizeUserSettings(users)
@@ -1898,10 +1913,10 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		saved := s.loadSystemSettings()
 		action := "system.user.upsert"
-		s.configSnapshot(r, "system", "users", action, "保存用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+		s.configSnapshot(r, "system", "users", action, "保存用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy)})
 		s.audit(r, action, "user:"+username, "保存用户："+username, map[string]any{"username": username, "role": role, "status": status})
 		writeJSON(w, map[string]any{"data": map[string]any{
-			"users":   publicUserAccounts(saved.Security.Users),
+			"users":   publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy),
 			"summary": userAccountSummary(saved.Security.Users),
 		}})
 	case http.MethodDelete:
@@ -1941,10 +1956,10 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		saved := s.loadSystemSettings()
 		action := "system.user.delete"
-		s.configSnapshot(r, "system", "users", action, "删除用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+		s.configSnapshot(r, "system", "users", action, "删除用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy)})
 		s.audit(r, action, "user:"+username, "删除用户："+username, map[string]any{"username": username})
 		writeJSON(w, map[string]any{"data": map[string]any{
-			"users":   publicUserAccounts(saved.Security.Users),
+			"users":   publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy),
 			"summary": userAccountSummary(saved.Security.Users),
 		}})
 	default:
@@ -1992,10 +2007,10 @@ func (s *Server) systemUserUnlock(w http.ResponseWriter, r *http.Request) {
 	}
 	saved := s.loadSystemSettings()
 	action := "system.user.unlock"
-	s.configSnapshot(r, "system", "users", action, "解锁用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+	s.configSnapshot(r, "system", "users", action, "解锁用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy)})
 	s.audit(r, action, "user:"+username, "解锁用户："+username, map[string]any{"username": username})
 	writeJSON(w, map[string]any{"data": map[string]any{
-		"users":   publicUserAccounts(saved.Security.Users),
+		"users":   publicUserAccounts(saved.Security.Users, saved.Security.PasswordPolicy),
 		"summary": userAccountSummary(saved.Security.Users),
 	}})
 }
@@ -2342,12 +2357,12 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "current password is required", http.StatusBadRequest)
 		return
 	}
-	if len(body.NewPassword) < 8 {
-		http.Error(w, "new password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
 	path := s.systemSettingsPath()
 	settings := s.loadSystemSettings()
+	if err := validatePasswordPolicy(body.NewPassword, identity.Actor, settings.Security.PasswordPolicy); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	userIdx := -1
 	for idx := range settings.Security.Users {
 		if settings.Security.Users[idx].Username == identity.Actor {
@@ -2379,6 +2394,7 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	settings.Security.Users[userIdx].PasswordHash = passwordHash
 	settings.Security.Users[userIdx].AuthVersion = nextUserAuthVersion(settings.Security.Users[userIdx])
+	settings.Security.Users[userIdx].PasswordChangedAt = now
 	settings.Security.Users[userIdx].FailedLogins = 0
 	settings.Security.Users[userIdx].LockedUntil = 0
 	settings.Security.Users[userIdx].UpdatedAt = now
@@ -2638,6 +2654,52 @@ func (s *Server) managedUserExists(username string) bool {
 		}
 	}
 	return false
+}
+
+func validatePasswordPolicy(password, username string, policy config.PasswordPolicy) error {
+	password = strings.TrimSpace(password)
+	username = strings.TrimSpace(strings.ToLower(username))
+	if policy.MinLength <= 0 {
+		policy.MinLength = 8
+	}
+	if policy.MinLength < 6 {
+		policy.MinLength = 6
+	}
+	if len([]rune(password)) < policy.MinLength {
+		return fmt.Errorf("password must be at least %d characters", policy.MinLength)
+	}
+	hasUpper := false
+	hasLower := false
+	hasNumber := false
+	hasSpecial := false
+	for _, char := range password {
+		switch {
+		case unicode.IsUpper(char):
+			hasUpper = true
+		case unicode.IsLower(char):
+			hasLower = true
+		case unicode.IsDigit(char):
+			hasNumber = true
+		case unicode.IsPunct(char) || unicode.IsSymbol(char):
+			hasSpecial = true
+		}
+	}
+	if policy.RequireUppercase && !hasUpper {
+		return fmt.Errorf("password must include an uppercase letter")
+	}
+	if policy.RequireLowercase && !hasLower {
+		return fmt.Errorf("password must include a lowercase letter")
+	}
+	if policy.RequireNumber && !hasNumber {
+		return fmt.Errorf("password must include a number")
+	}
+	if policy.RequireSpecial && !hasSpecial {
+		return fmt.Errorf("password must include a special character")
+	}
+	if policy.PreventUsernameInPass && username != "" && strings.Contains(strings.ToLower(password), username) {
+		return fmt.Errorf("password must not contain the username")
+	}
+	return nil
 }
 
 func userAuthVersion(user config.UserAccount) int {
@@ -3043,6 +3105,7 @@ func (s *Server) publicSystemSettings(settings config.SystemSettings) map[string
 			"session_ttl_hours":       settings.Security.SessionTTLHours,
 			"max_login_failures":      settings.Security.MaxLoginFailures,
 			"lockout_minutes":         settings.Security.LockoutMinutes,
+			"password_policy":         settings.Security.PasswordPolicy,
 			"require_audit_for_write": settings.Security.RequireAuditForWrite,
 			"allow_frontend_secrets":  settings.Security.AllowFrontendSecrets,
 		},
@@ -3063,26 +3126,35 @@ func (s *Server) publicSystemSettings(settings config.SystemSettings) map[string
 	}
 }
 
-func publicUserAccounts(users []config.UserAccount) []map[string]any {
+func publicUserAccounts(users []config.UserAccount, policies ...config.PasswordPolicy) []map[string]any {
 	items := []map[string]any{}
-	for _, user := range normalizeUserSettings(users) {
+	normalized := normalizeUserSettings(users)
+	policy := config.DefaultSystemSettings(config.Config{}).Security.PasswordPolicy
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	for _, user := range normalized {
+		expiresAt, expired := passwordExpiry(user, policy)
 		items = append(items, map[string]any{
-			"username":           user.Username,
-			"display_name":       user.DisplayName,
-			"role":               user.Role,
-			"status":             user.Status,
-			"password_set":       strings.TrimSpace(user.PasswordHash) != "",
-			"created_at":         user.CreatedAt,
-			"updated_at":         user.UpdatedAt,
-			"last_login_at":      user.LastLoginAt,
-			"failed_login_count": user.FailedLogins,
-			"locked_until":       user.LockedUntil,
-			"locked":             user.LockedUntil > time.Now().Unix(),
-			"can_write":          user.Status == "active" && boolCapability(user.Role, "can_write"),
-			"can_export":         user.Status == "active" && boolCapability(user.Role, "can_export"),
-			"can_audit":          user.Status == "active" && boolCapability(user.Role, "can_audit"),
-			"can_configure":      user.Status == "active" && boolCapability(user.Role, "can_configure"),
-			"can_investigate":    user.Status == "active" && boolCapability(user.Role, "can_investigate"),
+			"username":            user.Username,
+			"display_name":        user.DisplayName,
+			"role":                user.Role,
+			"status":              user.Status,
+			"password_set":        strings.TrimSpace(user.PasswordHash) != "",
+			"password_changed_at": user.PasswordChangedAt,
+			"password_expires_at": expiresAt,
+			"password_expired":    expired,
+			"created_at":          user.CreatedAt,
+			"updated_at":          user.UpdatedAt,
+			"last_login_at":       user.LastLoginAt,
+			"failed_login_count":  user.FailedLogins,
+			"locked_until":        user.LockedUntil,
+			"locked":              user.LockedUntil > time.Now().Unix(),
+			"can_write":           user.Status == "active" && boolCapability(user.Role, "can_write"),
+			"can_export":          user.Status == "active" && boolCapability(user.Role, "can_export"),
+			"can_audit":           user.Status == "active" && boolCapability(user.Role, "can_audit"),
+			"can_configure":       user.Status == "active" && boolCapability(user.Role, "can_configure"),
+			"can_investigate":     user.Status == "active" && boolCapability(user.Role, "can_investigate"),
 		})
 	}
 	return items
@@ -3101,6 +3173,14 @@ func roleCapabilities(role string) map[string]bool {
 
 func boolCapability(role, capability string) bool {
 	return roleCapabilities(role)[capability]
+}
+
+func passwordExpiry(user config.UserAccount, policy config.PasswordPolicy) (int64, bool) {
+	if strings.TrimSpace(user.PasswordHash) == "" || policy.ExpireDays <= 0 || user.PasswordChangedAt <= 0 {
+		return 0, false
+	}
+	expiresAt := user.PasswordChangedAt + int64(policy.ExpireDays*24*60*60)
+	return expiresAt, expiresAt <= time.Now().Unix()
 }
 
 func userAccountSummary(users []config.UserAccount) map[string]any {
@@ -3166,6 +3246,20 @@ func mergeSensitiveSystemSettings(current, next config.SystemSettings) config.Sy
 		next.Security.Users = current.Security.Users
 	}
 	return next
+}
+
+func validateSystemSettingsPasswords(candidate config.SystemSettings, policy config.PasswordPolicy) error {
+	if password := strings.TrimSpace(candidate.Security.AdminPassword); password != "" && !isMaskedSecret(password) {
+		if err := validatePasswordPolicy(password, "admin", policy); err != nil {
+			return fmt.Errorf("admin password policy violation: %w", err)
+		}
+	}
+	if password := strings.TrimSpace(candidate.Security.ReadOnlyPassword); password != "" && !isMaskedSecret(password) {
+		if err := validatePasswordPolicy(password, "viewer", policy); err != nil {
+			return fmt.Errorf("readonly password policy violation: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) decodeSettingsCandidate(r *http.Request) (config.SystemSettings, error) {

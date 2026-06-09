@@ -156,6 +156,15 @@ const emptySystemSettings = (): SystemSettings => ({
     session_ttl_hours: 12,
     max_login_failures: 5,
     lockout_minutes: 15,
+    password_policy: {
+      min_length: 8,
+      require_uppercase: false,
+      require_lowercase: false,
+      require_number: true,
+      require_special: false,
+      expire_days: 0,
+      prevent_username_in_password: true
+    },
     require_audit_for_write: true,
     allow_frontend_secrets: true
   },
@@ -2615,7 +2624,13 @@ const normalizeSettingsForForm = (settings: SystemSettings): SystemSettings => (
   ...settings,
   ai: { ...emptySystemSettings().ai, ...settings.ai, api_key: '' },
   analysis: { ...emptySystemSettings().analysis, ...settings.analysis },
-  security: { ...emptySystemSettings().security, ...settings.security, admin_password: '', readonly_password: '' },
+  security: {
+    ...emptySystemSettings().security,
+    ...settings.security,
+    password_policy: { ...emptySystemSettings().security.password_policy, ...settings.security?.password_policy },
+    admin_password: '',
+    readonly_password: ''
+  },
   notification: { ...emptySystemSettings().notification, ...settings.notification, webhook_token: '', channels: settings.notification?.channels ?? [] },
   data: { ...emptySystemSettings().data, ...settings.data },
   backend: { ...emptySystemSettings().backend, ...settings.backend }
@@ -2798,8 +2813,9 @@ const changeOwnPassword = async () => {
   if (!authStatus.value.can_change_password) return;
   passwordChangeError.value = '';
   passwordChangeMessage.value = '';
-  if (passwordForm.value.new_password.length < 8) {
-    passwordChangeError.value = '新密码至少 8 位';
+  const minLength = systemSettings.value.security.password_policy.min_length || 8;
+  if (passwordForm.value.new_password.length < minLength) {
+    passwordChangeError.value = `新密码至少 ${minLength} 位`;
     return;
   }
   if (passwordForm.value.new_password !== passwordForm.value.confirm_password) {
@@ -8741,9 +8757,16 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <label><span>会话时长小时</span><input v-model.number="systemSettings.security.session_ttl_hours" type="number" min="1" max="168" /></label>
               <label><span>失败锁定阈值</span><input v-model.number="systemSettings.security.max_login_failures" type="number" min="1" max="20" /></label>
               <label><span>锁定分钟数</span><input v-model.number="systemSettings.security.lockout_minutes" type="number" min="1" max="1440" /></label>
+              <label><span>密码最小长度</span><input v-model.number="systemSettings.security.password_policy.min_length" type="number" min="6" max="128" /></label>
+              <label><span>密码过期天数</span><input v-model.number="systemSettings.security.password_policy.expire_days" type="number" min="0" max="3650" /></label>
             </div>
             <label class="check-row"><input v-model="systemSettings.security.auth_enabled" type="checkbox" /> 启用控制台登录保护</label>
             <label class="check-row"><input v-model="systemSettings.security.readonly_enabled" type="checkbox" /> 启用观察员只读角色</label>
+            <label class="check-row"><input v-model="systemSettings.security.password_policy.require_uppercase" type="checkbox" /> 密码必须包含大写字母</label>
+            <label class="check-row"><input v-model="systemSettings.security.password_policy.require_lowercase" type="checkbox" /> 密码必须包含小写字母</label>
+            <label class="check-row"><input v-model="systemSettings.security.password_policy.require_number" type="checkbox" /> 密码必须包含数字</label>
+            <label class="check-row"><input v-model="systemSettings.security.password_policy.require_special" type="checkbox" /> 密码必须包含特殊字符</label>
+            <label class="check-row"><input v-model="systemSettings.security.password_policy.prevent_username_in_password" type="checkbox" /> 禁止密码包含用户名</label>
             <label class="check-row"><input v-model="systemSettings.security.require_audit_for_write" type="checkbox" /> 写操作强制记录审计</label>
             <label class="check-row"><input v-model="systemSettings.security.allow_frontend_secrets" type="checkbox" /> 允许前端维护敏感配置</label>
           </section>
@@ -8792,7 +8815,12 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ user.display_name }}</td>
                 <td>{{ userRoleText(user.role) }}</td>
                 <td><span class="severity-pill" :class="user.status === 'active' ? 'healthy' : 'warning'">{{ userStatusText(user.status) }}</span></td>
-                <td>{{ user.password_set ? '已设置' : '未设置' }}</td>
+                <td>
+                  <span class="severity-pill" :class="user.password_expired ? 'critical' : user.password_set ? 'healthy' : 'warning'">{{ user.password_expired ? '已过期' : user.password_set ? '已设置' : '未设置' }}</span>
+                  <span class="cell-subtle">
+                    {{ user.password_expires_at ? `到期 ${formatTime(user.password_expires_at)}` : user.password_changed_at ? `更新 ${formatTime(user.password_changed_at)}` : '未记录' }}
+                  </span>
+                </td>
                 <td>
                   <span class="cell-subtle">
                     {{ user.locked ? `锁定至 ${formatTime(user.locked_until ?? 0)}` : `失败 ${user.failed_login_count ?? 0} 次` }}

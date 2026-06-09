@@ -128,6 +128,15 @@ export interface SystemSettings {
     session_ttl_hours: number;
     max_login_failures: number;
     lockout_minutes: number;
+    password_policy: {
+      min_length: number;
+      require_uppercase: boolean;
+      require_lowercase: boolean;
+      require_number: boolean;
+      require_special: boolean;
+      expire_days: number;
+      prevent_username_in_password: boolean;
+    };
     require_audit_for_write: boolean;
     allow_frontend_secrets: boolean;
   };
@@ -169,6 +178,9 @@ export interface SystemUser {
   created_at: number;
   updated_at: number;
   last_login_at?: number;
+  password_changed_at?: number;
+  password_expires_at?: number;
+  password_expired?: boolean;
   can_write?: boolean;
   can_export?: boolean;
   can_audit?: boolean;

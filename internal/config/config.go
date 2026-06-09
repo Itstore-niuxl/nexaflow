@@ -72,30 +72,42 @@ type AnalysisSettings struct {
 }
 
 type SecuritySettings struct {
-	AuthEnabled          bool          `json:"auth_enabled"`
-	ReadOnlyEnabled      bool          `json:"readonly_enabled"`
-	AdminPassword        string        `json:"admin_password,omitempty"`
-	ReadOnlyPassword     string        `json:"readonly_password,omitempty"`
-	Users                []UserAccount `json:"users,omitempty"`
-	SessionTTLHours      int           `json:"session_ttl_hours"`
-	MaxLoginFailures     int           `json:"max_login_failures"`
-	LockoutMinutes       int           `json:"lockout_minutes"`
-	RequireAuditForWrite bool          `json:"require_audit_for_write"`
-	AllowFrontendSecrets bool          `json:"allow_frontend_secrets"`
+	AuthEnabled          bool           `json:"auth_enabled"`
+	ReadOnlyEnabled      bool           `json:"readonly_enabled"`
+	AdminPassword        string         `json:"admin_password,omitempty"`
+	ReadOnlyPassword     string         `json:"readonly_password,omitempty"`
+	Users                []UserAccount  `json:"users,omitempty"`
+	SessionTTLHours      int            `json:"session_ttl_hours"`
+	MaxLoginFailures     int            `json:"max_login_failures"`
+	LockoutMinutes       int            `json:"lockout_minutes"`
+	PasswordPolicy       PasswordPolicy `json:"password_policy"`
+	RequireAuditForWrite bool           `json:"require_audit_for_write"`
+	AllowFrontendSecrets bool           `json:"allow_frontend_secrets"`
+}
+
+type PasswordPolicy struct {
+	MinLength             int  `json:"min_length"`
+	RequireUppercase      bool `json:"require_uppercase"`
+	RequireLowercase      bool `json:"require_lowercase"`
+	RequireNumber         bool `json:"require_number"`
+	RequireSpecial        bool `json:"require_special"`
+	ExpireDays            int  `json:"expire_days"`
+	PreventUsernameInPass bool `json:"prevent_username_in_password"`
 }
 
 type UserAccount struct {
-	Username     string `json:"username"`
-	DisplayName  string `json:"display_name"`
-	Role         string `json:"role"`
-	Status       string `json:"status"`
-	PasswordHash string `json:"password_hash,omitempty"`
-	AuthVersion  int    `json:"auth_version,omitempty"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
-	LastLoginAt  int64  `json:"last_login_at,omitempty"`
-	FailedLogins int    `json:"failed_logins,omitempty"`
-	LockedUntil  int64  `json:"locked_until,omitempty"`
+	Username          string `json:"username"`
+	DisplayName       string `json:"display_name"`
+	Role              string `json:"role"`
+	Status            string `json:"status"`
+	PasswordHash      string `json:"password_hash,omitempty"`
+	AuthVersion       int    `json:"auth_version,omitempty"`
+	PasswordChangedAt int64  `json:"password_changed_at,omitempty"`
+	CreatedAt         int64  `json:"created_at"`
+	UpdatedAt         int64  `json:"updated_at"`
+	LastLoginAt       int64  `json:"last_login_at,omitempty"`
+	FailedLogins      int    `json:"failed_logins,omitempty"`
+	LockedUntil       int64  `json:"locked_until,omitempty"`
 }
 
 type NotificationSettings struct {
@@ -277,13 +289,22 @@ func DefaultSystemSettings(cfg Config) SystemSettings {
 			ReportDefaultMinutes:      60,
 		},
 		Security: SecuritySettings{
-			AuthEnabled:          strings.TrimSpace(cfg.AuthPassword) != "" || strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
-			ReadOnlyEnabled:      strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
-			AdminPassword:        cfg.AuthPassword,
-			ReadOnlyPassword:     cfg.AuthReadOnlyPassword,
-			SessionTTLHours:      12,
-			MaxLoginFailures:     5,
-			LockoutMinutes:       15,
+			AuthEnabled:      strings.TrimSpace(cfg.AuthPassword) != "" || strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
+			ReadOnlyEnabled:  strings.TrimSpace(cfg.AuthReadOnlyPassword) != "",
+			AdminPassword:    cfg.AuthPassword,
+			ReadOnlyPassword: cfg.AuthReadOnlyPassword,
+			SessionTTLHours:  12,
+			MaxLoginFailures: 5,
+			LockoutMinutes:   15,
+			PasswordPolicy: PasswordPolicy{
+				MinLength:             8,
+				RequireUppercase:      false,
+				RequireLowercase:      false,
+				RequireNumber:         true,
+				RequireSpecial:        false,
+				ExpireDays:            0,
+				PreventUsernameInPass: true,
+			},
 			RequireAuditForWrite: true,
 			AllowFrontendSecrets: true,
 		},
@@ -464,6 +485,7 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	if settings.Security.LockoutMinutes > 1440 {
 		settings.Security.LockoutMinutes = 1440
 	}
+	settings.Security.PasswordPolicy = normalizePasswordPolicy(settings.Security.PasswordPolicy)
 	settings.Security.Users = normalizeUserAccounts(settings.Security.Users)
 	if !settings.Security.AuthEnabled {
 		settings.Security.ReadOnlyEnabled = false
@@ -497,6 +519,32 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	return settings
 }
 
+func normalizePasswordPolicy(policy PasswordPolicy) PasswordPolicy {
+	if policy.MinLength == 0 && !policy.RequireUppercase && !policy.RequireLowercase && !policy.RequireNumber && !policy.RequireSpecial && policy.ExpireDays == 0 && !policy.PreventUsernameInPass {
+		return PasswordPolicy{
+			MinLength:             8,
+			RequireNumber:         true,
+			PreventUsernameInPass: true,
+		}
+	}
+	if policy.MinLength <= 0 {
+		policy.MinLength = 8
+	}
+	if policy.MinLength < 6 {
+		policy.MinLength = 6
+	}
+	if policy.MinLength > 128 {
+		policy.MinLength = 128
+	}
+	if policy.ExpireDays < 0 {
+		policy.ExpireDays = 0
+	}
+	if policy.ExpireDays > 3650 {
+		policy.ExpireDays = 3650
+	}
+	return policy
+}
+
 func normalizeUserAccounts(users []UserAccount) []UserAccount {
 	if users == nil {
 		return nil
@@ -524,6 +572,12 @@ func normalizeUserAccounts(users []UserAccount) []UserAccount {
 		}
 		if user.UpdatedAt <= 0 {
 			user.UpdatedAt = user.CreatedAt
+		}
+		if strings.TrimSpace(user.PasswordHash) != "" && user.PasswordChangedAt <= 0 {
+			user.PasswordChangedAt = user.UpdatedAt
+			if user.PasswordChangedAt <= 0 {
+				user.PasswordChangedAt = now
+			}
 		}
 		normalized = append(normalized, user)
 	}

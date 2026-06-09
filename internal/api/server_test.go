@@ -173,6 +173,59 @@ func TestAuthPasswordChangesManagedUserPassword(t *testing.T) {
 	}
 }
 
+func TestAuthPasswordEnforcesConfiguredPolicy(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("old-pass-123")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.PasswordPolicy.RequireSpecial = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 1, PasswordChangedAt: time.Now().Unix()},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthSecret: "test-secret"})
+	token, err := server.signAuthToken("admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", strings.NewReader(`{"current_password":"old-pass-123","new_password":"newpass456"}`))
+	req.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	resp := httptest.NewRecorder()
+	server.authPassword(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected weak password to be rejected, got %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestSystemUsersRejectsWeakPassword(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass-123")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.PasswordPolicy.MinLength = 12
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 1, PasswordChangedAt: time.Now().Unix()},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/users", strings.NewReader(`{"username":"alice","display_name":"Alice","role":"analyst","status":"active","password":"short1"}`))
+	resp := httptest.NewRecorder()
+	server.systemUsers(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected weak user password to be rejected, got %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestSystemUserUnlockClearsLockout(t *testing.T) {
 	runtimePath := t.TempDir() + "/runtime.json"
 	passwordHash, err := hashPassword("admin-pass")
