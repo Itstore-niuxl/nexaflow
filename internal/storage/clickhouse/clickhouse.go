@@ -1499,37 +1499,37 @@ func (s *Store) flowSessions(ctx context.Context, q string, minutes, limit int) 
 	if q = strings.TrimSpace(q); q != "" {
 		escaped := escape(q)
 		where = fmt.Sprintf(` AND (
-    position(flow_key, '%s') > 0 OR
-    position(src_ip, '%s') > 0 OR
-    position(dst_ip, '%s') > 0 OR
-    position(service, '%s') > 0 OR
-    position(category, '%s') > 0 OR
-    position(protocol, '%s') > 0 OR
-    toString(src_port) = '%s' OR
-    toString(dst_port) = '%s'
+    position(fs.flow_key, '%s') > 0 OR
+    position(fs.src_ip, '%s') > 0 OR
+    position(fs.dst_ip, '%s') > 0 OR
+    position(fs.service, '%s') > 0 OR
+    position(fs.category, '%s') > 0 OR
+    position(fs.protocol, '%s') > 0 OR
+    toString(fs.src_port) = '%s' OR
+    toString(fs.dst_port) = '%s'
 )`, escaped, escaped, escaped, escaped, escaped, escaped, escaped, escaped)
 	}
 	query := fmt.Sprintf(`SELECT
-    flow_key AS key,
-    any(src_ip) AS src_ip,
-    any(toString(src_port)) AS src_port,
-    any(dst_ip) AS dst_ip,
-    any(toString(dst_port)) AS dst_port,
-    any(protocol) AS protocol,
-    any(service) AS service,
-    any(category) AS category,
-    any(risk) AS risk,
-    any(direction) AS direction,
-    any(server_ip) AS server_ip,
-    any(toString(server_port)) AS server_port,
-    any(client_ip) AS client_ip,
-    any(confidence) AS confidence,
-    sum(bytes) AS bytes,
-    sum(packets) AS packets,
-    min(toUnixTimestamp(ts)) AS first_seen,
-    max(toUnixTimestamp(ts)) AS last_seen
-FROM %s.flow_sessions_5s
-WHERE ts >= now() - INTERVAL %d MINUTE%s
+    fs.flow_key AS key,
+    any(fs.src_ip) AS src_ip,
+    any(toString(fs.src_port)) AS src_port,
+    any(fs.dst_ip) AS dst_ip,
+    any(toString(fs.dst_port)) AS dst_port,
+    any(fs.protocol) AS protocol,
+    any(fs.service) AS service,
+    any(fs.category) AS category,
+    any(fs.risk) AS risk,
+    any(fs.direction) AS direction,
+    any(fs.server_ip) AS server_ip,
+    any(toString(fs.server_port)) AS server_port,
+    any(fs.client_ip) AS client_ip,
+    any(fs.confidence) AS confidence,
+    sum(fs.bytes) AS bytes,
+    sum(fs.packets) AS packets,
+    min(toUnixTimestamp(fs.ts)) AS first_seen,
+    max(toUnixTimestamp(fs.ts)) AS last_seen
+FROM %s.flow_sessions_5s AS fs
+WHERE fs.ts >= now() - INTERVAL %d MINUTE%s
 GROUP BY key
 ORDER BY bytes DESC
 LIMIT %d

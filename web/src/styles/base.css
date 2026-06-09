@@ -1439,6 +1439,68 @@ td {
   color: #2563eb;
 }
 
+.evidence-item-list {
+  display: grid;
+  gap: 10px;
+}
+
+.evidence-item-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.94);
+}
+
+.evidence-item-list.compact article {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.evidence-item-list strong,
+.evidence-item-list span,
+.evidence-item-list small {
+  display: block;
+  min-width: 0;
+}
+
+.evidence-item-list strong {
+  margin-top: 7px;
+  color: #0f1f3d;
+  font-size: 14px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.evidence-item-list span {
+  margin-top: 5px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.evidence-item-list small {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.degraded-reason-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 10px 12px 10px 28px;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .ai-workbench-actions {
   display: flex;
   gap: 10px;

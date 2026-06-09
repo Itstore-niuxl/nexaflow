@@ -711,6 +711,34 @@ export interface IncidentRecurrence {
   conclusion: string;
 }
 
+export interface IncidentEvidenceItem {
+  id: string;
+  kind: string;
+  title: string;
+  target: string;
+  summary: string;
+  severity: string;
+  source: string;
+  detail: Record<string, unknown>;
+}
+
+export interface IncidentContextQuality {
+  status: string;
+  score: number;
+  sessions: number;
+  insights: number;
+  anomalies: number;
+  search_results: number;
+  relation_flows: number;
+  profiles: number;
+  timeline_entries: number;
+  similar_incidents: number;
+  degraded: boolean;
+  degraded_reasons: string[];
+  generated_at_unix?: number;
+  evidence_item_hint?: string;
+}
+
 export interface ReportRecommendation {
   level: string;
   title: string;
@@ -808,6 +836,9 @@ export interface AIIncidentInvestigation {
   summary: AISummary;
   root_causes: string[];
   evidence_chain: string[];
+  evidence_items: IncidentEvidenceItem[];
+  context_quality: IncidentContextQuality;
+  degraded_reasons: string[];
   next_steps: string[];
   similar_incidents: SimilarIncident[];
   recurrence: IncidentRecurrence;

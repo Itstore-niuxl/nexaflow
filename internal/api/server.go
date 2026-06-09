@@ -797,9 +797,10 @@ func (s *Server) aiIncidentInvestigation(w http.ResponseWriter, r *http.Request)
 		contextData, contextErr = s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
 	}
 	similar := findSimilarAIIncidents(incident, history, limit)
+	degradedReasons := aiIncidentDegradedReasons(incidentErr, contextErr, contextData, timelineErr, historyErr)
 	writeJSON(w, map[string]any{
-		"data":     buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, timeline, similar),
-		"degraded": incidentErr != nil || (contextErr != nil && !aiIncidentContextUsable(contextData)) || timelineErr != nil || historyErr != nil,
+		"data":     buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, timeline, similar, degradedReasons),
+		"degraded": len(degradedReasons) > 0,
 	})
 }
 

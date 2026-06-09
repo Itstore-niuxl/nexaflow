@@ -397,6 +397,22 @@ const emptyAIIncidentInvestigation = (): AIIncidentInvestigation => ({
   summary: emptyAISummary('incident'),
   root_causes: [],
   evidence_chain: [],
+  evidence_items: [],
+  context_quality: {
+    status: 'weak',
+    score: 0,
+    sessions: 0,
+    insights: 0,
+    anomalies: 0,
+    search_results: 0,
+    relation_flows: 0,
+    profiles: 0,
+    timeline_entries: 0,
+    similar_incidents: 0,
+    degraded: false,
+    degraded_reasons: []
+  },
+  degraded_reasons: [],
   next_steps: [],
   similar_incidents: [],
   recurrence: {
@@ -1830,6 +1846,25 @@ const refresh = async () => {
       summary: incidentAISummary.value,
       root_causes: ['相似事件反复出现，优先检查是否存在未关闭的业务模式、误报规则或长期暴露面', '公网扫描、异常外联或服务暴露扩大', '业务流量峰值或计划内变更'],
       evidence_chain: ['事件对象：211.93.22.130 -> 10.2.0.12', '关联会话：1 条', '相似事件：2 条，复发判断：同一对象已出现 1 条相似记录，需按复发事件处理'],
+      evidence_items: [
+        { id: 'session-demo', kind: 'session', title: '关联会话', target: '211.93.22.130 -> 10.2.0.12:8081 / tcp', summary: 'HTTP Alternate，流量 6.68 MB，包数 6,800，风险中', severity: 'medium', source: 'flow_sessions_5s', detail: { bytes: 7000000, packets: 6800, service: 'HTTP Alternate' } },
+        { id: 'recurrence-demo', kind: 'recurrence', title: '复发判断', target: '211.93.22.130 -> 10.2.0.12', summary: '同一对象已出现 1 条相似记录，需按复发事件处理', severity: 'warning', source: 'incident_history', detail: { similar_count: 2, unresolved_count: 1 } }
+      ],
+      context_quality: {
+        status: 'complete',
+        score: 86,
+        sessions: 1,
+        insights: 1,
+        anomalies: 1,
+        search_results: 1,
+        relation_flows: 2,
+        profiles: 2,
+        timeline_entries: incidentTimeline.value.length,
+        similar_incidents: 2,
+        degraded: false,
+        degraded_reasons: []
+      },
+      degraded_reasons: [],
       next_steps: ['先核对相似事件的最近处置记录，判断是重复告警、规则噪声还是同一风险未根除。', '查看首要关联会话，确认源、目的、端口和服务用途。'],
       similar_incidents: [
         { id: 'sample-similar-1', subject: '211.93.22.130 -> 10.2.0.12', kind: 'external_session_burst', category: '公网暴露', severity: 'warning', status: 'ack', summary: '同一公网对端重复访问内部服务', first_seen: now - 7200, last_seen: now - 3600, score: 82, similarity: 100, reason: '对象相同、类型相同' },
@@ -4626,6 +4661,41 @@ const exportCSV = (filename: string, rows: string[][]) => {
           </section>
         </section>
 
+        <section class="command-grid">
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>结构化证据</h2>
+              <span>{{ incidentInvestigation.evidence_items.length.toLocaleString() }} 条 / {{ incidentInvestigation.context_quality.status }}</span>
+            </div>
+            <div v-if="incidentInvestigation.evidence_items.length === 0" class="empty-state">暂无结构化证据</div>
+            <div v-else class="evidence-item-list">
+              <article v-for="item in incidentInvestigation.evidence_items.slice(0, 5)" :key="`ai-evidence-item-${item.id}`">
+                <div>
+                  <b class="severity-pill" :class="item.severity">{{ item.title }}</b>
+                  <strong>{{ item.target }}</strong>
+                  <span>{{ item.summary }}</span>
+                </div>
+                <small>{{ item.source }} / {{ item.kind }}</small>
+              </article>
+            </div>
+          </section>
+          <section class="ai-summary-card">
+            <div class="panel-heading">
+              <h2>上下文质量</h2>
+              <span>{{ incidentInvestigation.context_quality.score }}%</span>
+            </div>
+            <div class="incident-context-summary">
+              <div><span>会话</span><strong>{{ incidentInvestigation.context_quality.sessions.toLocaleString() }}</strong></div>
+              <div><span>画像</span><strong>{{ incidentInvestigation.context_quality.profiles.toLocaleString() }}</strong></div>
+              <div><span>关系</span><strong>{{ incidentInvestigation.context_quality.relation_flows.toLocaleString() }}</strong></div>
+              <div><span>相似</span><strong>{{ incidentInvestigation.context_quality.similar_incidents.toLocaleString() }}</strong></div>
+            </div>
+            <ul v-if="incidentInvestigation.degraded_reasons.length" class="degraded-reason-list">
+              <li v-for="reason in incidentInvestigation.degraded_reasons" :key="`ai-invest-degraded-${reason}`">{{ reason }}</li>
+            </ul>
+          </section>
+        </section>
+
         <section class="tables-grid analysis-grid">
           <section class="table-panel">
             <div class="panel-heading">
@@ -6534,6 +6604,31 @@ const exportCSV = (filename: string, rows: string[][]) => {
               </tbody>
             </table>
             <div v-else class="empty-state">暂无相似事件</div>
+          </div>
+          <div class="ai-summary-card compact">
+            <div class="panel-heading">
+              <h2>调查证据</h2>
+              <span>{{ loadingIncidentAI ? '加载中...' : `${incidentInvestigation.context_quality.score}% / ${incidentInvestigation.evidence_items.length.toLocaleString()} 条证据` }}</span>
+            </div>
+            <div class="incident-context-summary">
+              <div><span>会话</span><strong>{{ incidentInvestigation.context_quality.sessions.toLocaleString() }}</strong></div>
+              <div><span>线索/异常</span><strong>{{ (incidentInvestigation.context_quality.insights + incidentInvestigation.context_quality.anomalies).toLocaleString() }}</strong></div>
+              <div><span>画像</span><strong>{{ incidentInvestigation.context_quality.profiles.toLocaleString() }}</strong></div>
+              <div><span>状态</span><strong>{{ incidentInvestigation.context_quality.degraded ? '部分降级' : '完整' }}</strong></div>
+            </div>
+            <div v-if="incidentInvestigation.evidence_items.length" class="evidence-item-list compact">
+              <article v-for="item in incidentInvestigation.evidence_items.slice(0, 4)" :key="`incident-evidence-item-${item.id}`">
+                <div>
+                  <b class="severity-pill" :class="item.severity">{{ item.title }}</b>
+                  <strong>{{ item.target }}</strong>
+                  <span>{{ item.summary }}</span>
+                </div>
+                <small>{{ item.source }}</small>
+              </article>
+            </div>
+            <ul v-if="incidentInvestigation.degraded_reasons.length" class="degraded-reason-list">
+              <li v-for="reason in incidentInvestigation.degraded_reasons" :key="`incident-degraded-${reason}`">{{ reason }}</li>
+            </ul>
           </div>
           <div class="playbook-list">
             <article v-for="action in incidentContext.playbook_actions" :key="action.label">

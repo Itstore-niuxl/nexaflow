@@ -160,7 +160,7 @@ func buildAIQueryResponse(options aiSummaryOptions, intent aiQueryIntent, rows [
 	}
 }
 
-func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextData map[string]any, timeline, similarIncidents []map[string]any) map[string]any {
+func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextData map[string]any, timeline, similarIncidents []map[string]any, degradedReasons []string) map[string]any {
 	if timeline == nil {
 		timeline = []map[string]any{}
 	}
@@ -173,6 +173,8 @@ func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextDat
 	insights := sliceValue(contextData["insights"])
 	anomalies := sliceValue(contextData["anomalies"])
 	recurrence := incidentRecurrenceSummary(subject, similarIncidents, timeline)
+	contextQuality := aiIncidentContextQuality(contextData, timeline, similarIncidents, degradedReasons)
+	evidenceItems := aiIncidentEvidenceItems(incident, contextData, timeline, similarIncidents, recurrence)
 	rootCauses := []string{"业务流量峰值或计划内变更", "公网扫描、异常外联或服务暴露扩大", "采集质量异常导致指标失真"}
 	if len(insights) > 0 {
 		rootCauses = append([]string{"规则或风险线索命中，优先核对命中对象是否符合业务白名单"}, rootCauses...)
@@ -190,6 +192,10 @@ func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextDat
 		fmt.Sprintf("异常波动：%d 条", len(anomalies)),
 		fmt.Sprintf("处置时间线：%d 条", len(timeline)),
 		fmt.Sprintf("相似事件：%d 条，复发判断：%s", len(similarIncidents), stringValue(recurrence["conclusion"])),
+		fmt.Sprintf("上下文完整度：%d%%，状态：%s", int(int64Value(contextQuality["score"])), stringValue(contextQuality["status"])),
+	}
+	if len(degradedReasons) > 0 {
+		evidenceChain = append(evidenceChain, "降级原因："+strings.Join(degradedReasons, "；"))
 	}
 	nextSteps := []string{
 		"先查看首要关联会话，确认源、目的、端口和服务用途。",
@@ -208,6 +214,9 @@ func buildAIIncidentInvestigation(options aiSummaryOptions, incident, contextDat
 		"summary":           summary,
 		"root_causes":       rootCauses,
 		"evidence_chain":    evidenceChain,
+		"evidence_items":    evidenceItems,
+		"context_quality":   contextQuality,
+		"degraded_reasons":  degradedReasons,
 		"next_steps":        nextSteps,
 		"similar_incidents": similarIncidents,
 		"recurrence":        recurrence,
@@ -333,6 +342,189 @@ func buildAIGovernanceSuggestions(options aiSummaryOptions, report map[string]an
 		"suggestions":  suggestions,
 		"generated_at": time.Now().Unix(),
 	}
+}
+
+func aiIncidentContextQuality(contextData map[string]any, timeline, similarIncidents []map[string]any, degradedReasons []string) map[string]any {
+	sessions := len(sliceValue(contextData["sessions"]))
+	insights := len(sliceValue(contextData["insights"]))
+	anomalies := len(sliceValue(contextData["anomalies"]))
+	searchRows := len(sliceValue(contextData["search_results"]))
+	relationCount := len(sliceValue(mapValue(contextData["relations"])["related_flows"]))
+	profiles := 0
+	for _, key := range []string{"ip_profile", "src_ip_profile", "dst_ip_profile", "port_profile", "dst_port_profile"} {
+		if len(mapValue(contextData[key])) > 0 {
+			profiles++
+		}
+	}
+	score := 0
+	if sessions > 0 {
+		score += 20
+	}
+	if insights > 0 {
+		score += 15
+	}
+	if anomalies > 0 {
+		score += 12
+	}
+	if searchRows > 0 {
+		score += 12
+	}
+	if relationCount > 0 {
+		score += 15
+	}
+	if profiles > 0 {
+		score += min(profiles*8, 16)
+	}
+	if len(timeline) > 0 {
+		score += 5
+	}
+	if len(similarIncidents) > 0 {
+		score += 10
+	}
+	if len(degradedReasons) > 0 {
+		score -= min(len(degradedReasons)*12, 30)
+	}
+	score = max(0, min(score, 100))
+	status := "complete"
+	if score < 45 {
+		status = "weak"
+	} else if score < 75 || len(degradedReasons) > 0 {
+		status = "partial"
+	}
+	return map[string]any{
+		"status":             status,
+		"score":              score,
+		"sessions":           sessions,
+		"insights":           insights,
+		"anomalies":          anomalies,
+		"search_results":     searchRows,
+		"relation_flows":     relationCount,
+		"profiles":           profiles,
+		"timeline_entries":   len(timeline),
+		"similar_incidents":  len(similarIncidents),
+		"degraded":           len(degradedReasons) > 0,
+		"degraded_reasons":   degradedReasons,
+		"generated_at_unix":  time.Now().Unix(),
+		"evidence_item_hint": "score 基于会话、线索、异常、关系、画像、时间线和历史相似事件覆盖度计算",
+	}
+}
+
+func aiIncidentEvidenceItems(incident, contextData map[string]any, timeline, similarIncidents []map[string]any, recurrence map[string]any) []map[string]any {
+	items := []map[string]any{}
+	subject := firstString(stringValue(contextData["subject"]), stringValue(incident["subject"]), "未知事件对象")
+	if subject != "" {
+		items = append(items, aiIncidentEvidenceItem("incident", "事件对象", subject, firstString(stringValue(incident["summary"]), "事件对象已进入调查包"), firstString(stringValue(incident["severity"]), "info"), "security_incidents", map[string]any{
+			"kind":      firstString(stringValue(incident["kind"]), stringValue(contextData["kind"])),
+			"bytes":     uint64Value(incident["bytes"]),
+			"packets":   uint64Value(incident["packets"]),
+			"status":    stringValue(incident["status"]),
+			"last_seen": int64Value(incident["last_seen"]),
+		}))
+	}
+	for i, rowAny := range sliceValue(contextData["sessions"]) {
+		if i >= 3 {
+			break
+		}
+		row := mapValue(rowAny)
+		title := firstString(stringValue(row["key"]), sessionEvidenceTitle(row))
+		items = append(items, aiIncidentEvidenceItem("session", "关联会话", title, sessionEvidenceSummary(row), riskSeverity(stringValue(row["risk"])), "flow_sessions_5s", map[string]any{
+			"bytes":    uint64Value(row["bytes"]),
+			"packets":  uint64Value(row["packets"]),
+			"service":  stringValue(row["service"]),
+			"risk":     stringValue(row["risk"]),
+			"src_ip":   stringValue(row["src_ip"]),
+			"dst_ip":   stringValue(row["dst_ip"]),
+			"dst_port": stringValue(row["dst_port"]),
+			"protocol": stringValue(row["protocol"]),
+		}))
+	}
+	for i, rowAny := range sliceValue(contextData["insights"]) {
+		if i >= 3 {
+			break
+		}
+		row := mapValue(rowAny)
+		items = append(items, aiIncidentEvidenceItem("insight", "风险线索", firstString(stringValue(row["title"]), stringValue(row["kind"]), "风险线索"), firstString(stringValue(row["summary"]), stringValue(row["detail"]), "-"), firstString(stringValue(row["severity"]), "warning"), "security_insights", map[string]any{
+			"subject": stringValue(row["subject"]),
+			"bytes":   uint64Value(row["bytes"]),
+			"packets": uint64Value(row["packets"]),
+		}))
+	}
+	for i, rowAny := range sliceValue(contextData["anomalies"]) {
+		if i >= 3 {
+			break
+		}
+		row := mapValue(rowAny)
+		items = append(items, aiIncidentEvidenceItem("anomaly", "异常波动", firstString(stringValue(row["subject"]), stringValue(row["dimension"]), "异常波动"), firstString(stringValue(row["summary"]), "当前窗口偏离历史或上一周期"), firstString(stringValue(row["severity"]), "warning"), "traffic_anomalies", map[string]any{
+			"bytes":           uint64Value(row["bytes"]),
+			"packets":         uint64Value(row["packets"]),
+			"deviation_ratio": float64Value(row["deviation_ratio"]),
+			"change_ratio":    float64Value(row["change_ratio"]),
+		}))
+	}
+	if boolValue(recurrence["recurring"]) || len(similarIncidents) > 0 {
+		items = append(items, aiIncidentEvidenceItem("recurrence", "复发判断", firstString(stringValue(recurrence["latest_subject"]), subject), stringValue(recurrence["conclusion"]), "warning", "incident_history", map[string]any{
+			"similar_count":    int64Value(recurrence["similar_count"]),
+			"same_subject":     int64Value(recurrence["same_subject"]),
+			"unresolved_count": int64Value(recurrence["unresolved_count"]),
+			"latest_seen":      int64Value(recurrence["latest_seen"]),
+		}))
+	}
+	if len(timeline) > 0 {
+		row := timeline[0]
+		items = append(items, aiIncidentEvidenceItem("timeline", "处置记录", firstString(stringValue(row["summary"]), stringValue(row["status"]), "最近处置记录"), firstString(stringValue(row["note"]), stringValue(row["summary"]), "-"), "info", "incident_timeline", map[string]any{
+			"author":     stringValue(row["author"]),
+			"type":       stringValue(row["type"]),
+			"created_at": int64Value(row["created_at"]),
+		}))
+	}
+	return items
+}
+
+func aiIncidentEvidenceItem(kind, title, target, summary, severity, source string, detail map[string]any) map[string]any {
+	return map[string]any{
+		"id":       kind + "-" + shortTarget(target),
+		"kind":     kind,
+		"title":    title,
+		"target":   target,
+		"summary":  summary,
+		"severity": firstString(severity, "info"),
+		"source":   source,
+		"detail":   detail,
+	}
+}
+
+func sessionEvidenceTitle(row map[string]any) string {
+	src := firstString(stringValue(row["src_ip"]), "-")
+	dst := firstString(stringValue(row["dst_ip"]), "-")
+	port := firstString(stringValue(row["dst_port"]), "-")
+	proto := firstString(stringValue(row["protocol"]), "-")
+	return src + " -> " + dst + ":" + port + " / " + proto
+}
+
+func sessionEvidenceSummary(row map[string]any) string {
+	service := firstString(stringValue(row["service"]), "未知服务")
+	return fmt.Sprintf("%s，流量 %s，包数 %d，风险 %s", service, formatAIBytes(uint64Value(row["bytes"])), uint64Value(row["packets"]), serviceRiskLevelText(firstString(stringValue(row["risk"]), "low")))
+}
+
+func aiIncidentDegradedReasons(incidentErr, contextErr error, contextData map[string]any, timelineErr, historyErr error) []string {
+	reasons := []string{}
+	if incidentErr != nil {
+		reasons = append(reasons, "事件列表查询失败："+incidentErr.Error())
+	}
+	if contextErr != nil {
+		if aiIncidentContextUsable(contextData) {
+			reasons = append(reasons, "事件上下文部分降级："+contextErr.Error())
+		} else {
+			reasons = append(reasons, "事件上下文不可用："+contextErr.Error())
+		}
+	}
+	if timelineErr != nil {
+		reasons = append(reasons, "处置时间线查询失败："+timelineErr.Error())
+	}
+	if historyErr != nil {
+		reasons = append(reasons, "历史相似事件查询失败："+historyErr.Error())
+	}
+	return reasons
 }
 
 func buildAIRuleEffectiveness(options aiSummaryOptions, rules []model.DetectionRule, findings []map[string]any, alerts config.Alerts, minutes int) map[string]any {
@@ -1564,6 +1756,21 @@ func assetRiskLevelText(level string) string {
 		return "关注"
 	case "healthy":
 		return "健康"
+	default:
+		return "未知"
+	}
+}
+
+func serviceRiskLevelText(level string) string {
+	switch level {
+	case "critical":
+		return "严重"
+	case "high":
+		return "高"
+	case "medium":
+		return "中"
+	case "low":
+		return "低"
 	default:
 		return "未知"
 	}
