@@ -1386,6 +1386,13 @@ export const api = {
   async reportOverview(minutes = 15, limit = 10) {
     return json<{ data: ReportOverview; degraded: boolean }>(`/api/v1/reports/overview?minutes=${minutes}&limit=${limit}`);
   },
+  async downloadReportOverview(minutes = 15, limit = 50) {
+    const response = await fetch(`/api/v1/reports/overview/export?minutes=${minutes}&limit=${limit}&format=csv`);
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response;
+  },
   async aiIncidentSummary(subject: string, kind = '', id = '', minutes = 15, limit = 12) {
     return json<{ data: AISummary; degraded: boolean }>(
       `/api/v1/ai/incident-summary?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`

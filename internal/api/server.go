@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -94,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/security/rules", s.detectionRules)
 	mux.HandleFunc("/api/v1/security/rule-findings", s.detectionRuleFindings)
 	mux.HandleFunc("/api/v1/reports/overview", s.reportOverview)
+	mux.HandleFunc("/api/v1/reports/overview/export", s.reportOverviewExport)
 	mux.HandleFunc("/api/v1/ai/incident-summary", s.aiIncidentSummary)
 	mux.HandleFunc("/api/v1/ai/asset-summary", s.aiAssetSummary)
 	mux.HandleFunc("/api/v1/ai/report-summary", s.aiReportSummary)
@@ -588,6 +591,105 @@ func (s *Server) detectionRuleFindings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) reportOverview(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.ReportOverview(r.Context(), queryMinutes(r), queryLimit(r, 10, 50))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func (s *Server) reportOverviewExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.loadSystemSettings().Data.ExportEnabled {
+		http.Error(w, "export is disabled", http.StatusForbidden)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := queryLimit(r, 50, 200)
+	data, err := s.store.ReportOverview(r.Context(), minutes, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	body, err := reportOverviewCSV(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	filename := fmt.Sprintf("nexaflow-overview-report-%dm-%s.csv", minutes, time.Now().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := w.Write(body); err == nil {
+		s.audit(r, "report.export", "overview", "导出巡检报表："+filename, map[string]any{
+			"format":  "csv",
+			"minutes": minutes,
+			"limit":   limit,
+			"bytes":   len(body),
+		})
+	}
+}
+
+func reportOverviewCSV(report map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("\xEF\xBB\xBF")
+	writer := csv.NewWriter(&buf)
+	write := func(values ...string) {
+		_ = writer.Write(values)
+	}
+	summary := mapValue(report["summary"])
+	write("section", "object", "level_status", "metric", "bytes", "packets_sessions", "summary", "recommendation")
+	write(
+		"summary",
+		"overview",
+		"",
+		fmt.Sprintf("avg_mbps=%.2f peak_mbps=%.2f p95_mbps=%.2f utilization=%.6f", float64Value(summary["avg_mbps"]), float64Value(summary["peak_mbps"]), float64Value(summary["p95_mbps"]), float64Value(summary["utilization"])),
+		strconv.FormatUint(uint64Value(summary["bytes"]), 10),
+		strconv.FormatUint(uint64Value(summary["packets"]), 10),
+		fmt.Sprintf("assets=%d critical_assets=%d open_incidents=%d anomalies=%d exposed_services=%d external_access=%d", int64Value(summary["asset_count"]), int64Value(summary["critical_assets"]), int64Value(summary["open_incidents"]), int64Value(summary["anomaly_count"]), int64Value(summary["exposed_services"]), int64Value(summary["external_access"])),
+		"",
+	)
+	for _, item := range sliceValue(report["recommendations"]) {
+		row := mapValue(item)
+		write("recommendation", stringValue(row["title"]), stringValue(row["level"]), "", "", "", stringValue(row["detail"]), stringValue(row["detail"]))
+	}
+	for _, item := range sliceValue(report["asset_risks"]) {
+		row := mapValue(item)
+		object := strings.TrimSpace(stringValue(row["ip"]) + " " + firstString(stringValue(row["name"]), stringValue(row["business"])))
+		write("asset_risk", object, stringValue(row["risk_level"]), fmt.Sprintf("score=%d exposed=%d incidents=%d", int64Value(row["risk_score"]), int64Value(row["exposed_services"]), int64Value(row["open_incidents"])), strconv.FormatUint(uint64Value(row["total_bytes"]), 10), strconv.FormatUint(uint64Value(row["total_packets"]), 10), stringValue(row["top_finding"]), stringValue(row["recommended_action"]))
+	}
+	for _, item := range sliceValue(report["incidents"]) {
+		row := mapValue(item)
+		write("incident", stringValue(row["subject"]), stringValue(row["severity"])+"/"+stringValue(row["status"]), stringValue(row["source"])+"/"+stringValue(row["kind"])+"/score="+strconv.FormatInt(int64Value(row["score"]), 10), strconv.FormatUint(uint64Value(row["bytes"]), 10), strconv.FormatUint(uint64Value(row["packets"]), 10), stringValue(row["summary"]), stringValue(row["recommended_action"]))
+	}
+	for _, item := range sliceValue(report["anomalies"]) {
+		row := mapValue(item)
+		write("anomaly", stringValue(row["dimension"])+"/"+stringValue(row["key"]), stringValue(row["severity"]), stringValue(row["kind"])+"/change="+fmt.Sprintf("%.2f", float64Value(row["change_ratio"]))+"/score="+strconv.FormatInt(int64Value(row["score"]), 10), strconv.FormatUint(uint64Value(row["current_bytes"]), 10), strconv.FormatUint(uint64Value(row["current_packets"]), 10), stringValue(row["summary"]), "confirm planned change or drill down into object profile")
+	}
+	for _, item := range sliceValue(report["exposures"]) {
+		row := mapValue(item)
+		write("service_exposure", stringValue(row["ip"])+":"+stringValue(row["port"])+"/"+stringValue(row["protocol"]), stringValue(row["risk"]), stringValue(row["service"])+"/"+stringValue(row["category"])+"/"+stringValue(row["direction"]), strconv.FormatUint(uint64Value(row["bytes"]), 10), strconv.FormatUint(uint64Value(row["packets"]), 10), stringValue(row["sample_flow"]), "review service owner, source range and firewall policy")
+	}
+	for _, item := range sliceValue(report["external_access"]) {
+		row := mapValue(item)
+		write("external_access", stringValue(row["public_ip"])+" -> "+stringValue(row["internal_ip"])+":"+stringValue(row["port"]), stringValue(row["risk"]), stringValue(row["direction"])+"/"+stringValue(row["service"])+"/"+stringValue(row["category"]), strconv.FormatUint(uint64Value(row["bytes"]), 10), strconv.FormatInt(int64Value(row["session_count"]), 10), stringValue(row["sample_flow"]), "review public peer trust and session volume")
+	}
+	for _, section := range []struct {
+		name string
+		key  string
+	}{
+		{name: "top_src", key: "top_src"},
+		{name: "top_ports", key: "top_ports"},
+		{name: "top_services", key: "top_services"},
+	} {
+		for _, item := range sliceValue(report[section.key]) {
+			row := mapValue(item)
+			write(section.name, stringValue(row["key"]), "", "", strconv.FormatUint(uint64Value(row["bytes"]), 10), strconv.FormatUint(uint64Value(row["packets"]), 10), "", "")
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (s *Server) aiIncidentSummary(w http.ResponseWriter, r *http.Request) {

@@ -4008,64 +4008,12 @@ const exportSessions = () => {
   exportCSV(`nexaflow-sessions-${selectedMinutes.value}m.csv`, rows);
 };
 
-const exportReportOverview = () => {
-  const report = reportOverview.value;
-  const rows = [
-    ['类型', '对象', '级别/状态', '指标', '流量字节', '包数/会话', '摘要', '建议'],
-    ['摘要', '观察范围', rangeLabel.value, `${report.summary.avg_mbps.toFixed(2)} Mbps 平均 / ${report.summary.peak_mbps.toFixed(2)} Mbps 峰值`, String(report.summary.bytes), String(report.summary.packets), `资产 ${report.summary.asset_count} / 事件 ${report.summary.open_incidents} / 异常 ${report.summary.anomaly_count}`, ''],
-    ...report.recommendations.map((row) => ['建议', row.title, severityText(row.level), '', '', '', row.detail, row.detail]),
-    ...report.asset_risks.map((row) => [
-      '资产风险',
-      `${row.ip} ${row.name || row.business || ''}`.trim(),
-      assetRiskLevelText(row.risk_level),
-      `评分 ${row.risk_score} / 暴露 ${row.exposed_services} / 事件 ${row.open_incidents}`,
-      String(row.total_bytes),
-      String(row.total_packets),
-      row.top_finding || '',
-      row.recommended_action || ''
-    ]),
-    ...report.incidents.map((row) => [
-      '安全事件',
-      row.subject,
-      `${severityText(row.severity)} / ${alertStatusText(row.status)}`,
-      `${row.source} / ${incidentKindText(row.kind)} / 评分 ${row.score}`,
-      String(row.bytes),
-      String(row.packets),
-      row.summary,
-      row.recommended_action
-    ]),
-    ...report.anomalies.map((row) => [
-      '异常波动',
-      `${changeDimensionText(row.dimension)} / ${row.key}`,
-      severityText(row.severity),
-      `${anomalyKindText(row.kind)} / ${formatChangeRatio(row.change_ratio)} / 评分 ${row.score}`,
-      String(row.current_bytes),
-      String(row.current_packets),
-      row.summary,
-      '确认是否符合变更计划，必要时进入对象画像或检索分析'
-    ]),
-    ...report.exposures.map((row) => [
-      '服务暴露',
-      `${row.ip}:${row.port} / ${row.protocol}`,
-      serviceRiskText(row.risk),
-      `${row.service} / ${row.category} / ${row.direction}`,
-      String(row.bytes),
-      String(row.packets),
-      row.sample_flow,
-      '核对服务用途、访问来源和防火墙策略'
-    ]),
-    ...report.external_access.map((row) => [
-      '公网访问',
-      `${row.public_ip} -> ${row.internal_ip}:${row.port}`,
-      serviceRiskText(row.risk),
-      `${row.direction} / ${row.service} / ${row.category}`,
-      String(row.bytes),
-      String(row.session_count),
-      row.sample_flow,
-      '核对公网对端可信度和会话数量'
-    ])
-  ];
-  exportCSV(`nexaflow-overview-report-${selectedMinutes.value}m.csv`, rows);
+const exportReportOverview = async () => {
+  const response = await api.downloadReportOverview(selectedMinutes.value, 50);
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `nexaflow-overview-report-${selectedMinutes.value}m.csv`;
+  downloadBlob(filename, blob);
 };
 
 const exportRuleFindings = () => {
@@ -4091,6 +4039,10 @@ const exportRuleFindings = () => {
 const exportCSV = (filename: string, rows: string[][]) => {
   const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
   const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
+  downloadBlob(filename, blob);
+};
+
+const downloadBlob = (filename: string, blob: Blob) => {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -7313,7 +7265,7 @@ const exportCSV = (filename: string, rows: string[][]) => {
 
       <template v-else-if="currentView === 'reports'">
         <section class="toolbar-panel">
-          <button class="command-button" type="button" @click="exportReportOverview">导出报表 CSV</button>
+          <button class="command-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportReportOverview">导出报表 CSV</button>
           <div class="toolbar-summary">
             {{ rangeLabel }} / 生成时间 {{ formatTime(reportOverview.generated_at) }} / {{ reportOverview.recommendations.length.toLocaleString() }} 条建议
           </div>

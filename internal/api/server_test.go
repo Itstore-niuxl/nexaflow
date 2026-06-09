@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -620,6 +621,44 @@ func TestBuildAIIncidentActionSuggestions(t *testing.T) {
 	}
 	if !hasRule || !hasSilence {
 		t.Fatalf("expected rule and silence proposals, got %#v", suggestions)
+	}
+}
+
+func TestReportOverviewCSV(t *testing.T) {
+	body, err := reportOverviewCSV(map[string]any{
+		"summary": map[string]any{
+			"bytes":              uint64(7340032),
+			"packets":            uint64(6800),
+			"asset_count":        int64(3),
+			"critical_assets":    int64(1),
+			"open_incidents":     int64(2),
+			"anomaly_count":      int64(1),
+			"exposed_services":   int64(2),
+			"external_access":    int64(1),
+			"avg_mbps":           8.4,
+			"peak_mbps":          42.1,
+			"p95_mbps":           21.3,
+			"utilization":        0.12,
+			"critical_incidents": int64(1),
+		},
+		"recommendations": []map[string]any{
+			{"level": "critical", "title": "处理公网暴露", "detail": "核对端口暴露策略"},
+		},
+		"incidents": []map[string]any{
+			{"subject": "211.93.22.130 -> 10.2.0.12:8081", "severity": "critical", "status": "open", "source": "rule", "kind": "external_session_burst", "score": int64(90), "bytes": uint64(7340032), "packets": uint64(6800), "summary": "公网会话突增", "recommended_action": "核对公网来源"},
+		},
+		"top_src": []map[string]any{
+			{"key": "211.93.22.130", "bytes": uint64(7340032), "packets": uint64(6800)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build csv: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{"section,object,level_status", "summary,overview", "recommendation", "incident", "top_src"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected CSV to contain %q, got %s", want, text)
+		}
 	}
 }
 
