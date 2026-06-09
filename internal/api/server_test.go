@@ -154,6 +154,56 @@ func TestConfigDiffRows(t *testing.T) {
 	}
 }
 
+func TestDiskUsageStatus(t *testing.T) {
+	cases := []struct {
+		ratio float64
+		want  string
+	}{
+		{ratio: 0.1, want: "ok"},
+		{ratio: 0.8, want: "warning"},
+		{ratio: 0.89, want: "warning"},
+		{ratio: 0.9, want: "critical"},
+	}
+	for _, tc := range cases {
+		if got := diskUsageStatus(tc.ratio); got != tc.want {
+			t.Fatalf("diskUsageStatus(%v) = %q, want %q", tc.ratio, got, tc.want)
+		}
+	}
+}
+
+func TestPlatformOpsStatusIncludesRetentionAndRecommendations(t *testing.T) {
+	settings := config.DefaultSystemSettings(config.Config{})
+	settings.Data.ClickHouseRetentionDays = 60
+	settings.Data.SessionRetentionDays = 45
+	status := platformOpsStatus(config.Config{RuntimePath: t.TempDir() + "/runtime.json"}, settings, "ok", "online")
+
+	if stringValue(status["status"]) == "" {
+		t.Fatalf("expected platform status, got %#v", status)
+	}
+	if stringValue(status["runtime_dir"]) == "" {
+		t.Fatalf("expected runtime dir, got %#v", status)
+	}
+	if len(sliceValue(status["disks"])) == 0 {
+		t.Fatalf("expected disk snapshots, got %#v", status["disks"])
+	}
+	if len(sliceValue(status["services"])) == 0 {
+		t.Fatalf("expected service checks, got %#v", status["services"])
+	}
+	if len(mapValue(status["resources"])) == 0 {
+		t.Fatalf("expected resource snapshot, got %#v", status["resources"])
+	}
+	if len(mapValue(status["deployment"])) == 0 {
+		t.Fatalf("expected deployment snapshot, got %#v", status["deployment"])
+	}
+	retention := mapValue(status["data_retention"])
+	if int64Value(retention["clickhouse_retention_days"]) != 60 {
+		t.Fatalf("expected ClickHouse retention in status, got %#v", retention)
+	}
+	if len(sliceValue(status["recommendations"])) < 2 {
+		t.Fatalf("expected retention recommendations, got %#v", status["recommendations"])
+	}
+}
+
 func TestCaptureDiagnosticReport(t *testing.T) {
 	capture := map[string]any{
 		"summary": map[string]any{

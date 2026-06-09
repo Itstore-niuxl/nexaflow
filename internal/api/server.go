@@ -12,14 +12,17 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"nexaflow/internal/config"
@@ -1227,6 +1230,9 @@ func (s *Server) alertSilences(w http.ResponseWriter, r *http.Request) {
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	data, err := s.store.Status(r.Context())
+	if data == nil {
+		data = map[string]any{}
+	}
 	status := collectorStatus(data)
 	data["collector"] = map[string]any{
 		"id":           s.config.CollectorID,
@@ -1241,7 +1247,415 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"alerts":       runtime.Alerts,
 		"updated_at":   runtime.UpdatedAt,
 	}
+	data["ops"] = platformOpsStatus(s.config, s.loadSystemSettings(), stringValue(data["database"]), status)
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
+}
+
+func platformOpsStatus(cfg config.Config, settings config.SystemSettings, databaseStatus, collectorStatus string) map[string]any {
+	runtimePath := strings.TrimSpace(cfg.RuntimePath)
+	if runtimePath == "" {
+		runtimePath = "/var/lib/nexaflow/runtime.json"
+	}
+	runtimeDir := filepath.Dir(runtimePath)
+	disks := []map[string]any{}
+	seen := map[string]bool{}
+	for _, item := range []struct {
+		label string
+		path  string
+	}{
+		{label: "运行目录", path: runtimeDir},
+		{label: "根目录", path: "/"},
+	} {
+		path := filepath.Clean(item.path)
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		disks = append(disks, diskUsageSnapshot(item.label, path))
+	}
+
+	resources := systemResourceSnapshot()
+	services := platformServiceChecks(cfg, runtimePath, databaseStatus, collectorStatus)
+	deployment := platformDeploymentSnapshot(cfg, settings)
+	status := platformOpsAggregateStatus(disks, resources, services)
+	retention := map[string]any{
+		"clickhouse_retention_days": settings.Data.ClickHouseRetentionDays,
+		"session_retention_days":    settings.Data.SessionRetentionDays,
+		"audit_retention_days":      settings.Data.AuditRetentionDays,
+		"config_version_limit":      settings.Data.ConfigVersionLimit,
+		"export_enabled":            settings.Data.ExportEnabled,
+	}
+	return map[string]any{
+		"generated_at":     time.Now().Unix(),
+		"status":           status,
+		"summary":          platformOpsSummary(status),
+		"runtime_path":     runtimePath,
+		"runtime_dir":      runtimeDir,
+		"disks":            disks,
+		"resources":        resources,
+		"services":         services,
+		"deployment":       deployment,
+		"data_retention":   retention,
+		"recommendations":  platformOpsRecommendations(status, disks, resources, services, settings),
+		"deployment_hints": []string{"部署前确认公网端口与防火墙策略", "磁盘高水位时优先清理 Docker 构建缓存和旧镜像", "生产环境建议将 ClickHouse 数据目录挂载到独立数据盘", "生产验证建议固定 Git 提交、镜像标签和配置版本，便于回滚。"},
+	}
+}
+
+func systemResourceSnapshot() map[string]any {
+	var info syscall.Sysinfo_t
+	if err := syscall.Sysinfo(&info); err != nil {
+		return map[string]any{
+			"status": "unavailable",
+			"error":  err.Error(),
+		}
+	}
+	unit := uint64(info.Unit)
+	if unit == 0 {
+		unit = 1
+	}
+	totalMemory := info.Totalram * unit
+	freeMemory := info.Freeram * unit
+	usedMemory := totalMemory - freeMemory
+	memoryRatio := float64(0)
+	if totalMemory > 0 {
+		memoryRatio = float64(usedMemory) / float64(totalMemory)
+	}
+	cpus := goruntime.NumCPU()
+	load1 := float64(info.Loads[0]) / 65536
+	load5 := float64(info.Loads[1]) / 65536
+	load15 := float64(info.Loads[2]) / 65536
+	memStatus := usageStatus(memoryRatio)
+	loadState := loadStatus(load1, cpus)
+	status := "ok"
+	if memStatus == "critical" || loadState == "critical" {
+		status = "critical"
+	} else if memStatus == "warning" || loadState == "warning" {
+		status = "warning"
+	}
+	return map[string]any{
+		"status":             status,
+		"memory_status":      memStatus,
+		"load_status":        loadState,
+		"total_memory_bytes": totalMemory,
+		"used_memory_bytes":  usedMemory,
+		"free_memory_bytes":  freeMemory,
+		"memory_used_ratio":  memoryRatio,
+		"load1":              load1,
+		"load5":              load5,
+		"load15":             load15,
+		"cpu_count":          cpus,
+		"uptime_seconds":     info.Uptime,
+		"process_count":      info.Procs,
+	}
+}
+
+func platformServiceChecks(cfg config.Config, runtimePath, databaseStatus, collectorStatus string) []map[string]any {
+	runtimeState := "ok"
+	runtimeDetail := "运行配置文件可访问"
+	if _, err := os.Stat(runtimePath); err != nil {
+		runtimeState = "warning"
+		runtimeDetail = "运行配置文件暂不可访问：" + err.Error()
+	}
+	return []map[string]any{
+		{
+			"name":       "API Server",
+			"role":       "控制台 API 与状态聚合",
+			"status":     "ok",
+			"detail":     "当前请求由 API 服务正常处理",
+			"endpoint":   cfg.APIAddr,
+			"actionable": false,
+		},
+		{
+			"name":       "ClickHouse",
+			"role":       "流量窗口与会话数据存储",
+			"status":     databaseServiceStatus(databaseStatus),
+			"detail":     "数据库状态：" + databaseStatus,
+			"endpoint":   maskConnectionString(cfg.ClickHouseURL),
+			"actionable": databaseStatus != "ok",
+		},
+		{
+			"name":       "Collector",
+			"role":       "真实流量采集与窗口写入",
+			"status":     collectorServiceStatus(collectorStatus),
+			"detail":     "采集器状态：" + collectorStatus,
+			"endpoint":   cfg.Iface,
+			"actionable": collectorStatus != "online",
+		},
+		tcpServiceCheck("Redis", cfg.RedisAddr, "缓存与采集队列"),
+		{
+			"name":       "Runtime Config",
+			"role":       "采集、告警和系统配置持久化",
+			"status":     runtimeState,
+			"detail":     runtimeDetail,
+			"endpoint":   runtimePath,
+			"actionable": runtimeState != "ok",
+		},
+	}
+}
+
+func tcpServiceCheck(name, addr, role string) map[string]any {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return map[string]any{"name": name, "role": role, "status": "unknown", "detail": "未配置连接地址", "endpoint": "", "actionable": true}
+	}
+	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return map[string]any{"name": name, "role": role, "status": "warning", "detail": "TCP 探测失败：" + err.Error(), "endpoint": addr, "actionable": true}
+	}
+	_ = conn.Close()
+	return map[string]any{"name": name, "role": role, "status": "ok", "detail": "TCP 探测可达", "endpoint": addr, "actionable": false}
+}
+
+func platformDeploymentSnapshot(cfg config.Config, settings config.SystemSettings) map[string]any {
+	hostname, _ := os.Hostname()
+	return map[string]any{
+		"hostname":       hostname,
+		"in_container":   fileExists("/.dockerenv"),
+		"os":             goruntime.GOOS,
+		"arch":           goruntime.GOARCH,
+		"go_version":     goruntime.Version(),
+		"cpu_count":      goruntime.NumCPU(),
+		"api_addr":       cfg.APIAddr,
+		"redis_addr":     cfg.RedisAddr,
+		"clickhouse_url": maskConnectionString(cfg.ClickHouseURL),
+		"database":       cfg.Database,
+		"auth_enabled":   settings.Security.AuthEnabled,
+		"ai_mode":        settings.AI.Mode,
+		"ai_provider":    settings.AI.Provider,
+		"build_version":  strings.TrimSpace(os.Getenv("NEXAFLOW_VERSION")),
+		"git_commit":     strings.TrimSpace(os.Getenv("NEXAFLOW_GIT_COMMIT")),
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func diskUsageSnapshot(label, path string) map[string]any {
+	statPath := firstExistingPath(path)
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(statPath, &stat); err != nil {
+		return map[string]any{
+			"label":       label,
+			"path":        path,
+			"stat_path":   statPath,
+			"status":      "unavailable",
+			"total_bytes": uint64(0),
+			"used_bytes":  uint64(0),
+			"free_bytes":  uint64(0),
+			"used_ratio":  float64(0),
+			"error":       err.Error(),
+		}
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bavail * uint64(stat.Bsize)
+	if total == 0 {
+		return map[string]any{
+			"label":       label,
+			"path":        path,
+			"stat_path":   statPath,
+			"status":      "unavailable",
+			"total_bytes": uint64(0),
+			"used_bytes":  uint64(0),
+			"free_bytes":  uint64(0),
+			"used_ratio":  float64(0),
+			"error":       "statfs returned zero blocks",
+		}
+	}
+	used := total - free
+	ratio := float64(used) / float64(total)
+	return map[string]any{
+		"label":       label,
+		"path":        path,
+		"stat_path":   statPath,
+		"status":      diskUsageStatus(ratio),
+		"total_bytes": total,
+		"used_bytes":  used,
+		"free_bytes":  free,
+		"used_ratio":  ratio,
+	}
+}
+
+func firstExistingPath(path string) string {
+	current := filepath.Clean(path)
+	for {
+		if _, err := os.Stat(current); err == nil {
+			return current
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return current
+		}
+		current = parent
+	}
+}
+
+func diskUsageStatus(ratio float64) string {
+	return usageStatus(ratio)
+}
+
+func usageStatus(ratio float64) string {
+	switch {
+	case ratio >= 0.9:
+		return "critical"
+	case ratio >= 0.8:
+		return "warning"
+	default:
+		return "ok"
+	}
+}
+
+func loadStatus(load1 float64, cpus int) string {
+	if cpus <= 0 {
+		cpus = 1
+	}
+	switch {
+	case load1 >= float64(cpus)*2:
+		return "critical"
+	case load1 >= float64(cpus):
+		return "warning"
+	default:
+		return "ok"
+	}
+}
+
+func platformOpsAggregateStatus(disks []map[string]any, resources map[string]any, services []map[string]any) string {
+	status := "ok"
+	for _, disk := range disks {
+		switch stringValue(disk["status"]) {
+		case "critical":
+			return "critical"
+		case "warning":
+			if status == "ok" {
+				status = "warning"
+			}
+		case "unavailable":
+			if status == "ok" {
+				status = "degraded"
+			}
+		}
+	}
+	switch stringValue(resources["status"]) {
+	case "critical":
+		return "critical"
+	case "warning":
+		if status == "ok" {
+			status = "warning"
+		}
+	case "unavailable":
+		if status == "ok" {
+			status = "degraded"
+		}
+	}
+	for _, service := range services {
+		switch stringValue(service["status"]) {
+		case "critical":
+			return "critical"
+		case "warning":
+			if status == "ok" {
+				status = "warning"
+			}
+		}
+	}
+	return status
+}
+
+func platformOpsSummary(status string) string {
+	switch status {
+	case "critical":
+		return "存在严重运行风险，请优先检查资源水位、服务健康和磁盘容量"
+	case "warning":
+		return "存在运维预警，建议提前处理资源、服务或容量风险"
+	case "degraded":
+		return "部分运行状态不可用，请检查目录挂载和权限"
+	default:
+		return "运行状态正常，资源和容量处于可控范围"
+	}
+}
+
+func platformOpsRecommendations(status string, disks []map[string]any, resources map[string]any, services []map[string]any, settings config.SystemSettings) []string {
+	recommendations := []string{}
+	diskCritical := false
+	diskWarning := false
+	for _, disk := range disks {
+		switch stringValue(disk["status"]) {
+		case "critical":
+			diskCritical = true
+		case "warning":
+			diskWarning = true
+		}
+	}
+	if diskCritical {
+		recommendations = append(recommendations, "磁盘使用率超过 90%，请立即清理 Docker 构建缓存、旧镜像和无用容器，并评估扩容。")
+	} else if diskWarning {
+		recommendations = append(recommendations, "磁盘使用率超过 80%，建议安排清理窗口并检查 ClickHouse 数据保留策略。")
+	}
+	if settings.Data.ClickHouseRetentionDays > 30 {
+		recommendations = append(recommendations, "ClickHouse 保留天数超过 30 天，生产环境建议结合数据盘容量和查询需求重新评估。")
+	}
+	if settings.Data.SessionRetentionDays > 30 {
+		recommendations = append(recommendations, "会话明细保留天数超过 30 天，建议定期归档或降低明细留存周期。")
+	}
+	for _, disk := range disks {
+		if stringValue(disk["status"]) == "unavailable" && stringValue(disk["error"]) != "" {
+			recommendations = append(recommendations, fmt.Sprintf("%s 状态不可读：%s", stringValue(disk["label"]), stringValue(disk["error"])))
+		}
+	}
+	if stringValue(resources["memory_status"]) == "warning" || stringValue(resources["memory_status"]) == "critical" {
+		recommendations = append(recommendations, "内存水位偏高，请检查 ClickHouse、构建任务和采集器资源占用，必要时增加内存或调整查询窗口。")
+	}
+	if stringValue(resources["load_status"]) == "warning" || stringValue(resources["load_status"]) == "critical" {
+		recommendations = append(recommendations, "系统负载偏高，请核对实时采集、前端构建和数据库查询是否并发过高。")
+	}
+	for _, service := range services {
+		if boolValue(service["actionable"]) {
+			recommendations = append(recommendations, fmt.Sprintf("%s 需要关注：%s", stringValue(service["name"]), stringValue(service["detail"])))
+		}
+	}
+	if len(recommendations) == 0 {
+		recommendations = append(recommendations, "当前无需紧急处理，建议保留定期磁盘巡检和备份验证。")
+	}
+	return recommendations
+}
+
+func databaseServiceStatus(status string) string {
+	if status == "ok" {
+		return "ok"
+	}
+	if status == "" {
+		return "unknown"
+	}
+	return "critical"
+}
+
+func collectorServiceStatus(status string) string {
+	switch status {
+	case "online":
+		return "ok"
+	case "degraded", "offline":
+		return "warning"
+	case "":
+		return "unknown"
+	default:
+		return status
+	}
+}
+
+func maskConnectionString(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	username := parsed.User.Username()
+	if _, ok := parsed.User.Password(); ok {
+		parsed.User = url.UserPassword(username, "****")
+	}
+	return parsed.String()
 }
 
 func (s *Server) dataQuality(w http.ResponseWriter, r *http.Request) {

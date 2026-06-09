@@ -75,6 +75,7 @@ import {
   type PortProfile,
   type PortPoint,
   type ProtocolPoint,
+  type PlatformOpsStatus,
   type ReportOverview,
   type RuleFinding,
   type SearchResult,
@@ -720,6 +721,7 @@ const navGroups = [
       { id: 'history', label: '历史回放', icon: History },
       { id: 'audit', label: '审计日志', icon: ClipboardList },
       { id: 'config-versions', label: '配置版本', icon: History },
+      { id: 'ops', label: '平台运维', icon: ServerCog },
       { id: 'settings', label: '系统设置', icon: Settings2 },
       { id: 'collectors', label: '采集器', icon: Settings2 }
     ]
@@ -755,6 +757,7 @@ const viewMeta: Record<string, { title: string; subtitle: string }> = {
   history: { title: '历史回放', subtitle: '回看采集窗口明细，辅助排查短时峰值' },
   audit: { title: '审计日志', subtitle: '追踪配置变更、事件处置、规则调整和白名单操作' },
   'config-versions': { title: '配置版本', subtitle: '回溯采集、告警、规则和白名单的运行时配置快照' },
+  ops: { title: '平台运维', subtitle: '集中查看服务健康、服务器资源、磁盘水位、部署环境和维护建议' },
   settings: { title: '系统设置', subtitle: '统一管理大模型、分析参数、安全权限、通知集成、数据保留和后台连接配置' },
   collectors: { title: '采集器', subtitle: '查看采集源、运行模式和服务状态' }
 };
@@ -1121,7 +1124,77 @@ const refresh = async () => {
     ];
     collectors.value = [{ id: 'dev-collector-01', source_id: 'dev-source-01', status: 'offline', mode: 'mock', bpf_filter: 'ip or ip6', session_topn: 500, updated_at: now }];
     interfaces.value = [{ name: 'eth0', state: 'up', type: 'interface' }];
-    systemStatus.value = { database: 'degraded', latest_window_ts: now, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 };
+    systemStatus.value = {
+      database: 'degraded',
+      latest_window_ts: now,
+      windows_24h: 0,
+      sources_24h: 0,
+      interfaces_24h: 0,
+      ops: {
+        generated_at: now,
+        status: 'warning',
+        summary: '样例环境磁盘水位偏高，真实部署后会展示服务器状态',
+        runtime_path: '/var/lib/nexaflow/runtime.json',
+        runtime_dir: '/var/lib/nexaflow',
+        disks: [
+          {
+            label: '运行目录',
+            path: '/var/lib/nexaflow',
+            status: 'warning',
+            total_bytes: 53687091200,
+            used_bytes: 44564480000,
+            free_bytes: 9122611200,
+            used_ratio: 0.83
+          }
+        ],
+        resources: {
+          status: 'warning',
+          memory_status: 'warning',
+          load_status: 'ok',
+          total_memory_bytes: 8589934592,
+          used_memory_bytes: 6871947673,
+          free_memory_bytes: 1717986919,
+          memory_used_ratio: 0.8,
+          load1: 1.2,
+          load5: 0.9,
+          load15: 0.7,
+          cpu_count: 4,
+          uptime_seconds: 432000,
+          process_count: 128
+        },
+        services: [
+          { name: 'API Server', role: '控制台 API 与状态聚合', status: 'ok', detail: '当前请求由 API 服务正常处理', endpoint: '0.0.0.0:8080', actionable: false },
+          { name: 'ClickHouse', role: '流量窗口与会话数据存储', status: 'ok', detail: '数据库状态：ok', endpoint: 'clickhouse:8123', actionable: false },
+          { name: 'Collector', role: '真实流量采集与窗口写入', status: 'warning', detail: '采集器状态：offline', endpoint: 'eth0', actionable: true },
+          { name: 'Redis', role: '缓存与采集队列', status: 'ok', detail: 'TCP 探测可达', endpoint: 'redis:6379', actionable: false },
+          { name: 'Runtime Config', role: '采集、告警和系统配置持久化', status: 'ok', detail: '运行配置文件可访问', endpoint: '/var/lib/nexaflow/runtime.json', actionable: false }
+        ],
+        deployment: {
+          hostname: 'nexaflow-demo',
+          in_container: true,
+          os: 'linux',
+          arch: 'amd64',
+          go_version: 'go1.22',
+          cpu_count: 4,
+          api_addr: '0.0.0.0:8080',
+          redis_addr: 'redis:6379',
+          clickhouse_url: 'http://default:****@clickhouse:8123',
+          database: 'nexaflow',
+          auth_enabled: false,
+          ai_mode: 'local_mock',
+          ai_provider: 'local_mock'
+        },
+        data_retention: {
+          clickhouse_retention_days: 30,
+          session_retention_days: 30,
+          audit_retention_days: 180,
+          config_version_limit: 200,
+          export_enabled: true
+        },
+        recommendations: ['样例磁盘水位超过 80%，建议清理 Docker 构建缓存并复核数据保留周期。'],
+        deployment_hints: ['生产环境建议使用独立数据盘承载 ClickHouse 数据目录。']
+      }
+    };
     dataQuality.value = {
       generated_at: now,
       minutes: selectedMinutes.value,
@@ -2563,6 +2636,17 @@ const formatRate = (bytes: number, seconds = rangeSeconds.value) => `${((bytes *
 
 const pps = computed(() => Math.round(summary.value.packets / rangeSeconds.value));
 const onlineCollectorCount = computed(() => collectors.value.filter((collector) => collector.status === 'online').length);
+const platformOps = computed(() => systemStatus.value.ops);
+const platformOpsDisks = computed(() => platformOps.value?.disks ?? []);
+const platformOpsRecommendations = computed(() => platformOps.value?.recommendations ?? []);
+const platformOpsHints = computed(() => platformOps.value?.deployment_hints ?? []);
+const primaryDiskUsage = computed(() => platformOpsDisks.value[0]?.used_ratio ?? 0);
+type PlatformResources = NonNullable<PlatformOpsStatus['resources']>;
+type PlatformDeployment = NonNullable<PlatformOpsStatus['deployment']>;
+const platformResources = computed<Partial<PlatformResources>>(() => platformOps.value?.resources ?? {});
+const platformServices = computed(() => platformOps.value?.services ?? []);
+const platformDeployment = computed<Partial<PlatformDeployment>>(() => platformOps.value?.deployment ?? {});
+const platformActionableServices = computed(() => platformServices.value.filter((service) => service.actionable || ['warning', 'critical', 'degraded'].includes(service.status)));
 const dataQualitySourceItems = computed(() =>
   dataQuality.value.sources.map((row) => ({
     key: `${row.source_id} / ${row.iface}`,
@@ -3068,6 +3152,40 @@ const dataQualityStatusText = (status: string) => {
     unknown: '未知'
   };
   return labels[status] ?? status;
+};
+
+const opsStatusText = (status?: string) => {
+  const labels: Record<string, string> = {
+    ok: '正常',
+    healthy: '健康',
+    warning: '预警',
+    critical: '严重',
+    degraded: '降级',
+    unavailable: '不可用',
+    unknown: '未知'
+  };
+  return labels[status ?? 'unknown'] ?? (status || '未知');
+};
+
+const opsSeverityClass = (status?: string) => {
+  if (status === 'ok') return 'healthy';
+  return status || 'unknown';
+};
+
+const diskUsageWidth = (ratio: number) => `${Math.max(0, Math.min(100, ratio * 100)).toFixed(1)}%`;
+
+const formatOpsNumber = (value?: number) => (typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '-');
+
+const formatLoad = (value?: number) => (typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '-');
+
+const formatDuration = (seconds?: number) => {
+  if (!seconds || seconds <= 0) return '-';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  return `${minutes} 分钟`;
 };
 
 const aiConfidenceText = (confidence: number) => `${(confidence * 100).toFixed(0)}% 置信度`;
@@ -7980,6 +8098,143 @@ const downloadBlob = (filename: string, blob: Blob) => {
               </tr>
             </tbody>
           </table>
+        </section>
+      </template>
+
+      <template v-else-if="currentView === 'ops'">
+        <section class="metric-grid">
+          <article class="metric-card">
+            <span>平台状态</span>
+            <strong>{{ opsStatusText(platformOps?.status) }}</strong>
+            <small>{{ platformOps?.summary ?? '等待状态采集' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>磁盘水位</span>
+            <strong>{{ formatPercent(primaryDiskUsage) }}</strong>
+            <small>{{ platformOpsDisks[0]?.path ?? '运行目录未返回' }}</small>
+          </article>
+          <article class="metric-card">
+            <span>内存水位</span>
+            <strong>{{ formatPercent(platformResources.memory_used_ratio ?? 0) }}</strong>
+            <small>{{ opsStatusText(platformResources.memory_status) }} / 可用 {{ formatBytes(platformResources.free_memory_bytes ?? 0) }}</small>
+          </article>
+          <article class="metric-card">
+            <span>系统负载</span>
+            <strong>{{ formatLoad(platformResources.load1) }}</strong>
+            <small>{{ formatOpsNumber(platformResources.cpu_count) }} CPU / {{ opsStatusText(platformResources.load_status) }}</small>
+          </article>
+          <article class="metric-card">
+            <span>服务异常</span>
+            <strong>{{ platformActionableServices.length.toLocaleString() }}</strong>
+            <small>{{ platformServices.length.toLocaleString() }} 个服务检查项</small>
+          </article>
+          <article class="metric-card">
+            <span>运行时长</span>
+            <strong>{{ formatDuration(platformResources.uptime_seconds) }}</strong>
+            <small>{{ formatOpsNumber(platformResources.process_count) }} 个进程</small>
+          </article>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel ops-status-panel">
+            <div class="panel-heading">
+              <h2>平台运维状态</h2>
+              <span class="severity-pill" :class="opsSeverityClass(platformOps?.status)">{{ opsStatusText(platformOps?.status) }}</span>
+            </div>
+            <div class="kv-list">
+              <div><span>生成时间</span><strong>{{ formatTime(platformOps?.generated_at ?? 0) }}</strong></div>
+              <div><span>运行目录</span><strong>{{ platformOps?.runtime_dir ?? '-' }}</strong></div>
+              <div><span>运行配置</span><strong>{{ platformOps?.runtime_path ?? '-' }}</strong></div>
+              <div><span>数据库状态</span><strong>{{ systemStatus.database === 'ok' ? '正常' : '降级' }}</strong></div>
+            </div>
+            <div class="ops-recommendation-list">
+              <p v-for="item in platformOpsRecommendations" :key="`ops-page-rec-${item}`">{{ item }}</p>
+            </div>
+          </section>
+          <section class="table-panel ops-status-panel">
+            <div class="panel-heading">
+              <h2>服务器资源</h2>
+              <span class="severity-pill" :class="opsSeverityClass(platformResources.status)">{{ opsStatusText(platformResources.status) }}</span>
+            </div>
+            <div class="kv-list">
+              <div><span>内存</span><strong>{{ formatBytes(platformResources.used_memory_bytes ?? 0) }} / {{ formatBytes(platformResources.total_memory_bytes ?? 0) }}</strong></div>
+              <div><span>负载</span><strong>{{ formatLoad(platformResources.load1) }} / {{ formatLoad(platformResources.load5) }} / {{ formatLoad(platformResources.load15) }}</strong></div>
+              <div><span>CPU</span><strong>{{ formatOpsNumber(platformResources.cpu_count) }} 核</strong></div>
+              <div><span>运行时长</span><strong>{{ formatDuration(platformResources.uptime_seconds) }}</strong></div>
+            </div>
+            <p v-if="platformResources.error" class="muted-text negative">{{ platformResources.error }}</p>
+          </section>
+        </section>
+        <section class="table-panel wide-key-table ops-service-table">
+          <div class="section-heading">
+            <h2>服务健康检查</h2>
+            <span>{{ platformServices.length.toLocaleString() }} 个检查项 / {{ platformActionableServices.length.toLocaleString() }} 个需关注</span>
+          </div>
+          <div v-if="platformServices.length === 0" class="empty-state">暂无服务检查数据</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>服务</th>
+                <th>状态</th>
+                <th>角色</th>
+                <th>端点</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="service in platformServices" :key="service.name">
+                <td>{{ service.name }}</td>
+                <td><span class="severity-pill" :class="opsSeverityClass(service.status)">{{ opsStatusText(service.status) }}</span></td>
+                <td>{{ service.role }}</td>
+                <td :title="service.endpoint">{{ service.endpoint || '-' }}</td>
+                <td :title="service.detail">{{ service.detail }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="tables-grid analysis-grid">
+          <section class="table-panel ops-status-panel">
+            <div class="panel-heading">
+              <h2>磁盘水位</h2>
+              <span>{{ platformOpsDisks.length.toLocaleString() }} 个路径</span>
+            </div>
+            <div v-if="platformOpsDisks.length === 0" class="empty-state">暂无磁盘状态</div>
+            <div v-else class="disk-usage-list">
+              <article v-for="disk in platformOpsDisks" :key="`${disk.label}-${disk.path}`" class="disk-usage-row">
+                <div class="disk-usage-heading">
+                  <strong>{{ disk.label }} / {{ disk.path }}</strong>
+                  <span class="severity-pill" :class="opsSeverityClass(disk.status)">{{ opsStatusText(disk.status) }}</span>
+                </div>
+                <div class="disk-usage-bar">
+                  <span :style="{ width: diskUsageWidth(disk.used_ratio) }"></span>
+                </div>
+                <div class="disk-usage-meta">
+                  <span>已用 {{ formatPercent(disk.used_ratio) }}</span>
+                  <span>可用 {{ formatBytes(disk.free_bytes) }}</span>
+                  <span>总量 {{ formatBytes(disk.total_bytes) }}</span>
+                </div>
+                <p v-if="disk.error" class="muted-text negative">{{ disk.error }}</p>
+              </article>
+            </div>
+          </section>
+          <section class="table-panel ops-status-panel">
+            <div class="panel-heading">
+              <h2>部署环境</h2>
+              <span>{{ platformDeployment.in_container ? '容器内运行' : '宿主机运行' }}</span>
+            </div>
+            <div class="kv-list">
+              <div><span>主机名</span><strong>{{ platformDeployment.hostname ?? '-' }}</strong></div>
+              <div><span>系统架构</span><strong>{{ platformDeployment.os ?? '-' }} / {{ platformDeployment.arch ?? '-' }}</strong></div>
+              <div><span>Go 版本</span><strong>{{ platformDeployment.go_version ?? '-' }}</strong></div>
+              <div><span>API 地址</span><strong>{{ platformDeployment.api_addr ?? '-' }}</strong></div>
+              <div><span>ClickHouse</span><strong>{{ platformDeployment.clickhouse_url ?? '-' }}</strong></div>
+              <div><span>Redis</span><strong>{{ platformDeployment.redis_addr ?? '-' }}</strong></div>
+              <div><span>认证</span><strong>{{ platformDeployment.auth_enabled ? '已启用' : '未启用' }}</strong></div>
+              <div><span>AI 模式</span><strong>{{ platformDeployment.ai_provider ?? '-' }} / {{ platformDeployment.ai_mode ?? '-' }}</strong></div>
+            </div>
+            <div class="ops-hint-list">
+              <span v-for="item in platformOpsHints" :key="`ops-page-hint-${item}`">{{ item }}</span>
+            </div>
+          </section>
         </section>
       </template>
 

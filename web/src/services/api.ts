@@ -179,6 +179,77 @@ export interface CollectorConfig {
   updated_at?: number;
 }
 
+export interface DiskUsageStatus {
+  label: string;
+  path: string;
+  stat_path?: string;
+  status: string;
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  used_ratio: number;
+  error?: string;
+}
+
+export interface PlatformOpsStatus {
+  generated_at: number;
+  status: string;
+  summary: string;
+  runtime_path: string;
+  runtime_dir: string;
+  disks: DiskUsageStatus[];
+  resources?: {
+    status: string;
+    memory_status?: string;
+    load_status?: string;
+    total_memory_bytes?: number;
+    used_memory_bytes?: number;
+    free_memory_bytes?: number;
+    memory_used_ratio?: number;
+    load1?: number;
+    load5?: number;
+    load15?: number;
+    cpu_count?: number;
+    uptime_seconds?: number;
+    process_count?: number;
+    error?: string;
+  };
+  services?: Array<{
+    name: string;
+    role: string;
+    status: string;
+    detail: string;
+    endpoint: string;
+    actionable?: boolean;
+  }>;
+  deployment?: {
+    hostname?: string;
+    in_container?: boolean;
+    os?: string;
+    arch?: string;
+    go_version?: string;
+    cpu_count?: number;
+    api_addr?: string;
+    redis_addr?: string;
+    clickhouse_url?: string;
+    database?: string;
+    auth_enabled?: boolean;
+    ai_mode?: string;
+    ai_provider?: string;
+    build_version?: string;
+    git_commit?: string;
+  };
+  data_retention: {
+    clickhouse_retention_days: number;
+    session_retention_days: number;
+    audit_retention_days: number;
+    config_version_limit: number;
+    export_enabled: boolean;
+  };
+  recommendations: string[];
+  deployment_hints: string[];
+}
+
 export interface SystemStatus {
   database: string;
   latest_window_ts: number;
@@ -186,6 +257,7 @@ export interface SystemStatus {
   sources_24h: number;
   interfaces_24h: number;
   collector?: CollectorConfig & { id?: string };
+  ops?: PlatformOpsStatus;
 }
 
 export interface DataQualitySummary {
