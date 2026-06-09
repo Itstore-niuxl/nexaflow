@@ -78,6 +78,8 @@ type SecuritySettings struct {
 	ReadOnlyPassword     string        `json:"readonly_password,omitempty"`
 	Users                []UserAccount `json:"users,omitempty"`
 	SessionTTLHours      int           `json:"session_ttl_hours"`
+	MaxLoginFailures     int           `json:"max_login_failures"`
+	LockoutMinutes       int           `json:"lockout_minutes"`
 	RequireAuditForWrite bool          `json:"require_audit_for_write"`
 	AllowFrontendSecrets bool          `json:"allow_frontend_secrets"`
 }
@@ -91,6 +93,8 @@ type UserAccount struct {
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
 	LastLoginAt  int64  `json:"last_login_at,omitempty"`
+	FailedLogins int    `json:"failed_logins,omitempty"`
+	LockedUntil  int64  `json:"locked_until,omitempty"`
 }
 
 type NotificationSettings struct {
@@ -277,6 +281,8 @@ func DefaultSystemSettings(cfg Config) SystemSettings {
 			AdminPassword:        cfg.AuthPassword,
 			ReadOnlyPassword:     cfg.AuthReadOnlyPassword,
 			SessionTTLHours:      12,
+			MaxLoginFailures:     5,
+			LockoutMinutes:       15,
 			RequireAuditForWrite: true,
 			AllowFrontendSecrets: true,
 		},
@@ -444,6 +450,18 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	}
 	if settings.Security.SessionTTLHours > 168 {
 		settings.Security.SessionTTLHours = 168
+	}
+	if settings.Security.MaxLoginFailures <= 0 {
+		settings.Security.MaxLoginFailures = 5
+	}
+	if settings.Security.MaxLoginFailures > 20 {
+		settings.Security.MaxLoginFailures = 20
+	}
+	if settings.Security.LockoutMinutes <= 0 {
+		settings.Security.LockoutMinutes = 15
+	}
+	if settings.Security.LockoutMinutes > 1440 {
+		settings.Security.LockoutMinutes = 1440
 	}
 	settings.Security.Users = normalizeUserAccounts(settings.Security.Users)
 	if !settings.Security.AuthEnabled {

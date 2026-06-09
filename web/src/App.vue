@@ -153,6 +153,8 @@ const emptySystemSettings = (): SystemSettings => ({
     admin_password_set: false,
     readonly_password_set: false,
     session_ttl_hours: 12,
+    max_login_failures: 5,
+    lockout_minutes: 15,
     require_audit_for_write: true,
     allow_frontend_secrets: true
   },
@@ -8641,6 +8643,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <label><span>管理员密码</span><input v-model="systemSettings.security.admin_password" type="password" :placeholder="systemSettings.security.admin_password_set ? '留空保持原密码' : '设置管理员密码'" /></label>
               <label><span>观察员密码</span><input v-model="systemSettings.security.readonly_password" type="password" :placeholder="systemSettings.security.readonly_password_set ? '留空保持原密码' : '设置只读密码'" /></label>
               <label><span>会话时长小时</span><input v-model.number="systemSettings.security.session_ttl_hours" type="number" min="1" max="168" /></label>
+              <label><span>失败锁定阈值</span><input v-model.number="systemSettings.security.max_login_failures" type="number" min="1" max="20" /></label>
+              <label><span>锁定分钟数</span><input v-model.number="systemSettings.security.lockout_minutes" type="number" min="1" max="1440" /></label>
             </div>
             <label class="check-row"><input v-model="systemSettings.security.auth_enabled" type="checkbox" /> 启用控制台登录保护</label>
             <label class="check-row"><input v-model="systemSettings.security.readonly_enabled" type="checkbox" /> 启用观察员只读角色</label>
@@ -8679,6 +8683,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <th>角色</th>
                 <th>状态</th>
                 <th>密码</th>
+                <th>登录安全</th>
                 <th>权限</th>
                 <th>最近登录</th>
                 <th>更新时间</th>
@@ -8692,6 +8697,11 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ userRoleText(user.role) }}</td>
                 <td><span class="severity-pill" :class="user.status === 'active' ? 'healthy' : 'warning'">{{ userStatusText(user.status) }}</span></td>
                 <td>{{ user.password_set ? '已设置' : '未设置' }}</td>
+                <td>
+                  <span class="cell-subtle">
+                    {{ user.locked ? `锁定至 ${formatTime(user.locked_until ?? 0)}` : `失败 ${user.failed_login_count ?? 0} 次` }}
+                  </span>
+                </td>
                 <td>
                   <span class="cell-subtle">
                     {{ user.can_write ? '写入' : '只读' }} / {{ user.can_audit ? '审计' : '非审计' }} / {{ user.can_export ? '导出' : '禁导出' }}

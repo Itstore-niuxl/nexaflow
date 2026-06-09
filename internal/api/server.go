@@ -2197,11 +2197,15 @@ func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
 		role = authRoleAdmin
 	}
 	writeJSON(w, map[string]any{"data": map[string]any{
-		"enabled":       enabled,
-		"authenticated": authenticated,
-		"actor":         actor,
-		"role":          role,
-		"can_write":     !enabled || (authenticated && role == authRoleAdmin),
+		"enabled":         enabled,
+		"authenticated":   authenticated,
+		"actor":           actor,
+		"role":            role,
+		"can_write":       !enabled || (authenticated && boolCapability(role, "can_write")),
+		"can_export":      !enabled || (authenticated && boolCapability(role, "can_export")),
+		"can_audit":       !enabled || (authenticated && boolCapability(role, "can_audit")),
+		"can_configure":   !enabled || (authenticated && boolCapability(role, "can_configure")),
+		"can_investigate": !enabled || (authenticated && boolCapability(role, "can_investigate")),
 	}})
 }
 
@@ -2224,6 +2228,10 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	identity, ok := s.loginIdentity(body.Actor, body.Password)
 	if !ok {
+		s.recordUserLoginFailure(body.Actor)
+		if s.store != nil {
+			_ = s.store.RecordAuditEvent(r.Context(), strings.TrimSpace(body.Actor), "auth.login.failed", "console", "控制台登录失败："+strings.TrimSpace(body.Actor), map[string]any{"actor": strings.TrimSpace(body.Actor)}, auditClientIP(r))
+		}
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
@@ -2232,8 +2240,14 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordUserLogin(identity.Actor)
-	_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.login", "console", "控制台登录："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role, "can_write": identity.Role == authRoleAdmin}})
+	if s.store != nil {
+		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.login", "console", "控制台登录："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
+	}
+	data := map[string]any{"enabled": true, "authenticated": true, "actor": identity.Actor, "role": identity.Role}
+	for key, value := range roleCapabilities(identity.Role) {
+		data[key] = value
+	}
+	writeJSON(w, map[string]any{"data": data})
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
@@ -2309,6 +2323,9 @@ func (s *Server) loginIdentity(actor, password string) (authIdentity, bool) {
 		if username != "" && user.Username != username {
 			continue
 		}
+		if user.LockedUntil > time.Now().Unix() {
+			return authIdentity{}, false
+		}
 		if verifyPasswordHash(password, user.PasswordHash) {
 			return authIdentity{Actor: user.Username, Role: normalizeAuthRole(user.Role)}, true
 		}
@@ -2333,10 +2350,40 @@ func (s *Server) recordUserLogin(username string) {
 	for idx := range settings.Security.Users {
 		if settings.Security.Users[idx].Username == username {
 			settings.Security.Users[idx].LastLoginAt = now
+			settings.Security.Users[idx].FailedLogins = 0
+			settings.Security.Users[idx].LockedUntil = 0
 			settings.Security.Users[idx].UpdatedAt = now
 			changed = true
 			break
 		}
+	}
+	if changed {
+		_ = config.SaveSystemSettings(path, settings)
+	}
+}
+
+func (s *Server) recordUserLoginFailure(username string) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return
+	}
+	path := s.systemSettingsPath()
+	settings := s.loadSystemSettings()
+	changed := false
+	now := time.Now().Unix()
+	limit := settings.Security.MaxLoginFailures
+	lockoutSeconds := int64(settings.Security.LockoutMinutes * 60)
+	for idx := range settings.Security.Users {
+		if settings.Security.Users[idx].Username != username {
+			continue
+		}
+		settings.Security.Users[idx].FailedLogins++
+		settings.Security.Users[idx].UpdatedAt = now
+		if limit > 0 && settings.Security.Users[idx].FailedLogins >= limit {
+			settings.Security.Users[idx].LockedUntil = now + lockoutSeconds
+		}
+		changed = true
+		break
 	}
 	if changed {
 		_ = config.SaveSystemSettings(path, settings)
@@ -2705,6 +2752,8 @@ func (s *Server) publicSystemSettings(settings config.SystemSettings) map[string
 			"admin_password_set":      strings.TrimSpace(settings.Security.AdminPassword) != "",
 			"readonly_password_set":   strings.TrimSpace(settings.Security.ReadOnlyPassword) != "",
 			"session_ttl_hours":       settings.Security.SessionTTLHours,
+			"max_login_failures":      settings.Security.MaxLoginFailures,
+			"lockout_minutes":         settings.Security.LockoutMinutes,
 			"require_audit_for_write": settings.Security.RequireAuditForWrite,
 			"allow_frontend_secrets":  settings.Security.AllowFrontendSecrets,
 		},
@@ -2729,22 +2778,40 @@ func publicUserAccounts(users []config.UserAccount) []map[string]any {
 	items := []map[string]any{}
 	for _, user := range normalizeUserSettings(users) {
 		items = append(items, map[string]any{
-			"username":        user.Username,
-			"display_name":    user.DisplayName,
-			"role":            user.Role,
-			"status":          user.Status,
-			"password_set":    strings.TrimSpace(user.PasswordHash) != "",
-			"created_at":      user.CreatedAt,
-			"updated_at":      user.UpdatedAt,
-			"last_login_at":   user.LastLoginAt,
-			"can_write":       user.Role == authRoleAdmin && user.Status == "active",
-			"can_export":      user.Status == "active" && user.Role != "viewer",
-			"can_audit":       user.Status == "active" && (user.Role == authRoleAdmin || user.Role == "auditor"),
-			"can_configure":   user.Role == authRoleAdmin && user.Status == "active",
-			"can_investigate": user.Status == "active" && (user.Role == authRoleAdmin || user.Role == "analyst"),
+			"username":           user.Username,
+			"display_name":       user.DisplayName,
+			"role":               user.Role,
+			"status":             user.Status,
+			"password_set":       strings.TrimSpace(user.PasswordHash) != "",
+			"created_at":         user.CreatedAt,
+			"updated_at":         user.UpdatedAt,
+			"last_login_at":      user.LastLoginAt,
+			"failed_login_count": user.FailedLogins,
+			"locked_until":       user.LockedUntil,
+			"locked":             user.LockedUntil > time.Now().Unix(),
+			"can_write":          user.Status == "active" && boolCapability(user.Role, "can_write"),
+			"can_export":         user.Status == "active" && boolCapability(user.Role, "can_export"),
+			"can_audit":          user.Status == "active" && boolCapability(user.Role, "can_audit"),
+			"can_configure":      user.Status == "active" && boolCapability(user.Role, "can_configure"),
+			"can_investigate":    user.Status == "active" && boolCapability(user.Role, "can_investigate"),
 		})
 	}
 	return items
+}
+
+func roleCapabilities(role string) map[string]bool {
+	role = normalizeAuthRole(role)
+	return map[string]bool{
+		"can_write":       role == authRoleAdmin,
+		"can_export":      role == authRoleAdmin || role == "analyst" || role == "auditor",
+		"can_audit":       role == authRoleAdmin || role == "auditor",
+		"can_configure":   role == authRoleAdmin,
+		"can_investigate": role == authRoleAdmin || role == "analyst",
+	}
+}
+
+func boolCapability(role, capability string) bool {
+	return roleCapabilities(role)[capability]
 }
 
 func userAccountSummary(users []config.UserAccount) map[string]any {

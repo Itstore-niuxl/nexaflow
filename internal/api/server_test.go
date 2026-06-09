@@ -97,6 +97,48 @@ func TestLoginIdentityUsesManagedUsers(t *testing.T) {
 	}
 }
 
+func TestManagedUserLoginFailureLockout(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.MaxLoginFailures = 2
+	settings.Security.LockoutMinutes = 10
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath})
+	server.recordUserLoginFailure("admin")
+	server.recordUserLoginFailure("admin")
+	locked := server.loadSystemSettings().Security.Users[0]
+	if locked.FailedLogins != 2 || locked.LockedUntil <= time.Now().Unix() {
+		t.Fatalf("expected locked account, got %#v", locked)
+	}
+	if _, ok := server.loginIdentity("admin", "admin-pass"); ok {
+		t.Fatal("locked user should not log in")
+	}
+	locked.LockedUntil = time.Now().Unix() - 1
+	settings = server.loadSystemSettings()
+	settings.Security.Users[0] = locked
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save unlocked settings: %v", err)
+	}
+	if _, ok := server.loginIdentity("admin", "admin-pass"); !ok {
+		t.Fatal("expected login after lock expires")
+	}
+	server.recordUserLogin("admin")
+	user := server.loadSystemSettings().Security.Users[0]
+	if user.FailedLogins != 0 || user.LockedUntil != 0 || user.LastLoginAt == 0 {
+		t.Fatalf("expected login state reset, got %#v", user)
+	}
+}
+
 func TestRequestNeedsWriteAccess(t *testing.T) {
 	getReq, _ := http.NewRequest(http.MethodGet, "/api/v1/collectors/config", nil)
 	if requestNeedsWriteAccess(getReq) {

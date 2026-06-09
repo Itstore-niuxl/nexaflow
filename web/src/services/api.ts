@@ -88,6 +88,10 @@ export interface AuthStatus {
   actor: string;
   role?: string;
   can_write?: boolean;
+  can_export?: boolean;
+  can_audit?: boolean;
+  can_configure?: boolean;
+  can_investigate?: boolean;
 }
 
 export interface SystemSettings {
@@ -121,6 +125,8 @@ export interface SystemSettings {
     admin_password_set?: boolean;
     readonly_password_set?: boolean;
     session_ttl_hours: number;
+    max_login_failures: number;
+    lockout_minutes: number;
     require_audit_for_write: boolean;
     allow_frontend_secrets: boolean;
   };
@@ -167,6 +173,9 @@ export interface SystemUser {
   can_audit?: boolean;
   can_configure?: boolean;
   can_investigate?: boolean;
+  failed_login_count?: number;
+  locked_until?: number;
+  locked?: boolean;
 }
 
 export interface SystemUsers {
