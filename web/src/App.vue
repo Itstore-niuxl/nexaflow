@@ -4016,6 +4016,14 @@ const exportReportOverview = async () => {
   downloadBlob(filename, blob);
 };
 
+const exportAuditEvents = async () => {
+  const response = await api.downloadAuditEvents(500);
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'nexaflow-audit-events.csv';
+  downloadBlob(filename, blob);
+};
+
 const exportRuleFindings = () => {
   const rows = [
     ['规则', '对象', '级别', '指标', '当前值', '阈值', '流量字节', '包数', '摘要', '建议', '命中时间'],
@@ -7559,6 +7567,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <div class="section-heading">
             <h2>操作审计明细</h2>
             <span>{{ auditEvents.length.toLocaleString() }} 条记录</span>
+            <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportAuditEvents">导出审计 CSV</button>
           </div>
           <div v-if="auditEvents.length === 0" class="empty-state">暂无审计记录</div>
           <table v-else>

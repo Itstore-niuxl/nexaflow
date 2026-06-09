@@ -662,6 +662,21 @@ func TestReportOverviewCSV(t *testing.T) {
 	}
 }
 
+func TestAuditEventsCSV(t *testing.T) {
+	body, err := auditEventsCSV([]map[string]any{
+		{"ts": int64(1700000000), "actor": "admin", "action": "report.export", "target": "overview", "summary": "导出巡检报表", "client_ip": "127.0.0.1", "detail_text": `{"format":"csv"}`},
+	})
+	if err != nil {
+		t.Fatalf("build audit csv: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{"time,actor,action,target,summary,client_ip,detail", "admin", "report.export", "导出巡检报表"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected audit CSV to contain %q, got %s", want, text)
+		}
+	}
+}
+
 func TestBuildAIRuleEffectiveness(t *testing.T) {
 	rules := []model.DetectionRule{
 		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},

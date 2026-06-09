@@ -1576,6 +1576,13 @@ export const api = {
   async auditEvents(limit = 80) {
     return json<{ data: AuditEvent[]; degraded: boolean }>(`/api/v1/system/audit-events?limit=${limit}`);
   },
+  async downloadAuditEvents(limit = 200) {
+    const response = await fetch(`/api/v1/system/audit-events/export?limit=${limit}&format=csv`);
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response;
+  },
   async configVersions(scope = '', limit = 80) {
     return json<{ data: ConfigVersion[]; degraded: boolean }>(
       `/api/v1/system/config-versions?scope=${encodeURIComponent(scope)}&limit=${limit}`
