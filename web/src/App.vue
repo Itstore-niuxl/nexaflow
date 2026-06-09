@@ -2822,6 +2822,14 @@ const allVisiblePendingSelected = computed(() => {
   const visiblePending = filteredAIApprovals.value.filter((row) => row.status === 'pending');
   return visiblePending.length > 0 && visiblePending.every((row) => selectedAIApprovalIds.value.includes(row.id));
 });
+const pendingAIApprovalFor = (type: string, title: string, target: string) =>
+  aiApprovals.value.find(
+    (row) =>
+      row.status === 'pending' &&
+      row.type.trim().toLowerCase() === type.trim().toLowerCase() &&
+      row.title.trim().toLowerCase() === title.trim().toLowerCase() &&
+      row.target.trim().toLowerCase() === target.trim().toLowerCase()
+  );
 const aiApprovalPendingTypeItems = computed<TopItem[]>(() =>
   aiApprovalStats.value.pending_type_counts.map((row) => ({ key: row.label, bytes: row.count, packets: 0 }))
 );
@@ -4655,7 +4663,15 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <div class="ai-workbench-actions">
                 <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canWrite" @click="useGovernanceRule(item)">填入规则草案</button>
                 <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canWrite" @click="reviewGovernanceSilence(item)">复核白名单</button>
-                <button v-if="item.proposed_rule || item.proposed_silence" class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="submitGovernanceApproval(item)">提交审批</button>
+                <button
+                  v-if="item.proposed_rule || item.proposed_silence"
+                  class="inline-button"
+                  type="button"
+                  :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
+                  @click="submitGovernanceApproval(item)"
+                >
+                  {{ pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target) ? '已在队列' : '提交审批' }}
+                </button>
               </div>
             </article>
           </div>
@@ -4700,7 +4716,9 @@ const downloadBlob = (filename: string, blob: Blob) => {
               </div>
               <div class="ai-workbench-actions">
                 <button class="command-button" type="button" :disabled="!canWrite" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
-                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="submitAssetEnrichmentApproval(item)">提交审批</button>
+                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor('asset_enrichment', item.title, item.ip))" @click="submitAssetEnrichmentApproval(item)">
+                  {{ pendingAIApprovalFor('asset_enrichment', item.title, item.ip) ? '已在队列' : '提交审批' }}
+                </button>
                 <button class="inline-button" type="button" @click="profileIP = item.ip; setView('asset-risk')">查看资产风险</button>
               </div>
             </article>
@@ -6909,10 +6927,10 @@ const downloadBlob = (filename: string, blob: Blob) => {
                     v-if="item.proposed_rule || item.proposed_silence"
                     class="command-button"
                     type="button"
-                    :disabled="!canWrite || aiApprovalBusy === item.id"
+                    :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
                     @click="submitGovernanceApproval(item)"
                   >
-                    {{ aiApprovalBusy === item.id ? '提交中...' : '提交审批' }}
+                    {{ pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target) ? '已在队列' : aiApprovalBusy === item.id ? '提交中...' : '提交审批' }}
                   </button>
                 </div>
               </article>

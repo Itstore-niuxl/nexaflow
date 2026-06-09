@@ -462,6 +462,45 @@ func TestAIApprovalBulkReject(t *testing.T) {
 	}
 }
 
+func TestAIApprovalCreateDeduplicatesPendingRequest(t *testing.T) {
+	dir := t.TempDir()
+	server := New(nil, config.Config{
+		RuntimePath:   dir + "/collector_config.json",
+		Mode:          "mock",
+		Iface:         "eth0",
+		CollectorID:   "test-collector",
+		BandwidthMbps: 1000,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/approval-requests", nil)
+	request := aiApprovalRequest{
+		Type:     "rule",
+		Severity: "warning",
+		Title:    "AI 推荐：公网会话突增",
+		Target:   "211.93.22.130 -> 10.2.0.12:8081",
+		Summary:  "公网会话突增，建议沉淀检测规则。",
+		Payload:  map[string]any{"proposed_rule": map[string]any{"name": "AI 推荐：公网会话突增", "metric": "external_sessions", "threshold": float64(30)}},
+	}
+	first, err := server.createAIApprovalRequest(req, request)
+	if err != nil {
+		t.Fatalf("create first approval: %v", err)
+	}
+	request.Title = "  ai 推荐：公网会话突增  "
+	duplicate, err := server.createAIApprovalRequest(req, request)
+	if err != nil {
+		t.Fatalf("create duplicate approval: %v", err)
+	}
+	if duplicate.ID != first.ID {
+		t.Fatalf("expected duplicate to return existing approval, got first=%s duplicate=%s", first.ID, duplicate.ID)
+	}
+	items, err := server.loadAIApprovalRequests()
+	if err != nil {
+		t.Fatalf("load approvals: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one approval after duplicate submit, got %#v", items)
+	}
+}
+
 func TestAIIncidentContextUsable(t *testing.T) {
 	if aiIncidentContextUsable(map[string]any{}) {
 		t.Fatal("empty context should not be usable")

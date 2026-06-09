@@ -202,6 +202,19 @@ func (s *Server) createAIApprovalRequest(r *http.Request, request aiApprovalRequ
 	if len(request.Payload) == 0 {
 		return request, fmt.Errorf("payload is required")
 	}
+	items, err := s.loadAIApprovalRequests()
+	if err != nil {
+		return request, err
+	}
+	if existing, ok := findPendingDuplicateAIApproval(items, request); ok {
+		s.audit(r, "ai.approval.duplicate", existing.ID, "AI 建议已在审批队列："+existing.Title, map[string]any{
+			"id":     existing.ID,
+			"type":   existing.Type,
+			"target": existing.Target,
+			"title":  existing.Title,
+		})
+		return existing, nil
+	}
 	request.ID = strings.TrimSpace(request.ID)
 	if request.ID == "" {
 		request.ID = "ai-approval-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -209,7 +222,6 @@ func (s *Server) createAIApprovalRequest(r *http.Request, request aiApprovalRequ
 	request.Status = "pending"
 	request.CreatedBy = auditActor(r)
 	request.CreatedAt = time.Now().Unix()
-	items, _ := s.loadAIApprovalRequests()
 	items = upsertAIApprovalRequest(items, request)
 	if err := s.saveAIApprovalRequests(items); err != nil {
 		return request, err
@@ -693,6 +705,27 @@ func upsertAIApprovalRequest(items []aiApprovalRequest, request aiApprovalReques
 		}
 	}
 	return append(items, request)
+}
+
+func findPendingDuplicateAIApproval(items []aiApprovalRequest, request aiApprovalRequest) (aiApprovalRequest, bool) {
+	requestType := normalizeAIApprovalDedupeValue(request.Type)
+	requestTitle := normalizeAIApprovalDedupeValue(request.Title)
+	requestTarget := normalizeAIApprovalDedupeValue(request.Target)
+	for _, item := range items {
+		if item.Status != "pending" {
+			continue
+		}
+		if normalizeAIApprovalDedupeValue(item.Type) == requestType &&
+			normalizeAIApprovalDedupeValue(item.Title) == requestTitle &&
+			normalizeAIApprovalDedupeValue(item.Target) == requestTarget {
+			return item, true
+		}
+	}
+	return aiApprovalRequest{}, false
+}
+
+func normalizeAIApprovalDedupeValue(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func aiApprovalFiltersFromRequest(r *http.Request) aiApprovalFilters {
