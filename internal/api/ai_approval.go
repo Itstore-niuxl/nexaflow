@@ -56,13 +56,21 @@ type aiApprovalBulkReviewResult struct {
 	Errors   []string            `json:"errors"`
 }
 
+type aiApprovalFilters struct {
+	Status   string
+	Type     string
+	Severity string
+}
+
 func (s *Server) aiApprovalRequests(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		filters := aiApprovalFiltersFromRequest(r)
+		limit := queryLimit(r, 200, 2000)
 		items, err := s.loadAIApprovalRequests()
-		if status != "" {
-			items = filterAIApprovalRequests(items, status)
+		items = filterAIApprovalRequests(items, filters)
+		if len(items) > limit {
+			items = items[:limit]
 		}
 		writeJSON(w, map[string]any{"data": items, "degraded": err != nil})
 	case http.MethodPost:
@@ -340,16 +348,14 @@ func (s *Server) aiApprovalRequestsExport(w http.ResponseWriter, r *http.Request
 		http.Error(w, "export is disabled", http.StatusForbidden)
 		return
 	}
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	filters := aiApprovalFiltersFromRequest(r)
 	limit := queryLimit(r, 200, 2000)
 	items, err := s.loadAIApprovalRequests()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if status != "" {
-		items = filterAIApprovalRequests(items, status)
-	}
+	items = filterAIApprovalRequests(items, filters)
 	if len(items) > limit {
 		items = items[:limit]
 	}
@@ -358,18 +364,22 @@ func (s *Server) aiApprovalRequestsExport(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	statusPart := safeFilenamePart(firstString(status, "all"))
-	filename := fmt.Sprintf("nexaflow-ai-approvals-%s-%s.csv", statusPart, time.Now().Format("20060102-150405"))
+	statusPart := safeFilenamePart(firstString(filters.Status, "all"))
+	typePart := safeFilenamePart(firstString(filters.Type, "all"))
+	severityPart := safeFilenamePart(firstString(filters.Severity, "all"))
+	filename := fmt.Sprintf("nexaflow-ai-approvals-%s-%s-%s-%s.csv", statusPart, typePart, severityPart, time.Now().Format("20060102-150405"))
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.Header().Set("Cache-Control", "no-store")
 	if _, writeErr := w.Write(body); writeErr == nil {
 		s.audit(r, "ai.approval.export", "ai_approval_requests", "导出 AI 审批队列："+filename, map[string]any{
-			"format": "csv",
-			"status": status,
-			"limit":  limit,
-			"rows":   len(items),
-			"bytes":  len(body),
+			"format":   "csv",
+			"status":   filters.Status,
+			"type":     filters.Type,
+			"severity": filters.Severity,
+			"limit":    limit,
+			"rows":     len(items),
+			"bytes":    len(body),
 		})
 	}
 }
@@ -685,12 +695,35 @@ func upsertAIApprovalRequest(items []aiApprovalRequest, request aiApprovalReques
 	return append(items, request)
 }
 
-func filterAIApprovalRequests(items []aiApprovalRequest, status string) []aiApprovalRequest {
+func aiApprovalFiltersFromRequest(r *http.Request) aiApprovalFilters {
+	return aiApprovalFilters{
+		Status:   normalizeApprovalFilterValue(r.URL.Query().Get("status")),
+		Type:     normalizeApprovalFilterValue(r.URL.Query().Get("type")),
+		Severity: normalizeApprovalFilterValue(r.URL.Query().Get("severity")),
+	}
+}
+
+func normalizeApprovalFilterValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "all" {
+		return ""
+	}
+	return value
+}
+
+func filterAIApprovalRequests(items []aiApprovalRequest, filters aiApprovalFilters) []aiApprovalRequest {
 	result := []aiApprovalRequest{}
 	for _, item := range items {
-		if item.Status == status {
-			result = append(result, item)
+		if filters.Status != "" && item.Status != filters.Status {
+			continue
 		}
+		if filters.Type != "" && item.Type != filters.Type {
+			continue
+		}
+		if filters.Severity != "" && item.Severity != filters.Severity {
+			continue
+		}
+		result = append(result, item)
 	}
 	return result
 }

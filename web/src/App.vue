@@ -4165,7 +4165,10 @@ const exportConfigVersions = async () => {
 };
 
 const exportAIApprovals = async () => {
-  const response = await api.downloadAIApprovalRequests('', 500);
+  const status = aiApprovalStatusFilter.value === 'all' ? '' : aiApprovalStatusFilter.value;
+  const type = aiApprovalTypeFilter.value === 'all' ? '' : aiApprovalTypeFilter.value;
+  const severity = aiApprovalSeverityFilter.value === 'all' ? '' : aiApprovalSeverityFilter.value;
+  const response = await api.downloadAIApprovalRequests(status, type, severity, 500);
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
   const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'nexaflow-ai-approvals.csv';

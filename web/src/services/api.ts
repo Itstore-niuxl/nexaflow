@@ -1480,16 +1480,26 @@ export const api = {
       `/api/v1/ai/asset-enrichment-suggestions?minutes=${minutes}&limit=${limit}`
     );
   },
-  async aiApprovalRequests(status = '') {
-    const query = status ? `?status=${encodeURIComponent(status)}` : '';
-    return json<{ data: AIApprovalRequest[]; degraded: boolean }>(`/api/v1/ai/approval-requests${query}`);
+  async aiApprovalRequests(status = '', type = '', severity = '', limit = 500) {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+    if (severity) params.set('severity', severity);
+    params.set('limit', String(limit));
+    return json<{ data: AIApprovalRequest[]; degraded: boolean }>(`/api/v1/ai/approval-requests?${params.toString()}`);
   },
   async aiApprovalStats() {
     return json<{ data: AIApprovalStats; degraded: boolean }>('/api/v1/ai/approval-stats');
   },
-  async downloadAIApprovalRequests(status = '', limit = 500) {
+  async downloadAIApprovalRequests(status = '', type = '', severity = '', limit = 500) {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (type) params.set('type', type);
+    if (severity) params.set('severity', severity);
+    params.set('limit', String(limit));
+    params.set('format', 'csv');
     const response = await fetch(
-      `/api/v1/ai/approval-requests/export?status=${encodeURIComponent(status)}&limit=${limit}&format=csv`
+      `/api/v1/ai/approval-requests/export?${params.toString()}`
     );
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);

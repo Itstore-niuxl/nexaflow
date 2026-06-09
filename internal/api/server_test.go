@@ -837,6 +837,25 @@ func TestBuildAIApprovalStats(t *testing.T) {
 	}
 }
 
+func TestFilterAIApprovalRequests(t *testing.T) {
+	items := []aiApprovalRequest{
+		{ID: "rule-critical", Type: "rule", Status: "pending", Severity: "critical"},
+		{ID: "rule-warning", Type: "rule", Status: "approved", Severity: "warning"},
+		{ID: "asset-critical", Type: "asset_enrichment", Status: "pending", Severity: "critical"},
+	}
+	filtered := filterAIApprovalRequests(items, aiApprovalFilters{Status: "pending", Type: "rule", Severity: "critical"})
+	if len(filtered) != 1 || filtered[0].ID != "rule-critical" {
+		t.Fatalf("expected critical pending rule only, got %#v", filtered)
+	}
+	filtered = filterAIApprovalRequests(items, aiApprovalFilters{Severity: "critical"})
+	if len(filtered) != 2 {
+		t.Fatalf("expected two critical approvals, got %#v", filtered)
+	}
+	if normalizeApprovalFilterValue("all") != "" || normalizeApprovalFilterValue(" pending ") != "pending" {
+		t.Fatal("unexpected filter normalization")
+	}
+}
+
 func TestBuildAIRuleEffectiveness(t *testing.T) {
 	rules := []model.DetectionRule{
 		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},
