@@ -133,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/settings/export", s.systemSettingsExport)
 	mux.HandleFunc("/api/v1/system/settings/import", s.systemSettingsImport)
 	mux.HandleFunc("/api/v1/system/users", s.systemUsers)
+	mux.HandleFunc("/api/v1/system/users/unlock", s.systemUserUnlock)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/audit-events/export", s.auditEventsExport)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
@@ -1859,6 +1860,8 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 			users[found].UpdatedAt = now
 			if passwordHash != "" {
 				users[found].PasswordHash = passwordHash
+				users[found].FailedLogins = 0
+				users[found].LockedUntil = 0
 			}
 		} else {
 			users = append(users, config.UserAccount{
@@ -1935,6 +1938,54 @@ func (s *Server) systemUsers(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) systemUserUnlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	if username == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+	settings := s.loadSystemSettings()
+	found := -1
+	now := time.Now().Unix()
+	for idx := range settings.Security.Users {
+		if settings.Security.Users[idx].Username == username {
+			found = idx
+			break
+		}
+	}
+	if found < 0 {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+	settings.Security.Users[found].FailedLogins = 0
+	settings.Security.Users[found].LockedUntil = 0
+	settings.Security.Users[found].UpdatedAt = now
+	settings.Security.Users = normalizeUserSettings(settings.Security.Users)
+	if err := config.SaveSystemSettings(s.systemSettingsPath(), settings); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	saved := s.loadSystemSettings()
+	action := "system.user.unlock"
+	s.configSnapshot(r, "system", "users", action, "解锁用户："+username, map[string]any{"users": publicUserAccounts(saved.Security.Users)})
+	s.audit(r, action, "user:"+username, "解锁用户："+username, map[string]any{"username": username})
+	writeJSON(w, map[string]any{"data": map[string]any{
+		"users":   publicUserAccounts(saved.Security.Users),
+		"summary": userAccountSummary(saved.Security.Users),
+	}})
 }
 
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
@@ -2494,7 +2545,7 @@ func requestPermission(r *http.Request) string {
 	if strings.Contains(path, "/export") {
 		return "export"
 	}
-	if strings.HasPrefix(path, "/api/v1/system/settings") || path == "/api/v1/system/users" || path == "/api/v1/collectors/config" || path == "/api/v1/alerts/config" || path == "/api/v1/alerts/silences" || path == "/api/v1/security/rules" {
+	if strings.HasPrefix(path, "/api/v1/system/settings") || strings.HasPrefix(path, "/api/v1/system/users") || path == "/api/v1/collectors/config" || path == "/api/v1/alerts/config" || path == "/api/v1/alerts/silences" || path == "/api/v1/security/rules" {
 		if method == http.MethodGet {
 			return "read"
 		}
@@ -2975,12 +3026,17 @@ func userAccountSummary(users []config.UserAccount) map[string]any {
 		"analyst":  0,
 		"auditor":  0,
 		"viewer":   0,
+		"locked":   0,
 	}
+	now := time.Now().Unix()
 	for _, user := range normalizeUserSettings(users) {
 		if user.Status == "active" {
 			summary["active"] = int64Value(summary["active"]) + 1
 		} else {
 			summary["disabled"] = int64Value(summary["disabled"]) + 1
+		}
+		if user.LockedUntil > now {
+			summary["locked"] = int64Value(summary["locked"]) + 1
 		}
 		role := config.NormalizeUserRole(user.Role)
 		summary[role] = int64Value(summary[role]) + 1

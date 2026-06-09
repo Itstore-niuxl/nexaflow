@@ -189,6 +189,7 @@ export interface SystemUsers {
     analyst: number;
     auditor: number;
     viewer: number;
+    locked?: number;
   };
   roles?: string[];
   statuses?: string[];
@@ -1487,6 +1488,17 @@ export const api = {
   async deleteSystemUser(username: string) {
     const response = await fetch(`/api/v1/system/users?username=${encodeURIComponent(username)}`, {
       method: 'DELETE'
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: SystemUsers }>;
+  },
+  async unlockSystemUser(username: string) {
+    const response = await fetch('/api/v1/system/users/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username })
     });
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);

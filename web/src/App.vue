@@ -190,7 +190,7 @@ const emptySystemSettings = (): SystemSettings => ({
 const systemSettings = ref<SystemSettings>(emptySystemSettings());
 const emptySystemUsers = (): SystemUsers => ({
   users: [],
-  summary: { total: 0, active: 0, disabled: 0, admin: 0, analyst: 0, auditor: 0, viewer: 0 },
+  summary: { total: 0, active: 0, disabled: 0, admin: 0, analyst: 0, auditor: 0, viewer: 0, locked: 0 },
   roles: ['admin', 'analyst', 'auditor', 'viewer'],
   statuses: ['active', 'disabled']
 });
@@ -2722,6 +2722,18 @@ const deleteSystemUser = async (username: string) => {
     if (editingUsername.value === username) {
       resetUserForm();
     }
+    await refresh();
+  } finally {
+    savingUser.value = false;
+  }
+};
+
+const unlockSystemUser = async (username: string) => {
+  if (!canConfigure.value || !username) return;
+  savingUser.value = true;
+  try {
+    const result = await api.unlockSystemUser(username);
+    systemUsers.value = { ...emptySystemUsers(), ...result.data };
     await refresh();
   } finally {
     savingUser.value = false;
@@ -8738,7 +8750,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <section class="table-panel">
             <div class="panel-heading">
               <h2>用户管理</h2>
-              <span>{{ systemUsers.summary.active.toLocaleString() }} 启用 / {{ systemUsers.summary.total.toLocaleString() }} 总数</span>
+              <span>{{ systemUsers.summary.active.toLocaleString() }} 启用 / {{ (systemUsers.summary.locked ?? 0).toLocaleString() }} 锁定 / {{ systemUsers.summary.total.toLocaleString() }} 总数</span>
             </div>
             <div class="asset-editor-grid">
               <label><span>用户名</span><input v-model="userForm.username" :disabled="Boolean(editingUsername)" placeholder="zhangsan" /></label>
@@ -8756,7 +8768,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
         <section class="table-panel wide-key-table">
           <div class="panel-heading">
             <h2>用户与权限矩阵</h2>
-            <span>管理员 {{ systemUsers.summary.admin.toLocaleString() }} / 分析员 {{ systemUsers.summary.analyst.toLocaleString() }} / 审计员 {{ systemUsers.summary.auditor.toLocaleString() }}</span>
+            <span>管理员 {{ systemUsers.summary.admin.toLocaleString() }} / 分析员 {{ systemUsers.summary.analyst.toLocaleString() }} / 审计员 {{ systemUsers.summary.auditor.toLocaleString() }} / 锁定 {{ (systemUsers.summary.locked ?? 0).toLocaleString() }}</span>
           </div>
           <div v-if="systemUsers.users.length === 0" class="empty-state">暂无独立用户，当前仍使用管理员/观察员共享口令</div>
           <table v-else>
@@ -8795,6 +8807,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ formatTime(user.updated_at) }}</td>
                 <td>
                   <button class="inline-button" type="button" :disabled="savingUser" @click="editSystemUser(user)">编辑</button>
+                  <button class="inline-button" type="button" :disabled="!canConfigure || savingUser || (!user.locked && (user.failed_login_count ?? 0) === 0)" @click="unlockSystemUser(user.username)">解锁</button>
                   <button class="inline-button" type="button" :disabled="!canConfigure || savingUser" @click="toggleSystemUser(user)">{{ user.status === 'active' ? '禁用' : '启用' }}</button>
                   <button class="inline-button danger" type="button" :disabled="!canConfigure || savingUser" @click="deleteSystemUser(user.username)">删除</button>
                 </td>

@@ -173,6 +173,33 @@ func TestAuthPasswordChangesManagedUserPassword(t *testing.T) {
 	}
 }
 
+func TestSystemUserUnlockClearsLockout(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, FailedLogins: 3, LockedUntil: time.Now().Add(time.Hour).Unix()},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/users/unlock", strings.NewReader(`{"username":"admin"}`))
+	resp := httptest.NewRecorder()
+	server.systemUserUnlock(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected unlock to pass, got %d: %s", resp.Code, resp.Body.String())
+	}
+	user := server.loadSystemSettings().Security.Users[0]
+	if user.FailedLogins != 0 || user.LockedUntil != 0 {
+		t.Fatalf("expected lockout fields cleared, got %#v", user)
+	}
+}
+
 func TestRequestPermission(t *testing.T) {
 	cases := []struct {
 		method string
@@ -186,6 +213,7 @@ func TestRequestPermission(t *testing.T) {
 		{http.MethodGet, "/api/v1/reports/overview/export", "export"},
 		{http.MethodGet, "/api/v1/system/settings/export", "export"},
 		{http.MethodPost, "/api/v1/system/users", "configure"},
+		{http.MethodPost, "/api/v1/system/users/unlock", "configure"},
 		{http.MethodPost, "/api/v1/security/incident-status", "investigate"},
 		{http.MethodPost, "/api/v1/ai/query", "read"},
 		{http.MethodPost, "/api/v1/traffic/search", "write"},
