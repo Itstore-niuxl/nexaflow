@@ -325,6 +325,74 @@ func TestManagedUserPasswordResetInvalidatesOldToken(t *testing.T) {
 	}
 }
 
+func TestAuthSessionRevocationInvalidatesToken(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 10},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath, AuthSecret: "test-secret"})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	session, err := server.createAuthSession(req, "admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	token, err := server.signAuthSessionToken("admin", authRoleAdmin, session.ID, session.ExpiresAt)
+	if err != nil {
+		t.Fatalf("sign session token: %v", err)
+	}
+	authReq := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard/summary", nil)
+	authReq.AddCookie(&http.Cookie{Name: authCookieName, Value: token})
+	if _, ok := server.verifyAuthRequest(authReq); !ok {
+		t.Fatal("expected session token to verify")
+	}
+	if !server.revokeAuthSession(session.ID) {
+		t.Fatal("expected session to be revoked")
+	}
+	if _, ok := server.verifyAuthRequest(authReq); ok {
+		t.Fatal("revoked session token should be rejected")
+	}
+}
+
+func TestSystemSessionsRevokeEndpoint(t *testing.T) {
+	runtimePath := t.TempDir() + "/runtime.json"
+	passwordHash, err := hashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	settings := config.DefaultSystemSettings(config.Config{RuntimePath: runtimePath})
+	settings.Security.AuthEnabled = true
+	settings.Security.Users = []config.UserAccount{
+		{Username: "admin", DisplayName: "Admin", Role: "admin", Status: "active", PasswordHash: passwordHash, AuthVersion: 10},
+	}
+	if err := config.SaveSystemSettings(config.SystemSettingsPath(runtimePath), settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	server := New(nil, config.Config{RuntimePath: runtimePath})
+	session, err := server.createAuthSession(httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", authRoleAdmin, time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/sessions", strings.NewReader(`{"id":"`+session.ID+`"}`))
+	resp := httptest.NewRecorder()
+	server.systemSessions(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected revoke endpoint to pass, got %d: %s", resp.Code, resp.Body.String())
+	}
+	saved := server.loadSystemSettings()
+	if saved.Security.Sessions[0].RevokedAt == 0 {
+		t.Fatalf("expected session revoked, got %#v", saved.Security.Sessions[0])
+	}
+}
+
 func TestRequestPermission(t *testing.T) {
 	cases := []struct {
 		method string
@@ -339,6 +407,7 @@ func TestRequestPermission(t *testing.T) {
 		{http.MethodGet, "/api/v1/system/settings/export", "export"},
 		{http.MethodPost, "/api/v1/system/users", "configure"},
 		{http.MethodPost, "/api/v1/system/users/unlock", "configure"},
+		{http.MethodPost, "/api/v1/system/sessions", "configure"},
 		{http.MethodPost, "/api/v1/security/incident-status", "investigate"},
 		{http.MethodPost, "/api/v1/ai/query", "read"},
 		{http.MethodPost, "/api/v1/traffic/search", "write"},

@@ -62,6 +62,8 @@ import {
   type CaptureQuality,
   type Collector,
   type CollectorConfig,
+  type AuthSession,
+  type AuthSessions,
   type ConfigDiff,
   type ConfigVersion,
   type DataQuality,
@@ -213,6 +215,12 @@ const emptyUserForm = (): SystemUserInput => ({
 const systemUsers = ref<SystemUsers>(emptySystemUsers());
 const userForm = ref<SystemUserInput>(emptyUserForm());
 const editingUsername = ref('');
+const emptyAuthSessions = (): AuthSessions => ({
+  sessions: [],
+  summary: { total: 0, active: 0, expired: 0, revoked: 0 }
+});
+const authSessions = ref<AuthSessions>(emptyAuthSessions());
+const revokingSession = ref('');
 const interfaces = ref<NetworkInterface[]>([]);
 const systemStatus = ref<SystemStatus>({ database: 'unknown', latest_window_ts: 0, windows_24h: 0, sources_24h: 0, interfaces_24h: 0 });
 const emptyDataQuality = (): DataQuality => ({
@@ -917,7 +925,8 @@ const refresh = async () => {
       auditRes,
       configVersionRes,
       systemSettingsRes,
-      systemUsersRes
+      systemUsersRes,
+      systemSessionsRes
     ] = await Promise.all([
       api.summary(minutes),
       api.timeseries(minutes),
@@ -973,7 +982,8 @@ const refresh = async () => {
       api.auditEvents(120),
       api.configVersions('', 120),
       api.systemSettings(),
-      api.systemUsers()
+      api.systemUsers(),
+      api.systemSessions()
     ]);
     summary.value = summaryRes.data;
     series.value = seriesRes.data;
@@ -1031,6 +1041,7 @@ const refresh = async () => {
     configVersions.value = configVersionRes.data;
     systemSettings.value = normalizeSettingsForForm(systemSettingsRes.data);
     systemUsers.value = { ...emptySystemUsers(), ...systemUsersRes.data };
+    authSessions.value = { ...emptyAuthSessions(), ...systemSessionsRes.data };
     let nextDegraded =
       summaryRes.degraded ||
       seriesRes.degraded ||
@@ -2606,6 +2617,7 @@ const refresh = async () => {
     };
     systemSettings.value = normalizeSettingsForForm(emptySystemSettings());
     systemUsers.value = emptySystemUsers();
+    authSessions.value = emptyAuthSessions();
     degraded.value = true;
   } finally {
     loading.value = false;
@@ -2753,6 +2765,43 @@ const unlockSystemUser = async (username: string) => {
   } finally {
     savingUser.value = false;
   }
+};
+
+const revokeSystemSession = async (id: string) => {
+  if (!canConfigure.value || !id) return;
+  revokingSession.value = id;
+  try {
+    const result = await api.revokeSystemSession(id);
+    authSessions.value = { ...emptyAuthSessions(), ...result.data };
+    await refresh();
+  } finally {
+    revokingSession.value = '';
+  }
+};
+
+const revokeUserSessions = async (actor: string) => {
+  if (!canConfigure.value || !actor) return;
+  revokingSession.value = `actor:${actor}`;
+  try {
+    const result = await api.revokeSystemUserSessions(actor);
+    authSessions.value = { ...emptyAuthSessions(), ...result.data };
+    await refresh();
+  } finally {
+    revokingSession.value = '';
+  }
+};
+
+const authSessionStatusText = (status: string) => {
+  if (status === 'active') return '活跃';
+  if (status === 'revoked') return '已吊销';
+  if (status === 'expired') return '已过期';
+  return status || '未知';
+};
+
+const authSessionStatusClass = (session: AuthSession) => {
+  if (session.status === 'active') return 'healthy';
+  if (session.status === 'revoked') return 'warning';
+  return 'critical';
 };
 
 const checkAuth = async () => {
@@ -8836,8 +8885,46 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>
                   <button class="inline-button" type="button" :disabled="savingUser" @click="editSystemUser(user)">编辑</button>
                   <button class="inline-button" type="button" :disabled="!canConfigure || savingUser || (!user.locked && (user.failed_login_count ?? 0) === 0)" @click="unlockSystemUser(user.username)">解锁</button>
+                  <button class="inline-button" type="button" :disabled="!canConfigure || revokingSession === `actor:${user.username}`" @click="revokeUserSessions(user.username)">下线</button>
                   <button class="inline-button" type="button" :disabled="!canConfigure || savingUser" @click="toggleSystemUser(user)">{{ user.status === 'active' ? '禁用' : '启用' }}</button>
                   <button class="inline-button danger" type="button" :disabled="!canConfigure || savingUser" @click="deleteSystemUser(user.username)">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+        <section class="table-panel wide-key-table">
+          <div class="panel-heading">
+            <h2>会话管理</h2>
+            <span>活跃 {{ authSessions.summary.active.toLocaleString() }} / 吊销 {{ authSessions.summary.revoked.toLocaleString() }} / 过期 {{ authSessions.summary.expired.toLocaleString() }} / 总数 {{ authSessions.summary.total.toLocaleString() }}</span>
+          </div>
+          <div v-if="authSessions.sessions.length === 0" class="empty-state">暂无登录会话</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>账号</th>
+                <th>角色</th>
+                <th>状态</th>
+                <th>客户端</th>
+                <th>登录时间</th>
+                <th>最近活跃</th>
+                <th>到期时间</th>
+                <th>客户端标识</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="session in authSessions.sessions.slice(0, 20)" :key="session.id">
+                <td>{{ session.actor }}</td>
+                <td>{{ userRoleText(session.role) }}</td>
+                <td><span class="severity-pill" :class="authSessionStatusClass(session)">{{ authSessionStatusText(session.status) }}</span></td>
+                <td>{{ session.client_ip || '-' }}</td>
+                <td>{{ formatTime(session.issued_at) }}</td>
+                <td>{{ formatTime(session.last_seen_at) }}</td>
+                <td>{{ formatTime(session.expires_at) }}</td>
+                <td><span class="cell-subtle">{{ session.user_agent || '-' }}</span></td>
+                <td>
+                  <button class="inline-button danger" type="button" :disabled="!canConfigure || session.status !== 'active' || revokingSession === session.id" @click="revokeSystemSession(session.id)">吊销</button>
                 </td>
               </tr>
             </tbody>

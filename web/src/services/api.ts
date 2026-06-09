@@ -207,6 +207,30 @@ export interface SystemUsers {
   statuses?: string[];
 }
 
+export interface AuthSession {
+  id: string;
+  actor: string;
+  role: string;
+  auth_version?: number;
+  issued_at: number;
+  expires_at: number;
+  last_seen_at: number;
+  client_ip?: string;
+  user_agent?: string;
+  revoked_at?: number;
+  status: string;
+}
+
+export interface AuthSessions {
+  sessions: AuthSession[];
+  summary: {
+    total: number;
+    active: number;
+    expired: number;
+    revoked: number;
+  };
+}
+
 export interface SystemUserInput {
   username: string;
   display_name: string;
@@ -1516,6 +1540,31 @@ export const api = {
       throw new Error(`${response.status} ${response.statusText}`);
     }
     return response.json() as Promise<{ data: SystemUsers }>;
+  },
+  async systemSessions() {
+    return json<{ data: AuthSessions }>('/api/v1/system/sessions');
+  },
+  async revokeSystemSession(id: string) {
+    const response = await fetch('/api/v1/system/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AuthSessions }>;
+  },
+  async revokeSystemUserSessions(actor: string) {
+    const response = await fetch('/api/v1/system/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor, revoke_all: true })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: AuthSessions }>;
   },
   async ipProfile(ip: string, minutes = 15) {
     return json<{ data: IPProfile; degraded: boolean }>(

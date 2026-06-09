@@ -48,6 +48,8 @@ type authIdentity struct {
 	Actor       string
 	Role        string
 	AuthVersion int
+	SessionID   string
+	ExpiresAt   int64
 }
 
 type Server struct {
@@ -136,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/settings/import", s.systemSettingsImport)
 	mux.HandleFunc("/api/v1/system/users", s.systemUsers)
 	mux.HandleFunc("/api/v1/system/users/unlock", s.systemUserUnlock)
+	mux.HandleFunc("/api/v1/system/sessions", s.systemSessions)
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/audit-events/export", s.auditEventsExport)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
@@ -2015,6 +2018,73 @@ func (s *Server) systemUserUnlock(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+func (s *Server) systemSessions(w http.ResponseWriter, r *http.Request) {
+	settings := s.loadSystemSettings()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"sessions": publicAuthSessions(settings.Security.Sessions),
+			"summary":  authSessionSummary(settings.Security.Sessions),
+		}})
+	case http.MethodPost:
+		var body struct {
+			ID        string `json:"id"`
+			Actor     string `json:"actor"`
+			RevokeAll bool   `json:"revoke_all"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sessionID := strings.TrimSpace(body.ID)
+		actor := strings.TrimSpace(body.Actor)
+		if sessionID == "" && actor == "" {
+			http.Error(w, "session id or actor is required", http.StatusBadRequest)
+			return
+		}
+		now := time.Now().Unix()
+		revoked := 0
+		for idx := range settings.Security.Sessions {
+			session := &settings.Security.Sessions[idx]
+			if session.RevokedAt > 0 {
+				continue
+			}
+			if sessionID != "" && session.ID != sessionID {
+				continue
+			}
+			if sessionID == "" && actor != "" && session.Actor != actor {
+				continue
+			}
+			session.RevokedAt = now
+			revoked++
+			if sessionID != "" && !body.RevokeAll {
+				break
+			}
+		}
+		if revoked == 0 {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		settings.Security.Sessions = normalizeSessionSettings(settings.Security.Sessions)
+		if err := config.SaveSystemSettings(s.systemSettingsPath(), settings); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		saved := s.loadSystemSettings()
+		target := "session:" + sessionID
+		if sessionID == "" {
+			target = "user:" + actor
+		}
+		s.audit(r, "auth.session.revoke", target, "吊销会话", map[string]any{"session_id": sessionID, "actor": actor, "revoked": revoked})
+		writeJSON(w, map[string]any{"data": map[string]any{
+			"sessions": publicAuthSessions(saved.Security.Sessions),
+			"summary":  authSessionSummary(saved.Security.Sessions),
+		}})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	data, err := s.store.AuditEvents(r.Context(), queryLimit(r, 80, 500))
 	writeJSON(w, map[string]any{"data": data, "degraded": err != nil})
@@ -2316,7 +2386,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid password", http.StatusUnauthorized)
 		return
 	}
-	if err := s.setAuthCookie(w, identity.Actor, identity.Role); err != nil {
+	if err := s.setAuthCookie(w, r, identity.Actor, identity.Role); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -2405,7 +2475,7 @@ func (s *Server) authPassword(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.password.change", "user:"+identity.Actor, "修改密码："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
 	}
-	if err := s.setAuthCookie(w, identity.Actor, identity.Role); err != nil {
+	if err := s.setAuthCookie(w, r, identity.Actor, identity.Role); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -2437,6 +2507,7 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	if s.authEnabled() {
+		s.revokeAuthSession(identity.SessionID)
 		if s.store != nil {
 			_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.logout", "console", "控制台退出："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
 		}
@@ -2574,7 +2645,7 @@ func requestPermission(r *http.Request) string {
 	if strings.Contains(path, "/export") {
 		return "export"
 	}
-	if strings.HasPrefix(path, "/api/v1/system/settings") || strings.HasPrefix(path, "/api/v1/system/users") || path == "/api/v1/collectors/config" || path == "/api/v1/alerts/config" || path == "/api/v1/alerts/silences" || path == "/api/v1/security/rules" {
+	if strings.HasPrefix(path, "/api/v1/system/settings") || strings.HasPrefix(path, "/api/v1/system/users") || path == "/api/v1/system/sessions" || path == "/api/v1/collectors/config" || path == "/api/v1/alerts/config" || path == "/api/v1/alerts/silences" || path == "/api/v1/security/rules" {
 		if method == http.MethodGet {
 			return "read"
 		}
@@ -2724,6 +2795,47 @@ func nextUserAuthVersion(user config.UserAccount) int {
 	return next
 }
 
+func newSessionID() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return "sess-" + base64.RawURLEncoding.EncodeToString(random), nil
+}
+
+func normalizeSessionSettings(sessions []config.AuthSession) []config.AuthSession {
+	settings := config.DefaultSystemSettings(config.Config{})
+	settings.Security.Sessions = sessions
+	settings = config.LoadSystemSettings("", settings)
+	return settings.Security.Sessions
+}
+
+func (s *Server) createAuthSession(r *http.Request, actor, role string, expiresAt int64) (config.AuthSession, error) {
+	sessionID, err := newSessionID()
+	if err != nil {
+		return config.AuthSession{}, err
+	}
+	now := time.Now().Unix()
+	session := config.AuthSession{
+		ID:          sessionID,
+		Actor:       strings.TrimSpace(actor),
+		Role:        normalizeAuthRole(role),
+		AuthVersion: s.authVersionForActor(actor),
+		IssuedAt:    now,
+		ExpiresAt:   expiresAt,
+		LastSeenAt:  now,
+		ClientIP:    auditClientIP(r),
+		UserAgent:   strings.TrimSpace(r.UserAgent()),
+	}
+	settings := s.loadSystemSettings()
+	settings.Security.Sessions = append(settings.Security.Sessions, session)
+	settings.Security.Sessions = normalizeSessionSettings(settings.Security.Sessions)
+	if err := config.SaveSystemSettings(s.systemSettingsPath(), settings); err != nil {
+		return config.AuthSession{}, err
+	}
+	return session, nil
+}
+
 func (s *Server) authVersionForActor(username string) int {
 	username = strings.TrimSpace(username)
 	if username == "" {
@@ -2742,7 +2854,25 @@ func (s *Server) authIdentityCurrent(identity authIdentity) bool {
 	if actor == "" {
 		return false
 	}
-	for _, user := range s.loadSystemSettings().Security.Users {
+	settings := s.loadSystemSettings()
+	if identity.SessionID != "" {
+		foundSession := false
+		now := time.Now().Unix()
+		for _, session := range settings.Security.Sessions {
+			if session.ID != identity.SessionID {
+				continue
+			}
+			foundSession = true
+			if session.Actor != actor || normalizeAuthRole(session.Role) != normalizeAuthRole(identity.Role) || session.AuthVersion != identity.AuthVersion || session.RevokedAt > 0 || session.ExpiresAt <= now {
+				return false
+			}
+			break
+		}
+		if !foundSession {
+			return false
+		}
+	}
+	for _, user := range settings.Security.Users {
 		if user.Username != actor {
 			continue
 		}
@@ -2758,6 +2888,51 @@ func (s *Server) authIdentityCurrent(identity authIdentity) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) touchAuthSession(identity authIdentity) {
+	if identity.SessionID == "" {
+		return
+	}
+	settings := s.loadSystemSettings()
+	now := time.Now().Unix()
+	changed := false
+	for idx := range settings.Security.Sessions {
+		if settings.Security.Sessions[idx].ID != identity.SessionID {
+			continue
+		}
+		if now-settings.Security.Sessions[idx].LastSeenAt >= 60 {
+			settings.Security.Sessions[idx].LastSeenAt = now
+			changed = true
+		}
+		break
+	}
+	if changed {
+		settings.Security.Sessions = normalizeSessionSettings(settings.Security.Sessions)
+		_ = config.SaveSystemSettings(s.systemSettingsPath(), settings)
+	}
+}
+
+func (s *Server) revokeAuthSession(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	settings := s.loadSystemSettings()
+	now := time.Now().Unix()
+	changed := false
+	for idx := range settings.Security.Sessions {
+		if settings.Security.Sessions[idx].ID == sessionID && settings.Security.Sessions[idx].RevokedAt == 0 {
+			settings.Security.Sessions[idx].RevokedAt = now
+			changed = true
+			break
+		}
+	}
+	if changed {
+		settings.Security.Sessions = normalizeSessionSettings(settings.Security.Sessions)
+		_ = config.SaveSystemSettings(s.systemSettingsPath(), settings)
+	}
+	return changed
 }
 
 func hashPassword(password string) (string, error) {
@@ -2793,9 +2968,14 @@ func passwordDigest(salt []byte, password string) []byte {
 	return h.Sum(nil)
 }
 
-func (s *Server) setAuthCookie(w http.ResponseWriter, actor, role string) error {
+func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request, actor, role string) error {
 	ttl := s.authSessionTTL()
-	token, err := s.signAuthToken(actor, role, time.Now().Add(ttl).Unix())
+	expiresAt := time.Now().Add(ttl).Unix()
+	session, err := s.createAuthSession(r, actor, role, expiresAt)
+	if err != nil {
+		return err
+	}
+	token, err := s.signAuthSessionToken(actor, role, session.ID, expiresAt)
 	if err != nil {
 		return err
 	}
@@ -2830,6 +3010,15 @@ func (s *Server) signAuthToken(actor, role string, expires int64) (string, error
 	return encodedPayload + "." + sig, nil
 }
 
+func (s *Server) signAuthSessionToken(actor, role, sessionID string, expires int64) (string, error) {
+	role = normalizeAuthRole(role)
+	version := s.authVersionForActor(actor)
+	payload := actor + "|" + role + "|" + strconv.Itoa(version) + "|" + sessionID + "|" + strconv.FormatInt(expires, 10)
+	encodedPayload := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	sig := s.authSignature(encodedPayload)
+	return encodedPayload + "." + sig, nil
+}
+
 func (s *Server) verifyAuthRequest(r *http.Request) (authIdentity, bool) {
 	cookie, err := r.Cookie(authCookieName)
 	if err != nil || strings.TrimSpace(cookie.Value) == "" {
@@ -2839,6 +3028,7 @@ func (s *Server) verifyAuthRequest(r *http.Request) (authIdentity, bool) {
 	if !ok || !s.authIdentityCurrent(identity) {
 		return authIdentity{}, false
 	}
+	s.touchAuthSession(identity)
 	return identity, true
 }
 
@@ -2856,12 +3046,13 @@ func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 		return authIdentity{}, false
 	}
 	payload := strings.Split(string(raw), "|")
-	if len(payload) != 2 && len(payload) != 3 && len(payload) != 4 {
+	if len(payload) != 2 && len(payload) != 3 && len(payload) != 4 && len(payload) != 5 {
 		return authIdentity{}, false
 	}
 	role := authRoleAdmin
 	expiresRaw := payload[1]
 	version := 0
+	sessionID := ""
 	if len(payload) == 3 {
 		role = normalizeAuthRole(payload[1])
 		expiresRaw = payload[2]
@@ -2875,6 +3066,19 @@ func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 		version = parsedVersion
 		expiresRaw = payload[3]
 	}
+	if len(payload) == 5 {
+		role = normalizeAuthRole(payload[1])
+		parsedVersion, err := strconv.Atoi(payload[2])
+		if err != nil || parsedVersion < 0 {
+			return authIdentity{}, false
+		}
+		version = parsedVersion
+		sessionID = strings.TrimSpace(payload[3])
+		if sessionID == "" {
+			return authIdentity{}, false
+		}
+		expiresRaw = payload[4]
+	}
 	expires, err := strconv.ParseInt(expiresRaw, 10, 64)
 	if err != nil || expires < time.Now().Unix() {
 		return authIdentity{}, false
@@ -2883,7 +3087,7 @@ func (s *Server) verifyAuthToken(token string) (authIdentity, bool) {
 	if actor == "" {
 		actor = "operator"
 	}
-	return authIdentity{Actor: actor, Role: role, AuthVersion: version}, true
+	return authIdentity{Actor: actor, Role: role, AuthVersion: version, SessionID: sessionID, ExpiresAt: expires}, true
 }
 
 func (s *Server) authSignature(payload string) string {
@@ -3158,6 +3362,53 @@ func publicUserAccounts(users []config.UserAccount, policies ...config.PasswordP
 		})
 	}
 	return items
+}
+
+func publicAuthSessions(sessions []config.AuthSession) []map[string]any {
+	now := time.Now().Unix()
+	items := []map[string]any{}
+	for _, session := range normalizeSessionSettings(sessions) {
+		status := "active"
+		if session.RevokedAt > 0 {
+			status = "revoked"
+		} else if session.ExpiresAt <= now {
+			status = "expired"
+		}
+		items = append(items, map[string]any{
+			"id":           session.ID,
+			"actor":        session.Actor,
+			"role":         session.Role,
+			"auth_version": session.AuthVersion,
+			"issued_at":    session.IssuedAt,
+			"expires_at":   session.ExpiresAt,
+			"last_seen_at": session.LastSeenAt,
+			"client_ip":    session.ClientIP,
+			"user_agent":   session.UserAgent,
+			"revoked_at":   session.RevokedAt,
+			"status":       status,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return int64Value(items[i]["last_seen_at"]) > int64Value(items[j]["last_seen_at"])
+	})
+	return items
+}
+
+func authSessionSummary(sessions []config.AuthSession) map[string]any {
+	now := time.Now().Unix()
+	summary := map[string]any{"total": 0, "active": 0, "expired": 0, "revoked": 0}
+	for _, session := range normalizeSessionSettings(sessions) {
+		summary["total"] = int64Value(summary["total"]) + 1
+		switch {
+		case session.RevokedAt > 0:
+			summary["revoked"] = int64Value(summary["revoked"]) + 1
+		case session.ExpiresAt <= now:
+			summary["expired"] = int64Value(summary["expired"]) + 1
+		default:
+			summary["active"] = int64Value(summary["active"]) + 1
+		}
+	}
+	return summary
 }
 
 func roleCapabilities(role string) map[string]bool {

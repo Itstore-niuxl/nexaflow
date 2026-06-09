@@ -77,6 +77,7 @@ type SecuritySettings struct {
 	AdminPassword        string         `json:"admin_password,omitempty"`
 	ReadOnlyPassword     string         `json:"readonly_password,omitempty"`
 	Users                []UserAccount  `json:"users,omitempty"`
+	Sessions             []AuthSession  `json:"sessions,omitempty"`
 	SessionTTLHours      int            `json:"session_ttl_hours"`
 	MaxLoginFailures     int            `json:"max_login_failures"`
 	LockoutMinutes       int            `json:"lockout_minutes"`
@@ -93,6 +94,19 @@ type PasswordPolicy struct {
 	RequireSpecial        bool `json:"require_special"`
 	ExpireDays            int  `json:"expire_days"`
 	PreventUsernameInPass bool `json:"prevent_username_in_password"`
+}
+
+type AuthSession struct {
+	ID          string `json:"id"`
+	Actor       string `json:"actor"`
+	Role        string `json:"role"`
+	AuthVersion int    `json:"auth_version,omitempty"`
+	IssuedAt    int64  `json:"issued_at"`
+	ExpiresAt   int64  `json:"expires_at"`
+	LastSeenAt  int64  `json:"last_seen_at"`
+	ClientIP    string `json:"client_ip,omitempty"`
+	UserAgent   string `json:"user_agent,omitempty"`
+	RevokedAt   int64  `json:"revoked_at,omitempty"`
 }
 
 type UserAccount struct {
@@ -487,6 +501,7 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	}
 	settings.Security.PasswordPolicy = normalizePasswordPolicy(settings.Security.PasswordPolicy)
 	settings.Security.Users = normalizeUserAccounts(settings.Security.Users)
+	settings.Security.Sessions = normalizeAuthSessions(settings.Security.Sessions)
 	if !settings.Security.AuthEnabled {
 		settings.Security.ReadOnlyEnabled = false
 	}
@@ -517,6 +532,42 @@ func normalizeSystemSettings(settings SystemSettings) SystemSettings {
 	}
 	settings.Backend.RequiresRestart = true
 	return settings
+}
+
+func normalizeAuthSessions(sessions []AuthSession) []AuthSession {
+	if sessions == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	cutoff := now - 30*24*60*60
+	seen := map[string]bool{}
+	normalized := []AuthSession{}
+	for _, session := range sessions {
+		session.ID = strings.TrimSpace(session.ID)
+		session.Actor = strings.TrimSpace(session.Actor)
+		session.Role = NormalizeUserRole(session.Role)
+		if session.ID == "" || session.Actor == "" || seen[session.ID] {
+			continue
+		}
+		seen[session.ID] = true
+		if session.IssuedAt <= 0 {
+			session.IssuedAt = now
+		}
+		if session.LastSeenAt <= 0 {
+			session.LastSeenAt = session.IssuedAt
+		}
+		if session.ExpiresAt <= 0 {
+			session.ExpiresAt = session.IssuedAt + 12*60*60
+		}
+		if session.ExpiresAt < cutoff || (session.RevokedAt > 0 && session.RevokedAt < cutoff) {
+			continue
+		}
+		normalized = append(normalized, session)
+	}
+	if len(normalized) > 200 {
+		normalized = normalized[len(normalized)-200:]
+	}
+	return normalized
 }
 
 func normalizePasswordPolicy(policy PasswordPolicy) PasswordPolicy {
