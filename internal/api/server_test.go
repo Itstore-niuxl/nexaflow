@@ -405,6 +405,63 @@ func TestAIApprovalRuleFlow(t *testing.T) {
 	}
 }
 
+func TestAIApprovalBulkReject(t *testing.T) {
+	dir := t.TempDir()
+	server := New(nil, config.Config{
+		RuntimePath:   dir + "/collector_config.json",
+		Mode:          "mock",
+		Iface:         "eth0",
+		CollectorID:   "test-collector",
+		BandwidthMbps: 1000,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai/approval-requests", nil)
+	first, err := server.createAIApprovalRequest(req, aiApprovalRequest{
+		Type:     "silence",
+		Severity: "warning",
+		Title:    "白名单复核 A",
+		Target:   "dst_port:22",
+		Summary:  "建议复核 SSH 白名单。",
+		Payload:  map[string]any{"proposed_silence": map[string]any{"subject": "dst_port:22"}},
+	})
+	if err != nil {
+		t.Fatalf("create first approval: %v", err)
+	}
+	second, err := server.createAIApprovalRequest(req, aiApprovalRequest{
+		Type:     "asset_enrichment",
+		Severity: "critical",
+		Title:    "资产画像补全",
+		Target:   "10.2.0.12",
+		Summary:  "建议补全资产归属。",
+		Payload:  map[string]any{"proposed_metadata": map[string]any{"ip": "10.2.0.12", "owner": "ops"}},
+	})
+	if err != nil {
+		t.Fatalf("create second approval: %v", err)
+	}
+	result, err := server.bulkReviewAIApprovalRequests(req, []string{first.ID, second.ID, second.ID, "missing-id"}, "reject", "bulk cleanup")
+	if err != nil {
+		t.Fatalf("bulk reject: %v", err)
+	}
+	if result.Reviewed != 2 || result.Skipped != 1 {
+		t.Fatalf("unexpected bulk result: %#v", result)
+	}
+	items, err := server.loadAIApprovalRequests()
+	if err != nil {
+		t.Fatalf("load approvals: %v", err)
+	}
+	rejected := 0
+	for _, item := range items {
+		if item.Status == "rejected" && item.ReviewNote == "bulk cleanup" {
+			rejected++
+		}
+	}
+	if rejected != 2 {
+		t.Fatalf("expected two rejected approvals, got %#v", items)
+	}
+	if _, err := server.bulkReviewAIApprovalRequests(req, []string{first.ID}, "approve", "not allowed"); err == nil {
+		t.Fatal("expected bulk approve to be rejected")
+	}
+}
+
 func TestAIIncidentContextUsable(t *testing.T) {
 	if aiIncidentContextUsable(map[string]any{}) {
 		t.Fatal("empty context should not be usable")

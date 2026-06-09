@@ -1518,6 +1518,17 @@ export const api = {
     }
     return response.json() as Promise<{ data: AIApprovalRequest }>;
   },
+  async bulkRejectAIApprovalRequests(ids: string[], note = '') {
+    const response = await fetch('/api/v1/ai/approval-requests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids, action: 'reject', note })
+    });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response.json() as Promise<{ data: { action: string; reviewed: number; skipped: number; requests: AIApprovalRequest[]; errors: string[] } }>;
+  },
   async detectionRules() {
     return json<{ data: DetectionRule[] }>('/api/v1/security/rules');
   },

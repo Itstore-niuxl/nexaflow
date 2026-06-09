@@ -690,6 +690,24 @@ h2 {
   width: 100%;
 }
 
+.checkbox-field {
+  min-height: 36px;
+  display: flex !important;
+  align-items: center;
+  grid-template-columns: none !important;
+  gap: 8px !important;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.checkbox-field input,
+.governance-card-header input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
 .toolbar-panel button.active,
 .toolbar-panel button:hover,
 .inline-button:hover,
@@ -1594,6 +1612,10 @@ td {
 }
 
 .governance-card-header strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   color: #0f1f3d;
   font-size: 15px;
 }

@@ -525,6 +525,10 @@ const aiAssetEnrichment = ref<AIAssetEnrichmentSuggestions>(emptyAIAssetEnrichme
 const aiApprovals = ref<AIApprovalRequest[]>([]);
 const aiApprovalStats = ref<AIApprovalStats>(emptyAIApprovalStats());
 const aiApprovalBusy = ref('');
+const aiApprovalStatusFilter = ref('pending');
+const aiApprovalTypeFilter = ref('all');
+const aiApprovalSeverityFilter = ref('all');
+const selectedAIApprovalIds = ref<string[]>([]);
 const queryingAI = ref(false);
 const detectionRules = ref<DetectionRule[]>([]);
 const ruleFindings = ref<RuleFinding[]>([]);
@@ -2770,6 +2774,54 @@ const unownedAssetRiskCount = computed(() => assetRisks.value.filter((row) => !r
 const exposedAssetRiskCount = computed(() => assetRisks.value.filter((row) => row.exposed_services > 0 || row.external_peers > 0).length);
 const assetRiskTotalBytes = computed(() => assetRisks.value.reduce((sum, row) => sum + row.total_bytes, 0));
 const pendingAIApprovals = computed(() => aiApprovals.value.filter((row) => row.status === 'pending'));
+const aiApprovalStatusOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'pending', label: '待审批' },
+  { value: 'approved', label: '已批准' },
+  { value: 'rejected', label: '已驳回' }
+];
+const aiApprovalSeverityOptions = [
+  { value: 'all', label: '全部级别' },
+  { value: 'critical', label: '严重' },
+  { value: 'warning', label: '警告' },
+  { value: 'info', label: '提示' }
+];
+const aiApprovalTypeOptions = computed(() => {
+  const seen = new Set(aiApprovalStats.value.type_counts.map((row) => row.key));
+  for (const item of aiApprovals.value) {
+    if (item.type) seen.add(item.type);
+  }
+  return [
+    { value: 'all', label: '全部类型' },
+    ...Array.from(seen)
+      .sort()
+      .map((value) => ({ value, label: aiApprovalTypeText(value) }))
+  ];
+});
+const filteredAIApprovals = computed(() => {
+  const severityRank: Record<string, number> = { critical: 3, warning: 2, info: 1 };
+  const statusRank: Record<string, number> = { pending: 3, approved: 2, rejected: 1 };
+  return aiApprovals.value
+    .filter((row) => {
+      if (aiApprovalStatusFilter.value !== 'all' && row.status !== aiApprovalStatusFilter.value) return false;
+      if (aiApprovalTypeFilter.value !== 'all' && row.type !== aiApprovalTypeFilter.value) return false;
+      if (aiApprovalSeverityFilter.value !== 'all' && row.severity !== aiApprovalSeverityFilter.value) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if ((statusRank[b.status] ?? 0) !== (statusRank[a.status] ?? 0)) return (statusRank[b.status] ?? 0) - (statusRank[a.status] ?? 0);
+      if ((severityRank[b.severity] ?? 0) !== (severityRank[a.severity] ?? 0)) return (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0);
+      if (a.status === 'pending' && b.status === 'pending') return a.created_at - b.created_at;
+      return b.created_at - a.created_at;
+    });
+});
+const selectedPendingAIApprovals = computed(() =>
+  filteredAIApprovals.value.filter((row) => row.status === 'pending' && selectedAIApprovalIds.value.includes(row.id))
+);
+const allVisiblePendingSelected = computed(() => {
+  const visiblePending = filteredAIApprovals.value.filter((row) => row.status === 'pending');
+  return visiblePending.length > 0 && visiblePending.every((row) => selectedAIApprovalIds.value.includes(row.id));
+});
 const aiApprovalPendingTypeItems = computed<TopItem[]>(() =>
   aiApprovalStats.value.pending_type_counts.map((row) => ({ key: row.label, bytes: row.count, packets: 0 }))
 );
@@ -3587,7 +3639,45 @@ const reviewAIApproval = async (request: AIApprovalRequest, action: 'approve' | 
   aiApprovalBusy.value = request.id;
   try {
     await api.reviewAIApprovalRequest(request.id, action, action === 'approve' ? '管理员确认执行' : '管理员驳回建议');
-    await refresh();
+    selectedAIApprovalIds.value = selectedAIApprovalIds.value.filter((id) => id !== request.id);
+    const [result, statsResult] = await Promise.all([api.aiApprovalRequests(''), api.aiApprovalStats()]);
+    aiApprovals.value = result.data;
+    aiApprovalStats.value = statsResult.data;
+  } finally {
+    aiApprovalBusy.value = '';
+  }
+};
+
+const toggleAIApprovalSelection = (id: string, checked: boolean) => {
+  if (checked) {
+    selectedAIApprovalIds.value = Array.from(new Set([...selectedAIApprovalIds.value, id]));
+  } else {
+    selectedAIApprovalIds.value = selectedAIApprovalIds.value.filter((item) => item !== id);
+  }
+};
+
+const toggleVisibleAIApprovals = (checked: boolean) => {
+  const visiblePendingIds = filteredAIApprovals.value.filter((row) => row.status === 'pending').map((row) => row.id);
+  if (checked) {
+    selectedAIApprovalIds.value = Array.from(new Set([...selectedAIApprovalIds.value, ...visiblePendingIds]));
+  } else {
+    const visible = new Set(visiblePendingIds);
+    selectedAIApprovalIds.value = selectedAIApprovalIds.value.filter((id) => !visible.has(id));
+  }
+};
+
+const rejectSelectedAIApprovals = async () => {
+  if (!canWrite.value || selectedPendingAIApprovals.value.length === 0) return;
+  aiApprovalBusy.value = 'bulk-reject';
+  try {
+    await api.bulkRejectAIApprovalRequests(
+      selectedPendingAIApprovals.value.map((request) => request.id),
+      '批量驳回：管理员复核后关闭建议'
+    );
+    selectedAIApprovalIds.value = [];
+    const [result, statsResult] = await Promise.all([api.aiApprovalRequests(''), api.aiApprovalStats()]);
+    aiApprovals.value = result.data;
+    aiApprovalStats.value = statsResult.data;
   } finally {
     aiApprovalBusy.value = '';
   }
@@ -4459,16 +4549,46 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <div class="panel-heading">
             <h2>AI 审批队列</h2>
             <div class="panel-actions">
-              <span>{{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
+              <span>{{ filteredAIApprovals.length.toLocaleString() }} 当前筛选 / {{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
               <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled || aiApprovals.length === 0" @click="exportAIApprovals">导出审批 CSV</button>
             </div>
           </div>
-          <div v-if="aiApprovals.length === 0" class="empty-state">暂无 AI 审批请求</div>
+          <div class="toolbar-panel ai-approval-toolbar">
+            <label>
+              <span>状态</span>
+              <select v-model="aiApprovalStatusFilter">
+                <option v-for="item in aiApprovalStatusOptions" :key="`ai-approval-status-${item.value}`" :value="item.value">{{ item.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>类型</span>
+              <select v-model="aiApprovalTypeFilter">
+                <option v-for="item in aiApprovalTypeOptions" :key="`ai-approval-type-${item.value}`" :value="item.value">{{ item.label }}</option>
+              </select>
+            </label>
+            <label>
+              <span>级别</span>
+              <select v-model="aiApprovalSeverityFilter">
+                <option v-for="item in aiApprovalSeverityOptions" :key="`ai-approval-severity-${item.value}`" :value="item.value">{{ item.label }}</option>
+              </select>
+            </label>
+            <label class="checkbox-field">
+              <input type="checkbox" :checked="allVisiblePendingSelected" :disabled="filteredAIApprovals.every((row) => row.status !== 'pending')" @change="toggleVisibleAIApprovals(($event.target as HTMLInputElement).checked)" />
+              <span>选择当前待审批</span>
+            </label>
+            <button class="inline-button" type="button" :disabled="!canWrite || selectedPendingAIApprovals.length === 0 || aiApprovalBusy === 'bulk-reject'" @click="rejectSelectedAIApprovals">
+              批量驳回 {{ selectedPendingAIApprovals.length || '' }}
+            </button>
+          </div>
+          <div v-if="filteredAIApprovals.length === 0" class="empty-state">暂无匹配的 AI 审批请求</div>
           <div v-else class="governance-list">
-            <article v-for="item in aiApprovals.slice(0, 8)" :key="item.id" class="governance-card">
+            <article v-for="item in filteredAIApprovals.slice(0, 12)" :key="item.id" class="governance-card">
               <div class="governance-card-header">
                 <div>
-                  <strong>{{ item.title }}</strong>
+                  <strong>
+                    <input v-if="item.status === 'pending'" type="checkbox" :checked="selectedAIApprovalIds.includes(item.id)" @change="toggleAIApprovalSelection(item.id, ($event.target as HTMLInputElement).checked)" />
+                    {{ item.title }}
+                  </strong>
                   <span>{{ aiApprovalTypeText(item.type) }} / {{ item.target }}</span>
                 </div>
                 <b class="severity-pill" :class="item.severity">{{ aiApprovalStatusText(item.status) }} / {{ aiConfidenceText(item.confidence) }}</b>

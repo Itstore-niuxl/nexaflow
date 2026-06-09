@@ -48,6 +48,14 @@ type aiApprovalCount struct {
 	Count int    `json:"count"`
 }
 
+type aiApprovalBulkReviewResult struct {
+	Action   string              `json:"action"`
+	Reviewed int                 `json:"reviewed"`
+	Skipped  int                 `json:"skipped"`
+	Requests []aiApprovalRequest `json:"requests"`
+	Errors   []string            `json:"errors"`
+}
+
 func (s *Server) aiApprovalRequests(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -61,6 +69,7 @@ func (s *Server) aiApprovalRequests(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Action  string            `json:"action"`
 			ID      string            `json:"id"`
+			IDs     []string          `json:"ids"`
 			Note    string            `json:"note"`
 			Request aiApprovalRequest `json:"request"`
 		}
@@ -71,6 +80,15 @@ func (s *Server) aiApprovalRequests(w http.ResponseWriter, r *http.Request) {
 		action := strings.TrimSpace(body.Action)
 		if action == "" {
 			result, err := s.createAIApprovalRequest(r, body.Request)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]any{"data": result})
+			return
+		}
+		if len(body.IDs) > 0 {
+			result, err := s.bulkReviewAIApprovalRequests(r, body.IDs, action, strings.TrimSpace(body.Note))
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
@@ -96,6 +114,74 @@ func (s *Server) aiApprovalStats(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := s.loadAIApprovalRequests()
 	writeJSON(w, map[string]any{"data": buildAIApprovalStats(items, time.Now().Unix()), "degraded": err != nil})
+}
+
+func (s *Server) bulkReviewAIApprovalRequests(r *http.Request, ids []string, action, note string) (aiApprovalBulkReviewResult, error) {
+	result := aiApprovalBulkReviewResult{Action: action, Requests: []aiApprovalRequest{}, Errors: []string{}}
+	if action != "reject" {
+		return result, fmt.Errorf("bulk review only supports reject")
+	}
+	seen := map[string]bool{}
+	normalizedIDs := []string{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		normalizedIDs = append(normalizedIDs, id)
+	}
+	if len(normalizedIDs) == 0 {
+		return result, fmt.Errorf("ids are required")
+	}
+	items, err := s.loadAIApprovalRequests()
+	if err != nil {
+		return result, err
+	}
+	positions := map[string]int{}
+	for i, item := range items {
+		positions[item.ID] = i
+	}
+	reviewer := auditActor(r)
+	now := time.Now().Unix()
+	for _, id := range normalizedIDs {
+		index, ok := positions[id]
+		if !ok {
+			result.Skipped++
+			result.Errors = append(result.Errors, id+": not found")
+			continue
+		}
+		request := items[index]
+		if request.Status != "pending" {
+			result.Skipped++
+			result.Errors = append(result.Errors, id+": already "+request.Status)
+			continue
+		}
+		request.Status = "rejected"
+		request.ReviewedBy = reviewer
+		request.ReviewedAt = now
+		request.ReviewNote = note
+		items[index] = request
+		result.Reviewed++
+		result.Requests = append(result.Requests, request)
+	}
+	if result.Reviewed == 0 {
+		return result, fmt.Errorf("no pending approval requests matched")
+	}
+	if err := s.saveAIApprovalRequests(items); err != nil {
+		return result, err
+	}
+	for _, request := range result.Requests {
+		s.audit(r, "ai.approval.reject", request.ID, "批量驳回 AI 建议："+request.Title, map[string]any{"id": request.ID, "type": request.Type, "note": note, "bulk": true})
+	}
+	s.audit(r, "ai.approval.bulk_reject", "ai_approval_requests", "批量驳回 AI 建议："+strconv.Itoa(result.Reviewed)+" 条", map[string]any{
+		"ids":      normalizedIDs,
+		"reviewed": result.Reviewed,
+		"skipped":  result.Skipped,
+		"errors":   result.Errors,
+		"note":     note,
+	})
+	return result, nil
 }
 
 func (s *Server) createAIApprovalRequest(r *http.Request, request aiApprovalRequest) (aiApprovalRequest, error) {
