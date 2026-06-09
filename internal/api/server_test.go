@@ -139,33 +139,44 @@ func TestManagedUserLoginFailureLockout(t *testing.T) {
 	}
 }
 
-func TestRequestNeedsWriteAccess(t *testing.T) {
-	getReq, _ := http.NewRequest(http.MethodGet, "/api/v1/collectors/config", nil)
-	if requestNeedsWriteAccess(getReq) {
-		t.Fatal("GET should not require write access")
+func TestRequestPermission(t *testing.T) {
+	cases := []struct {
+		method string
+		path   string
+		want   string
+	}{
+		{http.MethodGet, "/api/v1/dashboard/summary", "read"},
+		{http.MethodGet, "/api/v1/system/audit-events", "audit"},
+		{http.MethodGet, "/api/v1/system/audit-events/export", "audit"},
+		{http.MethodGet, "/api/v1/system/config-versions/export", "audit"},
+		{http.MethodGet, "/api/v1/reports/overview/export", "export"},
+		{http.MethodGet, "/api/v1/system/settings/export", "export"},
+		{http.MethodPost, "/api/v1/system/users", "configure"},
+		{http.MethodPost, "/api/v1/security/incident-status", "investigate"},
+		{http.MethodPost, "/api/v1/ai/query", "read"},
+		{http.MethodPost, "/api/v1/traffic/search", "write"},
 	}
-
-	postReq, _ := http.NewRequest(http.MethodPost, "/api/v1/collectors/config", nil)
-	if !requestNeedsWriteAccess(postReq) {
-		t.Fatal("POST should require write access")
-	}
-
-	healthReq, _ := http.NewRequest(http.MethodPost, "/healthz", nil)
-	if requestNeedsWriteAccess(healthReq) {
-		t.Fatal("non-api path should not require write access")
-	}
-
-	aiQueryReq, _ := http.NewRequest(http.MethodPost, "/api/v1/ai/query", nil)
-	if requestNeedsWriteAccess(aiQueryReq) {
-		t.Fatal("AI query is read-only and should not require write access")
+	for _, tc := range cases {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		if got := requestPermission(req); got != tc.want {
+			t.Fatalf("requestPermission(%s %s) = %q, want %q", tc.method, tc.path, got, tc.want)
+		}
 	}
 }
 
-func TestAuthRequiredBlocksViewerWrites(t *testing.T) {
+func TestAuthRequiredEnforcesRBAC(t *testing.T) {
 	server := New(nil, config.Config{AuthPassword: "admin-pass", AuthReadOnlyPassword: "viewer-pass", AuthSecret: "test-secret"})
 	viewerToken, err := server.signAuthToken("bob", authRoleViewer, time.Now().Add(time.Hour).Unix())
 	if err != nil {
 		t.Fatalf("sign viewer token: %v", err)
+	}
+	analystToken, err := server.signAuthToken("alice", "analyst", time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign analyst token: %v", err)
+	}
+	auditorToken, err := server.signAuthToken("auditor", "auditor", time.Now().Add(time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("sign auditor token: %v", err)
 	}
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -187,6 +198,30 @@ func TestAuthRequiredBlocksViewerWrites(t *testing.T) {
 	handler.ServeHTTP(postResp, postReq)
 	if postResp.Code != http.StatusForbidden {
 		t.Fatalf("expected viewer POST to be forbidden, got %d", postResp.Code)
+	}
+
+	investigateReq := httptest.NewRequest(http.MethodPost, "/api/v1/security/incident-status", nil)
+	investigateReq.AddCookie(&http.Cookie{Name: authCookieName, Value: analystToken})
+	investigateResp := httptest.NewRecorder()
+	handler.ServeHTTP(investigateResp, investigateReq)
+	if investigateResp.Code != http.StatusAccepted {
+		t.Fatalf("expected analyst investigation write to pass, got %d", investigateResp.Code)
+	}
+
+	auditReq := httptest.NewRequest(http.MethodGet, "/api/v1/system/audit-events", nil)
+	auditReq.AddCookie(&http.Cookie{Name: authCookieName, Value: auditorToken})
+	auditResp := httptest.NewRecorder()
+	handler.ServeHTTP(auditResp, auditReq)
+	if auditResp.Code != http.StatusAccepted {
+		t.Fatalf("expected auditor audit read to pass, got %d", auditResp.Code)
+	}
+
+	configReq := httptest.NewRequest(http.MethodPost, "/api/v1/system/users", nil)
+	configReq.AddCookie(&http.Cookie{Name: authCookieName, Value: auditorToken})
+	configResp := httptest.NewRecorder()
+	handler.ServeHTTP(configResp, configReq)
+	if configResp.Code != http.StatusForbidden {
+		t.Fatalf("expected auditor config write to be forbidden, got %d", configResp.Code)
 	}
 }
 

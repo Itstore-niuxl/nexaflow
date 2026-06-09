@@ -654,7 +654,17 @@ const capacityPlanning = ref<CapacityPlanning>(emptyCapacityPlanning());
 const degraded = ref(false);
 const loading = ref(false);
 const authChecking = ref(true);
-const authStatus = ref<AuthStatus>({ enabled: false, authenticated: true, actor: 'operator', role: 'admin', can_write: true });
+const authStatus = ref<AuthStatus>({
+  enabled: false,
+  authenticated: true,
+  actor: 'operator',
+  role: 'admin',
+  can_write: true,
+  can_export: true,
+  can_audit: true,
+  can_configure: true,
+  can_investigate: true
+});
 const loginActor = ref('operator');
 const loginPassword = ref('');
 const loginError = ref('');
@@ -792,7 +802,10 @@ const normalizeView = (view: unknown) => (isValidView(view) ? view : defaultView
 
 const pageTitle = computed(() => viewMeta[currentView.value]?.title ?? '流量总览');
 const pageSubtitle = computed(() => viewMeta[currentView.value]?.subtitle ?? '近实时流量、采集健康和关键对象排行');
-const canWrite = computed(() => !authStatus.value.enabled || authStatus.value.can_write !== false);
+const canExport = computed(() => !authStatus.value.enabled || authStatus.value.can_export !== false);
+const canAudit = computed(() => !authStatus.value.enabled || authStatus.value.can_audit !== false);
+const canConfigure = computed(() => !authStatus.value.enabled || authStatus.value.can_configure !== false);
+const canInvestigate = computed(() => !authStatus.value.enabled || authStatus.value.can_investigate !== false);
 const authRoleText = computed(() => {
   if (!authStatus.value.enabled) return '免登录';
   return userRoleText(authStatus.value.role || 'admin');
@@ -2598,7 +2611,7 @@ const normalizeSettingsForForm = (settings: SystemSettings): SystemSettings => (
 });
 
 const saveSettings = async () => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   savingSettings.value = true;
   settingsTestResult.value = null;
   webhookTestResult.value = null;
@@ -2624,12 +2637,13 @@ const testWebhookSettings = async () => {
 };
 
 const exportSettings = async () => {
+  if (!canExport.value) return;
   const result = await api.exportSystemSettings();
   settingsExportText.value = JSON.stringify(result.data, null, 2);
 };
 
 const importSettings = async () => {
-  if (!canWrite.value || !settingsImportText.value.trim()) return;
+  if (!canConfigure.value || !settingsImportText.value.trim()) return;
   const parsed = JSON.parse(settingsImportText.value) as SystemSettings;
   const result = await api.importSystemSettings(parsed);
   systemSettings.value = normalizeSettingsForForm(result.data);
@@ -2654,7 +2668,7 @@ const resetUserForm = () => {
 };
 
 const saveSystemUser = async () => {
-  if (!canWrite.value || !userForm.value.username.trim()) return;
+  if (!canConfigure.value || !userForm.value.username.trim()) return;
   savingUser.value = true;
   try {
     const result = await api.saveSystemUser({
@@ -2672,7 +2686,7 @@ const saveSystemUser = async () => {
 };
 
 const toggleSystemUser = async (user: SystemUser) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   savingUser.value = true;
   try {
     const result = await api.saveSystemUser({
@@ -2689,7 +2703,7 @@ const toggleSystemUser = async (user: SystemUser) => {
 };
 
 const deleteSystemUser = async (username: string) => {
-  if (!canWrite.value || !username) return;
+  if (!canConfigure.value || !username) return;
   savingUser.value = true;
   try {
     const result = await api.deleteSystemUser(username);
@@ -3635,7 +3649,7 @@ watch(
 );
 
 const applyCaptureConfig = async () => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   switching.value = true;
   try {
     const config: CollectorConfig = {
@@ -3826,7 +3840,7 @@ const openPrimaryAssetProfile = async () => {
 };
 
 const updateIncidentStatus = async (incident: SecurityIncident, status: string) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   handlingAlert.value = true;
   try {
     await api.updateIncidentStatus(incident.id, status);
@@ -3848,7 +3862,7 @@ const updateIncidentStatus = async (incident: SecurityIncident, status: string) 
 };
 
 const saveIncidentNote = async () => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   const note = incidentNoteText.value.trim();
   if (!selectedIncident.value || !note) return;
   savingIncidentNote.value = true;
@@ -3884,7 +3898,7 @@ const loadDimensionTrend = async () => {
 };
 
 const newRule = () => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   ruleEditor.value = {
     id: '',
     name: '',
@@ -3902,19 +3916,19 @@ const newRule = () => {
 };
 
 const useGovernanceRule = (suggestion: AIGovernanceSuggestion) => {
-  if (!canWrite.value || !suggestion.proposed_rule) return;
+  if (!canConfigure.value || !suggestion.proposed_rule) return;
   ruleEditor.value = { ...suggestion.proposed_rule, id: '' };
   setView('rules');
 };
 
 const reviewGovernanceSilence = (suggestion: AIGovernanceSuggestion) => {
-  if (!canWrite.value || !suggestion.proposed_silence?.subject) return;
+  if (!canConfigure.value || !suggestion.proposed_silence?.subject) return;
   whitelistSubject.value = suggestion.proposed_silence.subject;
   setView('alerts');
 };
 
 const submitGovernanceApproval = async (suggestion: AIGovernanceSuggestion) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   const type = suggestion.proposed_rule ? 'rule' : suggestion.proposed_silence ? 'silence' : '';
   if (!type) return;
   aiApprovalBusy.value = suggestion.id;
@@ -3942,7 +3956,7 @@ const submitGovernanceApproval = async (suggestion: AIGovernanceSuggestion) => {
 };
 
 const submitAssetEnrichmentApproval = async (suggestion: AIAssetEnrichmentSuggestion) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   aiApprovalBusy.value = suggestion.id;
   try {
     await api.createAIApprovalRequest({
@@ -3967,7 +3981,7 @@ const submitAssetEnrichmentApproval = async (suggestion: AIAssetEnrichmentSugges
 };
 
 const reviewAIApproval = async (request: AIApprovalRequest, action: 'approve' | 'reject') => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   aiApprovalBusy.value = request.id;
   try {
     await api.reviewAIApprovalRequest(request.id, action, action === 'approve' ? '管理员确认执行' : '管理员驳回建议');
@@ -3999,7 +4013,7 @@ const toggleVisibleAIApprovals = (checked: boolean) => {
 };
 
 const rejectSelectedAIApprovals = async () => {
-  if (!canWrite.value || selectedPendingAIApprovals.value.length === 0) return;
+  if (!canInvestigate.value || selectedPendingAIApprovals.value.length === 0) return;
   aiApprovalBusy.value = 'bulk-reject';
   try {
     await api.bulkRejectAIApprovalRequests(
@@ -4016,12 +4030,12 @@ const rejectSelectedAIApprovals = async () => {
 };
 
 const editRule = (rule: DetectionRule) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   ruleEditor.value = { ...rule };
 };
 
 const saveRule = async () => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   if (!ruleEditor.value || !ruleEditor.value.name.trim() || !ruleEditor.value.metric || ruleEditor.value.threshold <= 0) return;
   savingRule.value = true;
   try {
@@ -4038,7 +4052,7 @@ const saveRule = async () => {
 };
 
 const deleteRule = async (rule: DetectionRule) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   savingRule.value = true;
   try {
     const result = await api.deleteDetectionRule(rule.id);
@@ -4056,7 +4070,7 @@ const deleteRule = async (rule: DetectionRule) => {
 };
 
 const toggleRule = async (rule: DetectionRule) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   const next = { ...rule, enabled: !rule.enabled };
   const result = await api.saveDetectionRule(next);
   detectionRules.value = result.data;
@@ -4067,7 +4081,7 @@ const toggleRule = async (rule: DetectionRule) => {
 };
 
 const saveAlertConfig = async () => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   savingAlerts.value = true;
   try {
     const result = await api.updateAlertConfig(alertConfig.value);
@@ -4079,7 +4093,7 @@ const saveAlertConfig = async () => {
 };
 
 const restoreConfigVersion = async (version: ConfigVersion) => {
-  if (!canWrite.value || !version.id) return;
+  if (!canConfigure.value || !version.id) return;
   const confirmed = window.confirm(`恢复配置版本 ${version.id}？当前运行时配置会被该快照覆盖。`);
   if (!confirmed) return;
   restoringConfigVersion.value = version.id;
@@ -4103,7 +4117,7 @@ const loadConfigVersionDiff = async (version: ConfigVersion) => {
 };
 
 const updateAlertStatus = async (alert: AlertEvent, status: string) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   handlingAlert.value = true;
   try {
     await api.updateAlertStatus(alert.id, status);
@@ -4114,7 +4128,7 @@ const updateAlertStatus = async (alert: AlertEvent, status: string) => {
 };
 
 const silenceSubject = async (subject: string) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   if (!subject.trim()) return;
   handlingAlert.value = true;
   try {
@@ -4134,7 +4148,7 @@ const addWhitelistSubject = async () => {
 };
 
 const removeSilence = async (subject: string) => {
-  if (!canWrite.value) return;
+  if (!canConfigure.value) return;
   handlingAlert.value = true;
   try {
     const result = await api.removeAlertSilence(subject);
@@ -4146,7 +4160,7 @@ const removeSilence = async (subject: string) => {
 };
 
 const editAsset = (asset: AssetRow) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   assetEditor.value = {
     ip: asset.ip,
     name: asset.name || '',
@@ -4162,7 +4176,7 @@ const editAsset = (asset: AssetRow) => {
 };
 
 const useAssetEnrichmentSuggestion = (suggestion: AIAssetEnrichmentSuggestion) => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   const metadata = suggestion.proposed_metadata;
   assetEditor.value = {
     ip: metadata.ip,
@@ -4180,7 +4194,7 @@ const useAssetEnrichmentSuggestion = (suggestion: AIAssetEnrichmentSuggestion) =
 };
 
 const saveAssetMetadata = async () => {
-  if (!canWrite.value) return;
+  if (!canInvestigate.value) return;
   if (!assetEditor.value) return;
   savingAsset.value = true;
   try {
@@ -4477,6 +4491,7 @@ const exportSessions = () => {
 };
 
 const exportReportOverview = async () => {
+  if (!canExport.value) return;
   const response = await api.downloadReportOverview(selectedMinutes.value, 50);
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
@@ -4485,6 +4500,7 @@ const exportReportOverview = async () => {
 };
 
 const exportAuditEvents = async () => {
+  if (!canAudit.value) return;
   const response = await api.downloadAuditEvents(500);
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
@@ -4493,6 +4509,7 @@ const exportAuditEvents = async () => {
 };
 
 const exportConfigVersions = async () => {
+  if (!canAudit.value) return;
   const response = await api.downloadConfigVersions('', 500);
   const blob = await response.blob();
   const disposition = response.headers.get('content-disposition') || '';
@@ -4501,6 +4518,7 @@ const exportConfigVersions = async () => {
 };
 
 const exportAIApprovals = async () => {
+  if (!canExport.value) return;
   const status = aiApprovalStatusFilter.value === 'all' ? '' : aiApprovalStatusFilter.value;
   const type = aiApprovalTypeFilter.value === 'all' ? '' : aiApprovalTypeFilter.value;
   const severity = aiApprovalSeverityFilter.value === 'all' ? '' : aiApprovalSeverityFilter.value;
@@ -4532,6 +4550,7 @@ const exportRuleFindings = () => {
 };
 
 const exportCSV = (filename: string, rows: string[][]) => {
+  if (!canExport.value) return;
   const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
   const blob = new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' });
   downloadBlob(filename, blob);
@@ -4889,7 +4908,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
             <h2>AI 审批队列</h2>
             <div class="panel-actions">
               <span>{{ filteredAIApprovals.length.toLocaleString() }} 当前筛选 / {{ pendingAIApprovals.length.toLocaleString() }} 待审批 / {{ aiApprovals.length.toLocaleString() }} 总数</span>
-              <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled || aiApprovals.length === 0" @click="exportAIApprovals">导出审批 CSV</button>
+              <button class="inline-button" type="button" :disabled="!canExport || !systemSettings.data.export_enabled || aiApprovals.length === 0" @click="exportAIApprovals">导出审批 CSV</button>
             </div>
           </div>
           <div class="toolbar-panel ai-approval-toolbar">
@@ -4915,7 +4934,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <input type="checkbox" :checked="allVisiblePendingSelected" :disabled="filteredAIApprovals.every((row) => row.status !== 'pending')" @change="toggleVisibleAIApprovals(($event.target as HTMLInputElement).checked)" />
               <span>选择当前待审批</span>
             </label>
-            <button class="inline-button" type="button" :disabled="!canWrite || selectedPendingAIApprovals.length === 0 || aiApprovalBusy === 'bulk-reject'" @click="rejectSelectedAIApprovals">
+            <button class="inline-button" type="button" :disabled="!canInvestigate || selectedPendingAIApprovals.length === 0 || aiApprovalBusy === 'bulk-reject'" @click="rejectSelectedAIApprovals">
               批量驳回 {{ selectedPendingAIApprovals.length || '' }}
             </button>
           </div>
@@ -4950,8 +4969,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 </div>
               </div>
               <div v-if="item.status === 'pending'" class="ai-workbench-actions">
-                <button class="command-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'approve')">批准执行</button>
-                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'reject')">驳回</button>
+                <button class="command-button" type="button" :disabled="!canInvestigate || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'approve')">批准执行</button>
+                <button class="inline-button" type="button" :disabled="!canInvestigate || aiApprovalBusy === item.id" @click="reviewAIApproval(item, 'reject')">驳回</button>
               </div>
             </article>
           </div>
@@ -4989,13 +5008,13 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 </div>
               </div>
               <div class="ai-workbench-actions">
-                <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canWrite" @click="useGovernanceRule(item)">填入规则草案</button>
-                <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canWrite" @click="reviewGovernanceSilence(item)">复核白名单</button>
+                <button v-if="item.proposed_rule" class="command-button" type="button" :disabled="!canConfigure" @click="useGovernanceRule(item)">填入规则草案</button>
+                <button v-if="item.proposed_silence" class="command-button" type="button" :disabled="!canConfigure" @click="reviewGovernanceSilence(item)">复核白名单</button>
                 <button
                   v-if="item.proposed_rule || item.proposed_silence"
                   class="inline-button"
                   type="button"
-                  :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
+                  :disabled="!canInvestigate || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
                   @click="submitGovernanceApproval(item)"
                 >
                   {{ pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target) ? '已在队列' : '提交审批' }}
@@ -5043,8 +5062,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <span v-for="tag in item.proposed_metadata.tags" :key="`asset-enrich-tag-${item.id}-${tag}`">{{ tag }}</span>
               </div>
               <div class="ai-workbench-actions">
-                <button class="command-button" type="button" :disabled="!canWrite" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
-                <button class="inline-button" type="button" :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor('asset_enrichment', item.title, item.ip))" @click="submitAssetEnrichmentApproval(item)">
+                <button class="command-button" type="button" :disabled="!canInvestigate" @click="useAssetEnrichmentSuggestion(item)">填入资产台账</button>
+                <button class="inline-button" type="button" :disabled="!canInvestigate || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor('asset_enrichment', item.title, item.ip))" @click="submitAssetEnrichmentApproval(item)">
                   {{ pendingAIApprovalFor('asset_enrichment', item.title, item.ip) ? '已在队列' : '提交审批' }}
                 </button>
                 <button class="inline-button" type="button" @click="profileIP = item.ip; setView('asset-risk')">查看资产风险</button>
@@ -6808,7 +6827,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                     <button
                       class="inline-button"
                       type="button"
-                      :disabled="handlingAlert || isExposureSilenced(row) || !canWrite"
+                      :disabled="handlingAlert || isExposureSilenced(row) || !canConfigure"
                       @click="silenceSubject(exposureSubject(row))"
                     >
                       {{ isExposureSilenced(row) ? '已忽略' : '忽略端口' }}
@@ -6903,7 +6922,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
             </label>
           </div>
           <div class="form-actions">
-            <button type="button" :disabled="savingAsset || !canWrite" @click="saveAssetMetadata">{{ savingAsset ? '保存中...' : '保存台账' }}</button>
+            <button type="button" :disabled="savingAsset || !canInvestigate" @click="saveAssetMetadata">{{ savingAsset ? '保存中...' : '保存台账' }}</button>
             <button type="button" :disabled="savingAsset" @click="assetEditor = null">取消</button>
           </div>
         </section>
@@ -6939,7 +6958,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ formatTime(asset.last_seen) }}</td>
                 <td>
                   <div class="row-actions">
-                    <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset(asset)">编辑</button>
+                    <button class="inline-button" type="button" :disabled="!canInvestigate" @click="editAsset(asset)">编辑</button>
                     <button class="inline-button" type="button" @click="profileIP = asset.ip; setView('profile'); loadProfile()">画像</button>
                   </div>
                 </td>
@@ -7053,7 +7072,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td class="action-cell">
                   <button class="inline-button" type="button" @click="profileIP = asset.ip; setView('profile'); loadProfile()">画像</button>
                   <button class="inline-button" type="button" @click="searchTerm = asset.ip; setView('search'); runSearch()">检索</button>
-                  <button class="inline-button" type="button" :disabled="!canWrite" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
+                  <button class="inline-button" type="button" :disabled="!canInvestigate" @click="editAsset({ ...asset, tags: [], note: '', metadata_updated_at: 0, inbound_bytes: 0, inbound_packets: 0, outbound_bytes: 0, outbound_packets: 0, total_packets: asset.total_packets, avg_packet_size: 0, first_seen: 0 })">建档</button>
                 </td>
               </tr>
             </tbody>
@@ -7124,7 +7143,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ item.packets.toLocaleString() }}</td>
                 <td>{{ item.score }}</td>
                 <td>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(item.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canConfigure" @click="silenceSubject(item.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -7332,7 +7351,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                     v-if="item.proposed_rule || item.proposed_silence"
                     class="command-button"
                     type="button"
-                    :disabled="!canWrite || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
+                    :disabled="!canInvestigate || aiApprovalBusy === item.id || Boolean(pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target))"
                     @click="submitGovernanceApproval(item)"
                   >
                     {{ pendingAIApprovalFor(item.proposed_rule ? 'rule' : 'silence', item.title, item.target) ? '已在队列' : aiApprovalBusy === item.id ? '提交中...' : '提交审批' }}
@@ -7352,7 +7371,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <span>处置备注</span>
               <input v-model="incidentNoteText" placeholder="记录排查进展、责任人、结论或后续动作" @keyup.enter="saveIncidentNote" />
             </label>
-            <button type="button" :disabled="savingIncidentNote || !incidentNoteText.trim() || !canWrite" @click="saveIncidentNote">
+            <button type="button" :disabled="savingIncidentNote || !incidentNoteText.trim() || !canInvestigate" @click="saveIncidentNote">
               {{ savingIncidentNote ? '保存中...' : '添加备注' }}
             </button>
           </div>
@@ -7438,10 +7457,10 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td class="action-cell">
                   <button class="inline-button" type="button" :disabled="loadingIncidentContext" @click="loadIncidentContext(incident)">上下文</button>
                   <button class="inline-button" type="button" @click="inspectIncident(incident)">追踪</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'ack' || !canWrite" @click="updateIncidentStatus(incident, 'ack')">确认</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'resolved' || !canWrite" @click="updateIncidentStatus(incident, 'resolved')">恢复</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'open' || !canWrite" @click="updateIncidentStatus(incident, 'open')">重开</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(incident.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'ack' || !canInvestigate" @click="updateIncidentStatus(incident, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'resolved' || !canInvestigate" @click="updateIncidentStatus(incident, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || incident.status === 'open' || !canInvestigate" @click="updateIncidentStatus(incident, 'open')">重开</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canConfigure" @click="silenceSubject(incident.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -7705,7 +7724,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
 
       <template v-else-if="currentView === 'rules'">
         <section class="toolbar-panel">
-          <button class="command-button" type="button" :disabled="!canWrite" @click="newRule">新增规则</button>
+          <button class="command-button" type="button" :disabled="!canConfigure" @click="newRule">新增规则</button>
           <button type="button" @click="exportRuleFindings">导出命中</button>
           <div class="toolbar-summary">
             {{ rangeLabel }} / {{ detectionRules.length.toLocaleString() }} 条规则 / {{ ruleFindings.length.toLocaleString() }} 条命中
@@ -7806,7 +7825,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
             </label>
           </div>
           <div class="form-actions">
-            <button type="button" :disabled="savingRule || !ruleEditor.name.trim() || ruleEditor.threshold <= 0 || !canWrite" @click="saveRule">
+            <button type="button" :disabled="savingRule || !ruleEditor.name.trim() || ruleEditor.threshold <= 0 || !canConfigure" @click="saveRule">
               {{ savingRule ? '保存中...' : '保存规则' }}
             </button>
             <button type="button" :disabled="savingRule" @click="ruleEditor = null">取消</button>
@@ -7845,9 +7864,9 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ rule.enabled ? '启用' : '停用' }}</td>
                 <td>{{ rule.recommended_action }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" :disabled="!canWrite" @click="editRule(rule)">编辑</button>
-                  <button class="inline-button" type="button" :disabled="!canWrite" @click="toggleRule(rule)">{{ rule.enabled ? '停用' : '启用' }}</button>
-                  <button class="inline-button" type="button" :disabled="savingRule || !canWrite" @click="deleteRule(rule)">删除</button>
+                  <button class="inline-button" type="button" :disabled="!canConfigure" @click="editRule(rule)">编辑</button>
+                  <button class="inline-button" type="button" :disabled="!canConfigure" @click="toggleRule(rule)">{{ rule.enabled ? '停用' : '启用' }}</button>
+                  <button class="inline-button" type="button" :disabled="savingRule || !canConfigure" @click="deleteRule(rule)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -7911,7 +7930,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
             <span>链路利用率阈值</span>
             <input v-model.number="alertLinkUtilPercent" type="number" min="1" max="100" />
           </label>
-          <button type="button" :disabled="savingAlerts || !canWrite" @click="saveAlertConfig">
+          <button type="button" :disabled="savingAlerts || !canConfigure" @click="saveAlertConfig">
             {{ savingAlerts ? '保存中...' : '保存阈值' }}
           </button>
         </section>
@@ -7929,7 +7948,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <span>对象</span>
               <input v-model="whitelistSubject" placeholder="输入 IP、会话、采集源或风险线索对象" @keyup.enter="addWhitelistSubject" />
             </label>
-            <button type="button" :disabled="handlingAlert || !whitelistSubject.trim() || !canWrite" @click="addWhitelistSubject">加入白名单</button>
+            <button type="button" :disabled="handlingAlert || !whitelistSubject.trim() || !canConfigure" @click="addWhitelistSubject">加入白名单</button>
           </div>
           <div class="whitelist-list">
             <button
@@ -7937,7 +7956,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               :key="subject"
               type="button"
               class="silence-chip"
-              :disabled="handlingAlert || !canWrite"
+              :disabled="handlingAlert || !canConfigure"
               @click="removeSilence(subject)"
             >
               {{ subject }} ×
@@ -7967,9 +7986,9 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ alert.summary }}</td>
                 <td>{{ formatTime(alert.last_seen) }}</td>
                 <td class="action-cell">
-                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'ack' || !canWrite" @click="updateAlertStatus(alert, 'ack')">确认</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved' || !canWrite" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
-                  <button class="inline-button" type="button" :disabled="handlingAlert || !canWrite" @click="silenceSubject(alert.subject)">忽略</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'ack' || !canInvestigate" @click="updateAlertStatus(alert, 'ack')">确认</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || alert.status === 'resolved' || !canInvestigate" @click="updateAlertStatus(alert, 'resolved')">恢复</button>
+                  <button class="inline-button" type="button" :disabled="handlingAlert || !canConfigure" @click="silenceSubject(alert.subject)">忽略</button>
                 </td>
               </tr>
             </tbody>
@@ -7979,7 +7998,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
 
       <template v-else-if="currentView === 'reports'">
         <section class="toolbar-panel">
-          <button class="command-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportReportOverview">导出报表 CSV</button>
+          <button class="command-button" type="button" :disabled="!canExport || !systemSettings.data.export_enabled" @click="exportReportOverview">导出报表 CSV</button>
           <div class="toolbar-summary">
             {{ rangeLabel }} / 生成时间 {{ formatTime(reportOverview.generated_at) }} / {{ reportOverview.recommendations.length.toLocaleString() }} 条建议
           </div>
@@ -8273,7 +8292,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <div class="section-heading">
             <h2>操作审计明细</h2>
             <span>{{ auditEvents.length.toLocaleString() }} 条记录</span>
-            <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportAuditEvents">导出审计 CSV</button>
+            <button class="inline-button" type="button" :disabled="!canAudit || !systemSettings.data.export_enabled" @click="exportAuditEvents">导出审计 CSV</button>
           </div>
           <div v-if="auditEvents.length === 0" class="empty-state">暂无审计记录</div>
           <table v-else>
@@ -8376,7 +8395,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <div class="section-heading">
             <h2>配置快照历史</h2>
             <span>{{ configVersions.length.toLocaleString() }} 条记录</span>
-            <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportConfigVersions">导出配置版本 CSV</button>
+            <button class="inline-button" type="button" :disabled="!canAudit || !systemSettings.data.export_enabled" @click="exportConfigVersions">导出配置版本 CSV</button>
           </div>
           <div v-if="configVersions.length === 0" class="empty-state">暂无配置版本记录</div>
           <table v-else>
@@ -8415,7 +8434,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
                   <button
                     class="inline-button"
                     type="button"
-                    :disabled="!canWrite || restoringConfigVersion === version.id"
+                    :disabled="!canConfigure || restoringConfigVersion === version.id"
                     @click="restoreConfigVersion(version)"
                   >
                     {{ restoringConfigVersion === version.id ? '恢复中...' : '恢复' }}
@@ -8566,7 +8585,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
 
       <template v-else-if="currentView === 'settings'">
         <section class="toolbar-panel">
-          <button class="command-button" type="button" :disabled="savingSettings || !canWrite" @click="saveSettings">
+          <button class="command-button" type="button" :disabled="savingSettings || !canConfigure" @click="saveSettings">
             {{ savingSettings ? '保存中...' : '保存系统设置' }}
           </button>
           <button class="inline-button" type="button" @click="testAISettings">测试大模型</button>
@@ -8664,7 +8683,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <label><span>密码</span><input v-model="userForm.password" type="password" :placeholder="editingUsername ? '留空保持原密码' : '新用户必填'" /></label>
             </div>
             <div class="button-row">
-              <button class="command-button" type="button" :disabled="!canWrite || savingUser || !userForm.username.trim()" @click="saveSystemUser">{{ editingUsername ? '更新用户' : '创建用户' }}</button>
+              <button class="command-button" type="button" :disabled="!canConfigure || savingUser || !userForm.username.trim()" @click="saveSystemUser">{{ editingUsername ? '更新用户' : '创建用户' }}</button>
               <button class="inline-button" type="button" :disabled="savingUser" @click="resetUserForm">清空</button>
             </div>
           </section>
@@ -8711,8 +8730,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ formatTime(user.updated_at) }}</td>
                 <td>
                   <button class="inline-button" type="button" :disabled="savingUser" @click="editSystemUser(user)">编辑</button>
-                  <button class="inline-button" type="button" :disabled="!canWrite || savingUser" @click="toggleSystemUser(user)">{{ user.status === 'active' ? '禁用' : '启用' }}</button>
-                  <button class="inline-button danger" type="button" :disabled="!canWrite || savingUser" @click="deleteSystemUser(user.username)">删除</button>
+                  <button class="inline-button" type="button" :disabled="!canConfigure || savingUser" @click="toggleSystemUser(user)">{{ user.status === 'active' ? '禁用' : '启用' }}</button>
+                  <button class="inline-button danger" type="button" :disabled="!canConfigure || savingUser" @click="deleteSystemUser(user.username)">删除</button>
                 </td>
               </tr>
             </tbody>
@@ -8748,7 +8767,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <label><span>审计保留天数</span><input v-model.number="systemSettings.data.audit_retention_days" type="number" min="1" /></label>
               <label><span>配置版本上限</span><input v-model.number="systemSettings.data.config_version_limit" type="number" min="1" /></label>
             </div>
-            <label class="check-row"><input v-model="systemSettings.data.export_enabled" type="checkbox" /> 允许报表和配置导出</label>
+            <label class="check-row"><input v-model="systemSettings.data.export_enabled" type="checkbox" :disabled="!canConfigure" /> 允许报表和配置导出</label>
           </section>
           <section class="table-panel">
             <div class="panel-heading">
@@ -8777,7 +8796,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
               <span>导入后写入审计和配置版本</span>
             </div>
             <textarea v-model="settingsImportText" class="asset-note-field" rows="10" placeholder="粘贴系统设置 JSON"></textarea>
-            <button class="command-button" type="button" :disabled="!canWrite || !settingsImportText.trim()" @click="importSettings">导入系统设置</button>
+            <button class="command-button" type="button" :disabled="!canConfigure || !settingsImportText.trim()" @click="importSettings">导入系统设置</button>
           </section>
         </section>
       </template>
@@ -8816,7 +8835,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
             <span>会话保留量</span>
             <input v-model.number="selectedSessionTopN" type="number" min="20" max="5000" step="50" />
           </label>
-          <button type="button" :disabled="switching || !canWrite" @click="applyCaptureConfig">
+          <button type="button" :disabled="switching || !canConfigure" @click="applyCaptureConfig">
             {{ switching ? '切换中...' : '应用采集配置' }}
           </button>
         </section>

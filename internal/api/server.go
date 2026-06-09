@@ -2215,7 +2215,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authEnabled() {
-		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator", "role": authRoleAdmin, "can_write": true}})
+		writeJSON(w, map[string]any{"data": map[string]any{"enabled": false, "authenticated": true, "actor": "operator", "role": authRoleAdmin, "can_write": true, "can_export": true, "can_audit": true, "can_configure": true, "can_investigate": true}})
 		return
 	}
 	var body struct {
@@ -2271,9 +2271,11 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	if s.authEnabled() {
-		_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.logout", "console", "控制台退出："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
+		if s.store != nil {
+			_ = s.store.RecordAuditEvent(r.Context(), identity.Actor, "auth.logout", "console", "控制台退出："+identity.Actor, map[string]any{"actor": identity.Actor, "role": identity.Role}, auditClientIP(r))
+		}
 	}
-	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": "", "role": "", "can_write": false}})
+	writeJSON(w, map[string]any{"data": map[string]any{"enabled": s.authEnabled(), "authenticated": false, "actor": "", "role": "", "can_write": false, "can_export": false, "can_audit": false, "can_configure": false, "can_investigate": false}})
 }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {
@@ -2287,8 +2289,9 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if requestNeedsWriteAccess(r) && identity.Role != authRoleAdmin {
-			http.Error(w, "admin role required", http.StatusForbidden)
+		permission := requestPermission(r)
+		if !roleAllows(identity.Role, permission) {
+			http.Error(w, "permission denied: "+permission, http.StatusForbidden)
 			return
 		}
 		ctx := context.WithValue(r.Context(), actorContextKey, identity.Actor)
@@ -2390,15 +2393,65 @@ func (s *Server) recordUserLoginFailure(username string) {
 	}
 }
 
-func requestNeedsWriteAccess(r *http.Request) bool {
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return false
-	default:
-		if r.URL.Path == "/api/v1/ai/query" {
-			return false
+func requestPermission(r *http.Request) string {
+	path := r.URL.Path
+	method := r.Method
+	if method == http.MethodOptions || method == http.MethodHead {
+		return "read"
+	}
+	if strings.HasPrefix(path, "/api/v1/system/audit-events") || strings.HasPrefix(path, "/api/v1/system/config-version") || path == "/api/v1/system/config-versions" {
+		if method == http.MethodGet {
+			return "audit"
 		}
-		return strings.HasPrefix(r.URL.Path, "/api/v1/")
+		return "configure"
+	}
+	if strings.Contains(path, "/export") {
+		return "export"
+	}
+	if strings.HasPrefix(path, "/api/v1/system/settings") || path == "/api/v1/system/users" || path == "/api/v1/collectors/config" || path == "/api/v1/alerts/config" || path == "/api/v1/alerts/silences" || path == "/api/v1/security/rules" {
+		if method == http.MethodGet {
+			return "read"
+		}
+		return "configure"
+	}
+	if path == "/api/v1/security/incident-status" || path == "/api/v1/security/incident-notes" || path == "/api/v1/alerts/status" || strings.HasPrefix(path, "/api/v1/ai/approval-requests") {
+		if method == http.MethodGet {
+			return "read"
+		}
+		return "investigate"
+	}
+	if path == "/api/v1/assets/metadata" {
+		if method == http.MethodGet {
+			return "read"
+		}
+		return "investigate"
+	}
+	if method == http.MethodGet {
+		return "read"
+	}
+	if path == "/api/v1/ai/query" {
+		return "read"
+	}
+	return "write"
+}
+
+func roleAllows(role, permission string) bool {
+	role = normalizeAuthRole(role)
+	switch permission {
+	case "read":
+		return true
+	case "export":
+		return boolCapability(role, "can_export")
+	case "audit":
+		return boolCapability(role, "can_audit")
+	case "configure":
+		return boolCapability(role, "can_configure")
+	case "investigate":
+		return boolCapability(role, "can_investigate")
+	case "write":
+		return boolCapability(role, "can_write")
+	default:
+		return false
 	}
 }
 
