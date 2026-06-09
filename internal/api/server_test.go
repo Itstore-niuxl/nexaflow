@@ -573,6 +573,56 @@ func TestBuildAIGovernanceSuggestions(t *testing.T) {
 	}
 }
 
+func TestBuildAIIncidentActionSuggestions(t *testing.T) {
+	contextData := map[string]any{
+		"subject": "211.93.22.130 -> 10.2.0.12:8081",
+		"kind":    "external_session_burst",
+		"selector": map[string]any{
+			"src_ip":   "211.93.22.130",
+			"dst_ip":   "10.2.0.12",
+			"dst_port": "8081",
+		},
+		"sessions": []any{
+			map[string]any{"src_ip": "211.93.22.130", "dst_ip": "10.2.0.12", "dst_port": "8081", "protocol": "tcp", "service": "HTTP Alternate", "risk": "medium", "bytes": uint64(7340032), "packets": uint64(6800)},
+		},
+		"insights": []any{map[string]any{"severity": "warning", "summary": "公网会话突增"}},
+	}
+	investigation := buildAIIncidentInvestigation(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{"subject": "211.93.22.130 -> 10.2.0.12:8081", "kind": "external_session_burst", "severity": "warning", "bytes": uint64(7340032), "packets": uint64(6800)},
+		contextData,
+		nil,
+		nil,
+		nil,
+	)
+	result := buildAIIncidentActionSuggestions(
+		aiSummaryOptions{Enabled: true, Mode: "local_mock", Provider: "local_mock", Model: "nexaflow-local-summary"},
+		map[string]any{"subject": "211.93.22.130 -> 10.2.0.12:8081", "kind": "external_session_burst", "severity": "warning", "bytes": uint64(7340032), "packets": uint64(6800)},
+		contextData,
+		investigation,
+		15,
+		8,
+	)
+	suggestions := sliceValue(result["suggestions"])
+	if len(suggestions) < 2 {
+		t.Fatalf("expected incident action suggestions, got %#v", result)
+	}
+	hasRule := false
+	hasSilence := false
+	for _, item := range suggestions {
+		row := mapValue(item)
+		if mapValue(row["proposed_rule"])["metric"] != "" {
+			hasRule = true
+		}
+		if mapValue(row["proposed_silence"])["subject"] != "" {
+			hasSilence = true
+		}
+	}
+	if !hasRule || !hasSilence {
+		t.Fatalf("expected rule and silence proposals, got %#v", suggestions)
+	}
+}
+
 func TestBuildAIRuleEffectiveness(t *testing.T) {
 	rules := []model.DetectionRule{
 		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},

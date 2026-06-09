@@ -483,6 +483,7 @@ const selectedIncident = ref<SecurityIncident | null>(null);
 const incidentTimeline = ref<IncidentTimelineEntry[]>([]);
 const incidentAISummary = ref<AISummary>(emptyAISummary('incident'));
 const incidentInvestigation = ref<AIIncidentInvestigation>(emptyAIIncidentInvestigation());
+const incidentActions = ref<AIGovernanceSuggestions>(emptyAIGovernanceSuggestions());
 const incidentNoteText = ref('');
 const savingIncidentNote = ref(false);
 const reportOverview = ref<ReportOverview>(emptyReportOverview());
@@ -1882,6 +1883,41 @@ const refresh = async () => {
       },
       context: incidentContext.value,
       timeline: incidentTimeline.value,
+      generated_at: now
+    };
+    incidentActions.value = {
+      enabled: true,
+      mode: 'local_mock',
+      provider: 'local_mock',
+      model: 'nexaflow-local-summary',
+      minutes: 15,
+      summary: '基于事件调查包生成 2 条可审批处置草案，执行前必须由管理员确认。',
+      suggestions: [
+        {
+          id: 'incident-action-rule-demo',
+          type: 'rule',
+          severity: 'warning',
+          title: '将事件证据沉淀为检测规则',
+          target: '211.93.22.130 -> 10.2.0.12:8081',
+          summary: '当前事件已有可引用证据链，建议生成检测规则草案并进入审批。',
+          confidence: 0.86,
+          evidence: ['关联会话：211.93.22.130 -> 10.2.0.12:8081 / tcp，HTTP Alternate，流量 6.68 MB', '复发判断：同一对象已出现 1 条相似记录'],
+          actions: ['复核证据项是否指向真实风险。', '提交审批后由管理员保存为规则。'],
+          proposed_rule: { id: '', name: 'AI 证据规则：211.93.22.130 -> 10.2.0.12', category: '事件证据', metric: 'external_sessions', match: '211.93.22.130 -> 10.2.0.12:8081', operator: 'gte', threshold: 1, severity: 'warning', enabled: true, description: '由 AI 事件调查证据生成的规则草案。', recommended_action: '核对事件证据、关联会话和资产归属。', updated_at: now }
+        },
+        {
+          id: 'incident-action-silence-demo',
+          type: 'whitelist_review',
+          severity: 'warning',
+          title: '将稳定业务流量提交白名单复核',
+          target: '211.93.22.130 -> 10.2.0.12:8081',
+          summary: '如确认为稳定业务访问，可提交白名单/静默复核。',
+          confidence: 0.76,
+          evidence: ['公网来源：211.93.22.130', '内部资产：10.2.0.12', '服务端口：8081'],
+          actions: ['确认访问来源、目的资产、端口和业务负责人。', '仅对长期稳定且可解释的业务流量批准白名单。'],
+          proposed_silence: { subject: '211.93.22.130 -> 10.2.0.12:8081', reason: 'AI 事件证据建议白名单复核', scope: 'incident_evidence' }
+        }
+      ],
       generated_at: now
     };
     assetAISummary.value = {
@@ -3286,14 +3322,16 @@ const inspectIncident = async (incident: SecurityIncident) => {
 const loadIncidentAI = async (incident: SecurityIncident, requestSeq: number) => {
   loadingIncidentAI.value = true;
   try {
-    const [aiResult, investigationResult] = await Promise.all([
+    const [aiResult, investigationResult, actionResult] = await Promise.all([
       api.aiIncidentSummary(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12),
-      api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12)
+      api.aiIncidentInvestigation(incident.subject, incident.kind, incident.id, selectedMinutes.value, 12),
+      api.aiIncidentActions(incident.subject, incident.kind, incident.id, selectedMinutes.value, 8)
     ]);
     if (requestSeq !== incidentAIRequestSeq || selectedIncident.value?.id !== incident.id) return;
     incidentAISummary.value = aiResult.data;
     incidentInvestigation.value = investigationResult.data;
-    degraded.value = degraded.value || aiResult.degraded || investigationResult.degraded;
+    incidentActions.value = actionResult.data;
+    degraded.value = degraded.value || aiResult.degraded || investigationResult.degraded || actionResult.degraded;
   } catch {
     if (requestSeq === incidentAIRequestSeq) {
       degraded.value = true;
@@ -3312,6 +3350,7 @@ const loadIncidentContext = async (incident: SecurityIncident) => {
   incidentTimeline.value = [];
   incidentAISummary.value = emptyAISummary('incident', incident.subject);
   incidentInvestigation.value = emptyAIIncidentInvestigation();
+  incidentActions.value = emptyAIGovernanceSuggestions();
   incidentNoteText.value = '';
   loadingIncidentContext.value = true;
   void loadIncidentAI(incident, requestSeq);
@@ -6629,6 +6668,51 @@ const exportCSV = (filename: string, rows: string[][]) => {
             <ul v-if="incidentInvestigation.degraded_reasons.length" class="degraded-reason-list">
               <li v-for="reason in incidentInvestigation.degraded_reasons" :key="`incident-degraded-${reason}`">{{ reason }}</li>
             </ul>
+          </div>
+          <div class="ai-summary-card compact">
+            <div class="panel-heading">
+              <h2>处置草案</h2>
+              <span>{{ loadingIncidentAI ? '加载中...' : `${incidentActions.suggestions.length.toLocaleString()} 条 / 审批执行` }}</span>
+            </div>
+            <p class="ai-summary-lead">{{ incidentActions.summary }}</p>
+            <div v-if="incidentActions.suggestions.length === 0" class="empty-state">暂无可审批处置草案</div>
+            <div v-else class="governance-list compact">
+              <article v-for="item in incidentActions.suggestions" :key="`incident-action-${item.id}`" class="governance-card">
+                <div class="governance-card-header">
+                  <div>
+                    <strong>{{ item.title }}</strong>
+                    <span>{{ aiApprovalTypeText(item.proposed_rule ? 'rule' : item.proposed_silence ? 'silence' : item.type) }} / {{ item.target }}</span>
+                  </div>
+                  <b class="severity-pill" :class="item.severity">{{ aiConfidenceText(item.confidence) }}</b>
+                </div>
+                <p>{{ item.summary }}</p>
+                <div class="ai-summary-grid">
+                  <div>
+                    <span>证据</span>
+                    <ul>
+                      <li v-for="evidence in item.evidence.slice(0, 3)" :key="`incident-action-evidence-${item.id}-${evidence}`">{{ evidence }}</li>
+                    </ul>
+                  </div>
+                  <div>
+                    <span>执行前确认</span>
+                    <ul>
+                      <li v-for="action in item.actions.slice(0, 3)" :key="`incident-action-step-${item.id}-${action}`">{{ action }}</li>
+                    </ul>
+                  </div>
+                </div>
+                <div class="ai-workbench-actions">
+                  <button
+                    v-if="item.proposed_rule || item.proposed_silence"
+                    class="command-button"
+                    type="button"
+                    :disabled="!canWrite || aiApprovalBusy === item.id"
+                    @click="submitGovernanceApproval(item)"
+                  >
+                    {{ aiApprovalBusy === item.id ? '提交中...' : '提交审批' }}
+                  </button>
+                </div>
+              </article>
+            </div>
           </div>
           <div class="playbook-list">
             <article v-for="action in incidentContext.playbook_actions" :key="action.label">

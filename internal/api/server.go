@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ai/capture-diagnostics-summary", s.aiCaptureDiagnosticsSummary)
 	mux.HandleFunc("/api/v1/ai/query", s.aiQuery)
 	mux.HandleFunc("/api/v1/ai/incident-investigation", s.aiIncidentInvestigation)
+	mux.HandleFunc("/api/v1/ai/incident-actions", s.aiIncidentActions)
 	mux.HandleFunc("/api/v1/ai/governance-suggestions", s.aiGovernanceSuggestions)
 	mux.HandleFunc("/api/v1/ai/rule-effectiveness", s.aiRuleEffectiveness)
 	mux.HandleFunc("/api/v1/ai/asset-enrichment-suggestions", s.aiAssetEnrichmentSuggestions)
@@ -815,6 +816,69 @@ func (s *Server) aiGovernanceSuggestions(w http.ResponseWriter, r *http.Request)
 	runtime := config.LoadRuntime(s.config.RuntimePath, config.DefaultRuntime(s.config))
 	suggestions := buildAIGovernanceSuggestions(s.aiOptions(), report, runtime.Alerts, minutes, limit)
 	writeJSON(w, map[string]any{"data": suggestions, "degraded": reportErr != nil})
+}
+
+func (s *Server) aiIncidentActions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	minutes := queryMinutes(r)
+	limit := s.aiContextLimit(queryLimit(r, 8, 30))
+	subject := strings.TrimSpace(r.URL.Query().Get("subject"))
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+
+	var (
+		incidents   []map[string]any
+		contextData map[string]any
+		history     []map[string]any
+
+		incidentErr error
+		contextErr  error
+		historyErr  error
+	)
+	historyMinutes := min(max(minutes*2, 30), 60)
+	contextStarted := subject != "" && kind != ""
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		incidents, incidentErr = s.collectSecurityIncidents(r.Context(), minutes, max(limit, 20))
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		history, historyErr = s.collectSecurityIncidents(r.Context(), historyMinutes, max(limit, 20))
+	}()
+	if contextStarted {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			contextData, contextErr = s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+		}()
+	}
+	wg.Wait()
+
+	incident := findAIIncident(incidents, id, subject, kind)
+	if subject == "" {
+		subject = stringValue(incident["subject"])
+	}
+	if kind == "" {
+		kind = stringValue(incident["kind"])
+	}
+	if subject == "" {
+		http.Error(w, "subject or id is required", http.StatusBadRequest)
+		return
+	}
+	if !contextStarted {
+		contextData, contextErr = s.store.SecurityIncidentContext(r.Context(), subject, kind, minutes, limit)
+	}
+	similar := findSimilarAIIncidents(incident, history, limit)
+	degradedReasons := aiIncidentDegradedReasons(incidentErr, contextErr, contextData, nil, historyErr)
+	investigation := buildAIIncidentInvestigation(s.aiOptions(), incident, contextData, nil, similar, degradedReasons)
+	result := buildAIIncidentActionSuggestions(s.aiOptions(), incident, contextData, investigation, minutes, limit)
+	writeJSON(w, map[string]any{"data": result, "degraded": len(degradedReasons) > 0})
 }
 
 func (s *Server) aiRuleEffectiveness(w http.ResponseWriter, r *http.Request) {

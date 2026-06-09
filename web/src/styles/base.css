@@ -1553,6 +1553,10 @@ td {
   gap: 12px;
 }
 
+.governance-list.compact {
+  gap: 10px;
+}
+
 .governance-card {
   display: grid;
   gap: 12px;
@@ -1561,6 +1565,11 @@ td {
   border-left: 4px solid #2563eb;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.governance-list.compact .governance-card {
+  gap: 10px;
+  padding: 13px 14px;
 }
 
 .governance-card-header {

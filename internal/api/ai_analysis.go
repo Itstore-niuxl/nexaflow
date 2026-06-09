@@ -344,6 +344,160 @@ func buildAIGovernanceSuggestions(options aiSummaryOptions, report map[string]an
 	}
 }
 
+func buildAIIncidentActionSuggestions(options aiSummaryOptions, incident, contextData, investigation map[string]any, minutes, limit int) map[string]any {
+	subject := firstString(stringValue(investigation["subject"]), stringValue(contextData["subject"]), stringValue(incident["subject"]))
+	kind := firstString(stringValue(incident["kind"]), stringValue(contextData["kind"]), "incident")
+	severity := firstString(stringValue(incident["severity"]), maxSeverityFromRows(sliceValue(contextData["insights"])), "warning")
+	evidenceItems := sliceValue(investigation["evidence_items"])
+	evidence := incidentEvidenceTexts(evidenceItems, sliceValue(investigation["evidence_chain"]))
+	contextQuality := mapValue(investigation["context_quality"])
+	qualityScore := float64Value(contextQuality["score"])
+	if qualityScore == 0 {
+		qualityScore = 50
+	}
+	confidence := maxFloat(0.35, math.Min(0.95, qualityScore/100))
+	suggestions := []map[string]any{}
+
+	if subject != "" {
+		rule := proposedRule(
+			"AI 证据规则："+shortTarget(subject),
+			"事件证据",
+			ruleMetricForIncident(incidentWithFallback(incident, subject, kind)),
+			subject,
+			thresholdForIncident(incident),
+			severity,
+			"核对事件证据、关联会话和资产归属；确认有效后按规则持续监测。",
+		)
+		rule["description"] = "由 AI 事件调查证据生成的规则草案，保存前请复核匹配对象、阈值、观察窗口和误报风险。"
+		suggestions = append(suggestions, governanceSuggestion(
+			"rule",
+			riskSeverity(severity),
+			"将事件证据沉淀为检测规则",
+			subject,
+			"当前事件已有可引用证据链，建议生成检测规则草案并进入审批，避免同类风险重复人工发现。",
+			confidence,
+			evidence,
+			[]string{"复核证据项是否指向真实风险。", "确认阈值和匹配对象不会造成明显误报。", "提交审批后由管理员保存为规则。"},
+			rule,
+			nil,
+		))
+	}
+
+	if silenceTarget := incidentSilenceTarget(subject, contextData, evidenceItems); silenceTarget != "" {
+		suggestions = append(suggestions, governanceSuggestion(
+			"whitelist_review",
+			riskSeverity(severity),
+			"将稳定业务流量提交白名单复核",
+			silenceTarget,
+			"如果该事件经确认属于稳定、低风险、可接受的业务访问，可提交白名单/静默复核；批准后会写入审计和配置版本。",
+			maxFloat(0.3, confidence-0.1),
+			evidence,
+			[]string{"确认访问来源、目的资产、端口和业务负责人。", "确认不是扫描、异常外联或临时访问。", "仅对长期稳定且可解释的业务流量批准白名单。"},
+			nil,
+			map[string]any{"subject": silenceTarget, "reason": "AI 事件证据建议白名单复核", "scope": "incident_evidence"},
+		))
+	}
+
+	if len(suggestions) > limit {
+		suggestions = suggestions[:limit]
+	}
+	return map[string]any{
+		"enabled":         options.Enabled,
+		"mode":            options.Mode,
+		"provider":        options.Provider,
+		"model":           options.Model,
+		"subject":         subject,
+		"kind":            kind,
+		"minutes":         minutes,
+		"summary":         fmt.Sprintf("基于事件调查包生成 %d 条可审批处置草案，执行前必须由管理员确认。", len(suggestions)),
+		"context_quality": contextQuality,
+		"evidence_items":  evidenceItems,
+		"suggestions":     suggestions,
+		"generated_at":    time.Now().Unix(),
+	}
+}
+
+func incidentWithFallback(incident map[string]any, subject, kind string) map[string]any {
+	next := map[string]any{}
+	for key, value := range incident {
+		next[key] = value
+	}
+	if stringValue(next["subject"]) == "" {
+		next["subject"] = subject
+	}
+	if stringValue(next["kind"]) == "" {
+		next["kind"] = kind
+	}
+	return next
+}
+
+func incidentEvidenceTexts(evidenceItems, fallback []any) []string {
+	rows := []string{}
+	for _, itemAny := range evidenceItems {
+		item := mapValue(itemAny)
+		text := firstString(stringValue(item["title"]), stringValue(item["kind"]))
+		target := stringValue(item["target"])
+		summary := stringValue(item["summary"])
+		if target != "" {
+			text += "：" + target
+		}
+		if summary != "" {
+			text += "，" + summary
+		}
+		if text != "" {
+			rows = append(rows, text)
+		}
+		if len(rows) >= 5 {
+			return rows
+		}
+	}
+	for _, item := range fallback {
+		text := stringValue(item)
+		if text != "" {
+			rows = append(rows, text)
+		}
+		if len(rows) >= 5 {
+			break
+		}
+	}
+	if len(rows) == 0 {
+		rows = append(rows, "事件对象已进入 AI 调查包，但结构化证据不足，提交审批前需人工补充核对。")
+	}
+	return rows
+}
+
+func incidentSilenceTarget(subject string, contextData map[string]any, evidenceItems []any) string {
+	selector := mapValue(contextData["selector"])
+	src := stringValue(selector["src_ip"])
+	dst := stringValue(selector["dst_ip"])
+	port := stringValue(selector["dst_port"])
+	if src != "" && dst != "" {
+		target := src + " -> " + dst
+		if port != "" {
+			target += ":" + port
+		}
+		return target
+	}
+	for _, itemAny := range evidenceItems {
+		item := mapValue(itemAny)
+		if stringValue(item["kind"]) != "session" {
+			continue
+		}
+		detail := mapValue(item["detail"])
+		src = stringValue(detail["src_ip"])
+		dst = stringValue(detail["dst_ip"])
+		port = stringValue(detail["dst_port"])
+		if src != "" && dst != "" {
+			target := src + " -> " + dst
+			if port != "" {
+				target += ":" + port
+			}
+			return target
+		}
+	}
+	return subject
+}
+
 func aiIncidentContextQuality(contextData map[string]any, timeline, similarIncidents []map[string]any, degradedReasons []string) map[string]any {
 	sessions := len(sliceValue(contextData["sessions"]))
 	insights := len(sliceValue(contextData["insights"]))

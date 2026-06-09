@@ -1420,6 +1420,11 @@ export const api = {
       `/api/v1/ai/incident-investigation?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`
     );
   },
+  async aiIncidentActions(subject: string, kind = '', id = '', minutes = 15, limit = 8) {
+    return json<{ data: AIGovernanceSuggestions; degraded: boolean }>(
+      `/api/v1/ai/incident-actions?subject=${encodeURIComponent(subject)}&kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}&minutes=${minutes}&limit=${limit}`
+    );
+  },
   async aiGovernanceSuggestions(minutes = 15, limit = 8) {
     return json<{ data: AIGovernanceSuggestions; degraded: boolean }>(
       `/api/v1/ai/governance-suggestions?minutes=${minutes}&limit=${limit}`
