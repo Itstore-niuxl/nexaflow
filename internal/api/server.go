@@ -128,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/system/audit-events", s.auditEvents)
 	mux.HandleFunc("/api/v1/system/audit-events/export", s.auditEventsExport)
 	mux.HandleFunc("/api/v1/system/config-versions", s.configVersions)
+	mux.HandleFunc("/api/v1/system/config-versions/export", s.configVersionsExport)
 	mux.HandleFunc("/api/v1/system/config-version-diff", s.configVersionDiff)
 	return cors(s.authRequired(mux))
 }
@@ -1496,6 +1497,81 @@ func (s *Server) configVersions(w http.ResponseWriter, r *http.Request) {
 		"source":     version["summary"],
 	})
 	writeJSON(w, map[string]any{"data": restored, "version": version})
+}
+
+func (s *Server) configVersionsExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.loadSystemSettings().Data.ExportEnabled {
+		http.Error(w, "export is disabled", http.StatusForbidden)
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	limit := queryLimit(r, 200, 2000)
+	data, err := s.store.ConfigVersions(r.Context(), scope, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	body, err := configVersionsCSV(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	scopePart := "all"
+	if scope != "" {
+		scopePart = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '-'
+		}, scope)
+	}
+	filename := fmt.Sprintf("nexaflow-config-versions-%s-%s.csv", scopePart, time.Now().Format("20060102-150405"))
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := w.Write(body); err == nil {
+		s.audit(r, "config.version.export", "config_versions", "导出配置版本："+filename, map[string]any{
+			"format": "csv",
+			"scope":  scope,
+			"limit":  limit,
+			"rows":   len(data),
+			"bytes":  len(body),
+		})
+	}
+}
+
+func configVersionsCSV(versions []map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("\xEF\xBB\xBF")
+	writer := csv.NewWriter(&buf)
+	if err := writer.Write([]string{"time", "id", "actor", "scope", "target", "action", "summary", "client_ip", "config"}); err != nil {
+		return nil, err
+	}
+	for _, row := range versions {
+		configText := firstString(stringValue(row["config_text"]), stringValue(row["config"]))
+		if err := writer.Write([]string{
+			time.Unix(int64Value(row["ts"]), 0).Format(time.RFC3339),
+			stringValue(row["id"]),
+			stringValue(row["actor"]),
+			stringValue(row["scope"]),
+			stringValue(row["target"]),
+			stringValue(row["action"]),
+			stringValue(row["summary"]),
+			stringValue(row["client_ip"]),
+			configText,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func (s *Server) configVersionDiff(w http.ResponseWriter, r *http.Request) {

@@ -1588,6 +1588,13 @@ export const api = {
       `/api/v1/system/config-versions?scope=${encodeURIComponent(scope)}&limit=${limit}`
     );
   },
+  async downloadConfigVersions(scope = '', limit = 500) {
+    const response = await fetch(`/api/v1/system/config-versions/export?scope=${encodeURIComponent(scope)}&limit=${limit}&format=csv`);
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return response;
+  },
   async restoreConfigVersion(id: string) {
     const response = await fetch('/api/v1/system/config-versions', {
       method: 'POST',

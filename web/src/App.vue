@@ -4024,6 +4024,14 @@ const exportAuditEvents = async () => {
   downloadBlob(filename, blob);
 };
 
+const exportConfigVersions = async () => {
+  const response = await api.downloadConfigVersions('', 500);
+  const blob = await response.blob();
+  const disposition = response.headers.get('content-disposition') || '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'nexaflow-config-versions.csv';
+  downloadBlob(filename, blob);
+};
+
 const exportRuleFindings = () => {
   const rows = [
     ['规则', '对象', '级别', '指标', '当前值', '阈值', '流量字节', '包数', '摘要', '建议', '命中时间'],
@@ -7670,6 +7678,7 @@ const downloadBlob = (filename: string, blob: Blob) => {
           <div class="section-heading">
             <h2>配置快照历史</h2>
             <span>{{ configVersions.length.toLocaleString() }} 条记录</span>
+            <button class="inline-button" type="button" :disabled="!systemSettings.data.export_enabled" @click="exportConfigVersions">导出配置版本 CSV</button>
           </div>
           <div v-if="configVersions.length === 0" class="empty-state">暂无配置版本记录</div>
           <table v-else>

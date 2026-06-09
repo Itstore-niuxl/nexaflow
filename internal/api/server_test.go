@@ -677,6 +677,21 @@ func TestAuditEventsCSV(t *testing.T) {
 	}
 }
 
+func TestConfigVersionsCSV(t *testing.T) {
+	body, err := configVersionsCSV([]map[string]any{
+		{"ts": int64(1700000000), "id": "cfg-1", "actor": "admin", "scope": "system", "target": "settings", "action": "system.settings.update", "summary": "更新系统设置", "client_ip": "127.0.0.1", "config_text": `{"ai":{"mode":"local_mock"}}`},
+	})
+	if err != nil {
+		t.Fatalf("build config csv: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{"time,id,actor,scope,target,action,summary,client_ip,config", "cfg-1", "system.settings.update", `""mode"":""local_mock""`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected config CSV to contain %q, got %s", want, text)
+		}
+	}
+}
+
 func TestBuildAIRuleEffectiveness(t *testing.T) {
 	rules := []model.DetectionRule{
 		{ID: "rule-noisy", Name: "公网会话突增", Category: "公网访问", Metric: "external_sessions", Operator: "gte", Threshold: 20, Severity: "warning", Enabled: true},
