@@ -362,6 +362,10 @@ export interface CaptureQualitySource {
   freshness_seconds: number;
   drop_ratio: number;
   error_ratio: number;
+  health_score?: number;
+  diagnosis?: string;
+  issue_flags?: string[];
+  recommendation?: string;
   status: string;
 }
 

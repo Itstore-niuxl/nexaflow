@@ -633,6 +633,7 @@ FORMAT JSON`, s.database, minutes, limit)
 			summary["queue_pressure"] = floatValue(row["queue_pressure"])
 		}
 		row["status"] = captureQualityRowStatus(row)
+		annotateCaptureQualityRow(row)
 	}
 	summary["drop_ratio"] = ratioFloat(float64(uintValue(summary["rx_dropped"])+uintValue(summary["tx_dropped"])), float64(uintValue(summary["rx_packets"])+uintValue(summary["tx_packets"])))
 	summary["error_ratio"] = ratioFloat(float64(uintValue(summary["rx_errors"])+uintValue(summary["tx_errors"])), float64(uintValue(summary["rx_packets"])+uintValue(summary["tx_packets"])))
@@ -4945,6 +4946,52 @@ func captureQualityRowStatus(row map[string]any) string {
 		return "warning"
 	}
 	return "healthy"
+}
+
+func annotateCaptureQualityRow(row map[string]any) {
+	score := 100
+	flags := []string{}
+	recommendation := "当前接口采集稳定，继续观察窗口覆盖、丢包和队列压力。"
+	drops := uintValue(row["rx_dropped"]) + uintValue(row["tx_dropped"])
+	errors := uintValue(row["rx_errors"]) + uintValue(row["tx_errors"])
+	dropRatio := floatValue(row["drop_ratio"])
+	errorRatio := floatValue(row["error_ratio"])
+	queuePressure := floatValue(row["queue_pressure"])
+	freshness := int64Value(row["freshness_seconds"])
+
+	if errors > 0 || errorRatio > 0.001 {
+		score -= 45
+		flags = append(flags, "接口错误")
+		recommendation = "优先检查网卡链路、驱动、交换机端口和镜像口配置。"
+	}
+	if drops > 0 || dropRatio > 0.001 {
+		score -= 25
+		flags = append(flags, "接口丢包")
+		recommendation = "核对镜像口流量、采集权限、CPU 余量和 BPF 过滤范围。"
+	}
+	if queuePressure >= 0.90 {
+		score -= 35
+		flags = append(flags, "队列严重积压")
+		recommendation = "提高 collector 资源、扩大队列容量或收窄采集过滤条件。"
+	} else if queuePressure >= 0.70 {
+		score -= 20
+		flags = append(flags, "队列压力偏高")
+	}
+	if freshness > 12 {
+		score -= 20
+		flags = append(flags, "窗口延迟")
+		recommendation = "检查 collector 到 ClickHouse 写入链路、系统负载和时间同步。"
+	}
+	if score < 0 {
+		score = 0
+	}
+	if len(flags) == 0 {
+		flags = append(flags, "稳定")
+	}
+	row["health_score"] = score
+	row["diagnosis"] = strings.Join(flags, " / ")
+	row["issue_flags"] = flags
+	row["recommendation"] = recommendation
 }
 
 func captureQualityStatus(sources []map[string]any) string {

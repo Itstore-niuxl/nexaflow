@@ -146,6 +146,31 @@ func TestCaptureQualityRowStatus(t *testing.T) {
 	}
 }
 
+func TestAnnotateCaptureQualityRow(t *testing.T) {
+	row := map[string]any{
+		"rx_packets":        uint64(100000),
+		"tx_packets":        uint64(100000),
+		"rx_dropped":        uint64(12),
+		"tx_dropped":        uint64(0),
+		"rx_errors":         uint64(1),
+		"tx_errors":         uint64(0),
+		"drop_ratio":        0.002,
+		"error_ratio":       0.0015,
+		"queue_pressure":    0.92,
+		"freshness_seconds": int64(18),
+	}
+	annotateCaptureQualityRow(row)
+	if int64Value(row["health_score"]) >= 50 {
+		t.Fatalf("expected low health score, got %#v", row["health_score"])
+	}
+	if stringValue(row["diagnosis"]) == "" {
+		t.Fatalf("expected diagnosis, got %#v", row)
+	}
+	if stringValue(row["recommendation"]) == "" {
+		t.Fatalf("expected recommendation, got %#v", row)
+	}
+}
+
 func TestIncidentContextSelectorParsesEndpointPort(t *testing.T) {
 	selector := incidentContextSelector("169.254.0.4 -> 10.2.0.12:80", "custom_rule")
 

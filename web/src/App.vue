@@ -2696,6 +2696,14 @@ const captureQualityQueueItems = computed(() =>
     packets: row.packet_queue_len + row.window_queue_len
   }))
 );
+const priorityCaptureSources = computed(() =>
+  [...captureQuality.value.sources]
+    .sort((a, b) => {
+      const statusRank: Record<string, number> = { critical: 3, warning: 2, healthy: 1 };
+      return (statusRank[b.status] ?? 0) - (statusRank[a.status] ?? 0) || (a.health_score ?? 100) - (b.health_score ?? 100);
+    })
+    .slice(0, 6)
+);
 const captureDiagnosticItems = computed(() =>
   captureDiagnostics.value.layers.map((row) => ({
     key: `${dataQualityStatusText(row.status)} / ${row.name}`,
@@ -4217,7 +4225,7 @@ const exportDataQuality = () => {
       String(row.rx_dropped + row.tx_dropped),
       formatTime(row.first_window_ts),
       formatTime(row.latest_window_ts),
-      `packet ${row.packet_queue_len}/${row.packet_queue_capacity}; window ${row.window_queue_len}/${row.window_queue_capacity}`
+      `评分 ${row.health_score ?? 100}; ${row.diagnosis ?? ''}; ${row.recommendation ?? ''}; packet ${row.packet_queue_len}/${row.packet_queue_capacity}; window ${row.window_queue_len}/${row.window_queue_capacity}`
     ]),
     ...dataQuality.value.gaps.map((row) => [
       '断档',
@@ -5461,6 +5469,39 @@ const downloadBlob = (filename: string, blob: Blob) => {
             </div>
           </section>
         </section>
+        <section class="table-panel wide-key-table capture-priority-table">
+          <div class="panel-heading">
+            <h2>采集健康重点</h2>
+            <span>{{ priorityCaptureSources.length.toLocaleString() }} 个接口 / 按健康评分排序</span>
+          </div>
+          <div v-if="priorityCaptureSources.length === 0" class="empty-state">暂无采集健康重点</div>
+          <table v-else>
+            <thead>
+              <tr>
+                <th>采集源</th>
+                <th>网卡</th>
+                <th>状态</th>
+                <th>评分</th>
+                <th>诊断</th>
+                <th>队列</th>
+                <th>丢包/错误</th>
+                <th>建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in priorityCaptureSources" :key="`priority-capture-${row.source_id}-${row.iface}`">
+                <td>{{ row.source_id }}</td>
+                <td>{{ row.iface }}</td>
+                <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                <td>{{ row.health_score ?? 100 }}</td>
+                <td :title="row.diagnosis">{{ row.diagnosis ?? '-' }}</td>
+                <td>{{ ((row.queue_pressure || 0) * 100).toFixed(1) }}%</td>
+                <td>{{ (row.rx_dropped + row.tx_dropped).toLocaleString() }} / {{ (row.rx_errors + row.tx_errors).toLocaleString() }}</td>
+                <td :title="row.recommendation">{{ row.recommendation ?? '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
         <section class="table-panel wide-key-table capture-quality-table">
           <div class="panel-heading">
             <h2>接口采集质量</h2>
@@ -5472,6 +5513,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <th>采集源</th>
                 <th>网卡</th>
                 <th>状态</th>
+                <th>评分</th>
+                <th>诊断</th>
                 <th>窗口</th>
                 <th>RX 流量</th>
                 <th>RX 包</th>
@@ -5492,6 +5535,8 @@ const downloadBlob = (filename: string, blob: Blob) => {
                 <td>{{ row.source_id }}</td>
                 <td>{{ row.iface }}</td>
                 <td><span class="severity-pill" :class="row.status">{{ dataQualityStatusText(row.status) }}</span></td>
+                <td>{{ row.health_score ?? 100 }}</td>
+                <td :title="row.recommendation">{{ row.diagnosis ?? '-' }}</td>
                 <td>{{ row.windows.toLocaleString() }}</td>
                 <td>{{ formatBytes(row.rx_bytes) }}</td>
                 <td>{{ row.rx_packets.toLocaleString() }}</td>
