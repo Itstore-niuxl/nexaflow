@@ -91,3 +91,5 @@ Prometheus-style metrics are available at:
 ```text
 http://<ubuntu-ip>:8081/metrics
 ```
+
+Full Chinese deployment, installation, and operations documentation is available in [docs/deployment_operations_guide.md](docs/deployment_operations_guide.md).
